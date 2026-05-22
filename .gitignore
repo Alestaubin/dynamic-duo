@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+
+# Logs
+*.log
+logs/
+
+# Checkpoints / models
+*.pt
+*.pth
+
+# Environment
+.mlenv/
+env/
+.venv/
+
+# OS
+.DS_Store
+
+# SLURM outputs
+*.out
+*slurm/
+
+# sh files
+*.sh
+
+checkpoints
+evaluation/
+datasets
+data
+evaluation
+
+CLAUDE.md
+
+*.claude/
+
+*ray_tune/
+
+wandb/
