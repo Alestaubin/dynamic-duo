@@ -13,12 +13,12 @@ def configure_model(model, norm_type):
     # disable grad, to (re-)enable only what tent updates
     model.requires_grad_(False)
     # configure norm for tent updates: enable grad + force batch statisics
-    model(f"Configuring TENT with norm type: {norm_type}")
+    logger.info(f"Configuring TENT with norm type: {norm_type}")
 
     assert norm_type in {"BN", "LN", "GN"}, f"Unsupported norm type {norm_type}"
 
-    # 2. Enable grads for normalization layers 
-    for m in model.base_model.modules():
+    # 2. Enable grads for normalization layers
+    for m in model.modules():
         if isinstance(m, nn.BatchNorm2d) and norm_type == "BN" or \
             isinstance(m, nn.LayerNorm) and norm_type == "LN" or \
             isinstance(m, nn.GroupNorm) and norm_type == "GN":

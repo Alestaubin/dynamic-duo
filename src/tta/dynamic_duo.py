@@ -3,7 +3,10 @@ import torch.jit
 import torch.nn as nn
 import torch.optim as optim
 from src.tta.tent_utils import configure_model, collect_params, setup_optimizer, copy_model_and_optimizer, load_model_and_optimizer
+from src.utils.data import load_imagenetC
+from src.utils.metrics import get_metrics_dict
 import logging
+import torch.nn.functional as F
 
 
 logger = logging.getLogger(__name__)
@@ -38,8 +41,10 @@ class DynamicDuo(nn.Module):
     def __init__(
         self,
         large: nn.Module,
+        large_preprocess,
         large_optimizer: optim.Optimizer | None,
         small: nn.Module,
+        small_preprocess,
         small_optimizer: optim.Optimizer | None,
         joint_calibrator: nn.Module,
         mode: str = "both_duo",
@@ -48,7 +53,9 @@ class DynamicDuo(nn.Module):
         super().__init__()
         assert mode in _MODES, f"Invalid mode {mode}. Must be one of {_MODES}."
         self.large = large
+        self.large_preprocess = large_preprocess
         self.small = small
+        self.small_preprocess = small_preprocess
         self.joint_calibrator = joint_calibrator
         self.large_optimizer = large_optimizer
         self.small_optimizer = small_optimizer
@@ -72,8 +79,8 @@ class DynamicDuo(nn.Module):
         for _ in range(self.steps):
             outputs = forward_and_adapt(
                 x,
-                self.large, self.large_optimizer,
-                self.small, self.small_optimizer,
+                self.large, self.large_preprocess, self.large_optimizer,
+                self.small, self.small_preprocess, self.small_optimizer,
                 self.joint_calibrator,
                 self.mode,
             )
@@ -94,13 +101,20 @@ class DynamicDuo(nn.Module):
                 self.small_model_state, self.small_optimizer_state
             )
 
+def _preprocess_batch(imgs, preprocess, device):
+    return torch.stack([preprocess(img) for img in imgs]).to(device)
+
 @torch.enable_grad()
-def forward_and_adapt(x, large, large_optimizer, small, small_optimizer,
+def forward_and_adapt(x, large, large_preprocess, large_optimizer,
+                      small, small_preprocess, small_optimizer,
                       joint_calibrator, mode):
     adapt_large, adapt_small, signal = _MODE_SPEC[mode]
+    device = next(large.parameters()).device
+    x_large = _preprocess_batch(x, large_preprocess, device)
+    x_small = _preprocess_batch(x, small_preprocess, device)
 
-    z_large = large(x)
-    z_small = small(x)
+    z_large = large(x_large)
+    z_small = small(x_small)
 
     if signal == "duo":
         zl = z_large if adapt_large else z_large.detach()
@@ -127,9 +141,9 @@ def forward_and_adapt(x, large, large_optimizer, small, small_optimizer,
             small_optimizer.step(); small_optimizer.zero_grad()
 
     with torch.no_grad():
-        return joint_calibrator(large(x), small(x))
+        return joint_calibrator(large(x_large), small(x_small))
     
-def setup_duo(large, small, joint_calibrator, mode, cfg, steps):
+def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, mode, cfg, steps):
     """Configure a DynamicDuo for TENT adaptation.
 
     This is a helper function to set up the DynamicDuo with the appropriate
@@ -144,17 +158,18 @@ def setup_duo(large, small, joint_calibrator, mode, cfg, steps):
     if adapt_large:
         large = configure_model(large, cfg["LARGE"]["NORM"])
         large_optimizer = setup_optimizer(
-            collect_params(large, cfg["LARGE"]["NORM"])[0], cfg)
+            collect_params(large, cfg["LARGE"]["NORM"])[0], cfg["LARGE"])
     if adapt_small:
-        logger.info(f"Configuring small model for TENT adaptation with norm type: {cfg['SMALL']['NORM']}")
         small = configure_model(small, cfg["SMALL"]["NORM"])
         small_optimizer = setup_optimizer(
-            collect_params(small, cfg["SMALL"]["NORM"])[0], cfg)
+            collect_params(small, cfg["SMALL"]["NORM"])[0], cfg["SMALL"])
     
     dynamic_duo = DynamicDuo(
         large=large,
+        large_preprocess=large_preprocess,
         large_optimizer=large_optimizer,
         small=small,
+        small_preprocess=small_preprocess,
         small_optimizer=small_optimizer,
         joint_calibrator=joint_calibrator,
         mode=mode,
@@ -162,23 +177,37 @@ def setup_duo(large, small, joint_calibrator, mode, cfg, steps):
     )
     return dynamic_duo
 
-def evaluate_dynamic_duo(cfg, duo):
-    for severity in cfg["CORRUPTION"]["SEVERITY"]:
-        for corruption_type in cfg["CORRUPTION"]["TYPE"]:
-            # reset adaptation for each combination of corruption x severity
-            # note: for evaluation protocol, but not necessarily needed
+def run(duo, data_loader):
+    """
+    Run a forward pass through the DynamicDuo on the given data loader.
+    
+    """
+    all_outputs = []
+    all_labels = []
+    for imgs, labels in data_loader:
+        outputs = duo(imgs)
+        all_outputs.append(outputs.cpu())
+        all_labels.append(labels)
+
+    logits = torch.cat(all_outputs)
+    probs = F.softmax(logits, dim=1)
+
+    return probs, torch.cat(all_labels)
+
+def evaluate_dynamic_duo(duo, cfg):
+    for severity in cfg["CALIBRATOR"]["SEVERITIES"]:
+        for corruption_type in cfg["CALIBRATOR"]["CORRUPTIONS"]:
             try:
                 duo.reset()
                 logger.info("resetting model")
             except:
                 logger.warning("not resetting model")
-            x_test, y_test = load_imagenetC(cfg["CORRUPTION"]["NUM_EX"],
-                                           severity, cfg["DATA_DIR"], False,
-                                           [corruption_type])
-            x_test, y_test = x_test.cuda(), y_test.cuda()
-            acc = accuracy(duo, x_test, y_test, cfg["TEST"]["BATCH_SIZE"])
-            err = 1. - acc
-            logger.info(f"error % [{corruption_type}{severity}]: {err:.2%}")
+            loader = load_imagenetC(cfg["TEST_DIR"], severity, [corruption_type],
+                                    device=next(duo.parameters()).device,
+                                    batch_size=cfg["LARGE"]["BS"])
+            probs, labels = run(duo, loader)
+            metrics = get_metrics_dict(probs, labels)
+            logger.info(f"Results for {corruption_type} severity {severity}: {metrics}")
 
 
 def tune_duo(duo, data_loader):

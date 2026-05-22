@@ -4,17 +4,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from src.calibration.base import BaseJointCalibrator
+from src.calibrators.base import BaseJointCalibrator
 
 
 class JointFixedTS(BaseJointCalibrator):
     """
     Double model naive calibrator as seen in the Asymmetric Duos paper. Finds the two temperatures T_s, T_l that minimize the NLL on the validation set. 
     """
-    def __init__(self):
+    def __init__(self, Tl=None, Ts=None):
         super().__init__()
-        self.Tl = nn.Parameter(torch.ones(1))
-        self.Ts = nn.Parameter(torch.ones(1))
+        self.Tl = nn.Parameter(torch.ones(1)) if Tl is None else nn.Parameter(torch.tensor([Tl]))
+        self.Ts = nn.Parameter(torch.ones(1)) if Ts is None else nn.Parameter(torch.tensor([Ts]))
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def tune(self, logits_l, logits_s, labels, grid_n: int = 50_000):
@@ -62,6 +62,9 @@ class JointFixedTS(BaseJointCalibrator):
 
     def calibrate_with_grad(self, logits_l, logits_s):
         return self.calibrate(logits_l, logits_s)
+
+    def forward(self, logits_l, logits_s):
+        return self.calibrate_with_grad(logits_l, logits_s)
         
     @property
     def model(self): return _NoOpModule()
