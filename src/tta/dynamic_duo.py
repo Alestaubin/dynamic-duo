@@ -2,14 +2,18 @@ import torch
 import torch.jit
 import torch.nn as nn
 import torch.optim as optim
-from src.tta.tent_utils import configure_model, collect_params, setup_optimizer, copy_model_and_optimizer, load_model_and_optimizer
+from src.tta.tent import copy_model_and_optimizer, load_model_and_optimizer, setup_tent, softmax_entropy
 from src.utils.data import load_imagenetC
 from src.utils.metrics import get_metrics_dict
+from src.utils.model import _preprocess_batch
 import logging
 import torch.nn.functional as F
+from tqdm import tqdm
+import wandb
 
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 _MODES = {"both_duo", "large_duo", "small_duo",
           "large_indep", "small_indep", "both_indep"}
@@ -23,12 +27,6 @@ _MODE_SPEC = {
     "small_indep":  (False, True,  "indep"),
     "both_indep":   (True,  True,  "indep"),
 }
-
-@torch.jit.script
-def softmax_entropy(x: torch.Tensor) -> torch.Tensor:
-    """Entropy of softmax distribution from logits."""
-    return -(x.softmax(1) * x.log_softmax(1)).sum(1)
-
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -63,7 +61,7 @@ class DynamicDuo(nn.Module):
         self.steps = steps
 
         self.adapt_large, self.adapt_small, _ = _MODE_SPEC[mode]
-
+        logger.info(f"Initialized DynamicDuo | mode={mode} steps={steps} adapt_large={self.adapt_large} adapt_small={self.adapt_small}")
         if self.adapt_large:
             assert large_optimizer is not None, f"{mode} needs a large optimizer"
             self.large_model_state, self.large_optimizer_state = \
@@ -73,7 +71,6 @@ class DynamicDuo(nn.Module):
             assert small_optimizer is not None, f"{mode} needs a small optimizer"
             self.small_model_state, self.small_optimizer_state = \
                 copy_model_and_optimizer(self.small, self.small_optimizer)
-
 
     def forward(self, x):
         for _ in range(self.steps):
@@ -90,19 +87,18 @@ class DynamicDuo(nn.Module):
         """Reset the model and optimizer states to before adaptation."""
 
         if self.adapt_large:
+            logger.info("Resetting large model to pre-adaptation state")
             load_model_and_optimizer(
                 self.large, self.large_optimizer,
                 self.large_model_state, self.large_optimizer_state
             )
 
         if self.adapt_small:
+            logger.info("Resetting small model to pre-adaptation state")
             load_model_and_optimizer(
                 self.small, self.small_optimizer,
                 self.small_model_state, self.small_optimizer_state
             )
-
-def _preprocess_batch(imgs, preprocess, device):
-    return torch.stack([preprocess(img) for img in imgs]).to(device)
 
 @torch.enable_grad()
 def forward_and_adapt(x, large, large_preprocess, large_optimizer,
@@ -121,6 +117,7 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
         zs = z_small if adapt_small else z_small.detach()
         z_bar = joint_calibrator(zl, zs)
         loss = softmax_entropy(z_bar).mean(0)
+        logger.info(f"duo loss={loss.item():.4f}")
 
         loss.backward()
         for opt, do in ((large_optimizer, adapt_large),
@@ -134,10 +131,14 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
 
     else:  # indep
         if adapt_large:
-            softmax_entropy(z_large).mean(0).backward()
+            large_loss = softmax_entropy(z_large).mean(0)
+            logger.info(f"large indep loss={large_loss.item():.4f}")
+            large_loss.backward()
             large_optimizer.step(); large_optimizer.zero_grad()
         if adapt_small:
-            softmax_entropy(z_small).mean(0).backward()
+            small_loss = softmax_entropy(z_small).mean(0)
+            logger.info(f"small indep loss={small_loss.item():.4f}")
+            small_loss.backward()
             small_optimizer.step(); small_optimizer.zero_grad()
 
     with torch.no_grad():
@@ -152,18 +153,17 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
     """
     assert mode in _MODES, f"Invalid mode {mode}. Must be one of {_MODES}."
     adapt_large, adapt_small, signal = _MODE_SPEC[mode]
+    logger.info(f"Setting up DynamicDuo | mode={mode} steps={steps} adapt_large={adapt_large} adapt_small={adapt_small}")
 
     large_optimizer, small_optimizer = None, None
 
     if adapt_large:
-        large = configure_model(large, cfg["LARGE"]["NORM"])
-        large_optimizer = setup_optimizer(
-            collect_params(large, cfg["LARGE"]["NORM"])[0], cfg["LARGE"])
+        logger.info(f"Configuring large model with norm={cfg['LARGE']['NORM']}")
+        large, large_optimizer = setup_tent(large, cfg["LARGE"]["NORM"], cfg, opt_cfg=cfg["LARGE"]["OPTIM"])
     if adapt_small:
-        small = configure_model(small, cfg["SMALL"]["NORM"])
-        small_optimizer = setup_optimizer(
-            collect_params(small, cfg["SMALL"]["NORM"])[0], cfg["SMALL"])
-    
+        logger.info(f"Configuring small model with norm={cfg['SMALL']['NORM']}")
+        small, small_optimizer = setup_tent(small, cfg["SMALL"]["NORM"], cfg, opt_cfg=cfg["SMALL"]["OPTIM"])
+
     dynamic_duo = DynamicDuo(
         large=large,
         large_preprocess=large_preprocess,
@@ -177,26 +177,68 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
     )
     return dynamic_duo
 
-def run(duo, data_loader):
+def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
     """
     Run a forward pass through the DynamicDuo on the given data loader.
-    
+
     """
     all_outputs = []
     all_labels = []
-    for imgs, labels in data_loader:
+    for imgs, labels in tqdm(data_loader, desc="run"):
         outputs = duo(imgs)
         all_outputs.append(outputs.cpu())
-        all_labels.append(labels)
+        all_labels.append(labels.cpu())
+
+        if wandb_run is not None:
+            with torch.no_grad():
+                batch_probs = F.softmax(outputs.detach().cpu(), dim=1)
+                batch_labels_cpu = labels.cpu()
+                batch_acc = (batch_probs.argmax(1) == batch_labels_cpu).float().mean().item()
+                batch_nll = F.nll_loss(torch.log(batch_probs.clamp(min=1e-8)), batch_labels_cpu).item()
+            wandb_run.log({
+                f"{wandb_prefix}batch_acc": batch_acc,
+                f"{wandb_prefix}batch_nll": batch_nll,
+            })
 
     logits = torch.cat(all_outputs)
     probs = F.softmax(logits, dim=1)
 
     return probs, torch.cat(all_labels)
 
-def evaluate_dynamic_duo(duo, cfg):
-    for severity in cfg["CALIBRATOR"]["SEVERITIES"]:
-        for corruption_type in cfg["CALIBRATOR"]["CORRUPTIONS"]:
+def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos"):
+    adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
+    run_name = (
+        f"{duo.mode} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | "
+        f"Tl={cfg['CALIBRATOR']['TL']} Ts={cfg['CALIBRATOR']['TS']} | steps={duo.steps}"
+    )
+    wandb_run = wandb.init(
+        project=wandb_project,
+        name=run_name,
+        config={
+            "mode": duo.mode,
+            "adapt_large": adapt_large,
+            "adapt_small": adapt_small,
+            "signal": signal,
+            "steps": duo.steps,
+            "large/name": cfg["LARGE"]["NAME"],
+            "large/norm": cfg["LARGE"]["NORM"],
+            "large/lr": cfg["LARGE"]["OPTIM"]["LR"],
+            "large/optim": cfg["LARGE"]["OPTIM"]["METHOD"],
+            "small/name": cfg["SMALL"]["NAME"],
+            "small/norm": cfg["SMALL"]["NORM"],
+            "small/lr": cfg["SMALL"]["OPTIM"]["LR"],
+            "small/optim": cfg["SMALL"]["OPTIM"]["METHOD"],
+            "calibrator/Tl": cfg["CALIBRATOR"]["TL"],
+            "calibrator/Ts": cfg["CALIBRATOR"]["TS"],
+            "eval/corruptions": cfg["EVAL"]["CORRUPTIONS"],
+            "eval/severities": cfg["EVAL"]["SEVERITIES"],
+        },
+    )
+
+    results_rows = []
+    for severity in cfg["EVAL"]["SEVERITIES"]:
+        for corruption_type in cfg["EVAL"]["CORRUPTIONS"]:
+            logger.info(f"Evaluating corruption {corruption_type} severity {severity}")
             try:
                 duo.reset()
                 logger.info("resetting model")
@@ -205,9 +247,22 @@ def evaluate_dynamic_duo(duo, cfg):
             loader = load_imagenetC(cfg["TEST_DIR"], severity, [corruption_type],
                                     device=next(duo.parameters()).device,
                                     batch_size=cfg["LARGE"]["BS"])
-            probs, labels = run(duo, loader)
+            prefix = f"{corruption_type}/s{severity}/"
+            probs, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
             metrics = get_metrics_dict(probs, labels)
             logger.info(f"Results for {corruption_type} severity {severity}: {metrics}")
+
+            wandb_run.log({f"{prefix}{k}": v for k, v in metrics.items()})
+            results_rows.append({"corruption": corruption_type, "severity": severity, **metrics})
+
+    if results_rows:
+        cols = list(results_rows[0].keys())
+        table = wandb.Table(columns=cols)
+        for row in results_rows:
+            table.add_data(*[row[c] for c in cols])
+        wandb_run.log({"summary/results": table})
+
+    wandb_run.finish()
 
 
 def tune_duo(duo, data_loader):

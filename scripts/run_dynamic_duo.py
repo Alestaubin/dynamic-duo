@@ -27,9 +27,7 @@ if __name__ == "__main__":
     small_model, small_preprocess = get_model(config["SMALL"]["NAME"])
     large_model = large_model.to(device)
     small_model = small_model.to(device)
-
     calibrator = JointFixedTS(Tl=config["CALIBRATOR"]["TL"], Ts=config["CALIBRATOR"]["TS"])
-    
     # Set up Dynamic Duo
     duo = setup_duo(
         large=large_model, 
@@ -41,6 +39,5 @@ if __name__ == "__main__":
         cfg = config,
         steps=args.steps,
     )
-
     # Evaluate Dynamic Duo on ImageNet-C
     evaluate_dynamic_duo(duo, config)

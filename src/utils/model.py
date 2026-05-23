@@ -146,3 +146,7 @@ def load_resnext50():
     model = models.resnext50_32x4d(weights=weights)
     model.eval()
     return model, preprocess
+
+import torch
+def _preprocess_batch(imgs, preprocess, device):
+    return torch.stack([preprocess(img) for img in imgs]).to(device)
