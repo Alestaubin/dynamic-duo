@@ -22,37 +22,37 @@ LARGE:
   WORKERS: 8
   NORM: LN
   OPTIM:    
-    # METHOD: "Adam"
-    # STEPS: 1       # Tune this per model
-    # LR: 3e-5     # Tune this per model
-    # BETA: 0.9
-    # WD: 0.0
-    METHOD: "SGD"
+    METHOD: "Adam"
     STEPS: 1       # Tune this per model
-    LR: 0.001     # Tune this per model
-    MOMENTUM: 0.0
+    LR: 0.0001     # Tune this per model
+    BETA: 0.9
     WD: 0.0
-    NESTEROV: false
-    DAMPENING: 0.0
+    # METHOD: "SGD"
+    # STEPS: 1       # Tune this per model
+    # LR: 0.001     # Tune this per model
+    # MOMENTUM: 0.0
+    # WD: 0.0
+    # NESTEROV: false
+    # DAMPENING: 0.0
 
 SMALL: 
   NAME: resnet50
-  BS: 128
+  BS: 64
   WORKERS: 8
   NORM: BN
   OPTIM:    
-    # METHOD: "Adam"
-    # STEPS: 1       # Tune this per model
-    # LR: 3e-5     # Tune this per model
-    # BETA: 0.9
-    # WD: 0.0
-    METHOD: "SGD"
+    METHOD: "Adam"
     STEPS: 1       # Tune this per model
-    LR: 0.001     # Tune this per model
-    MOMENTUM: 0.0
+    LR: 0.00025     # Tune this per model
+    BETA: 0.9
     WD: 0.0
-    NESTEROV: false
-    DAMPENING: 0.0
+    # METHOD: "SGD"
+    # STEPS: 1       # Tune this per model
+    # LR: 0.00025     # Tune this per model
+    # MOMENTUM: 0.9
+    # WD: 0.0
+    # NESTEROV: false
+    # DAMPENING: 0.0
 
 
 EVAL:
@@ -62,21 +62,21 @@ EVAL:
     # - 'saturate'
     # - 'spatter'
     # - 'speckle_noise'
-    - 'brightness'
+    # - 'brightness'
     - 'contrast'
     - 'defocus_blur'
-    # - 'elastic_transform'
-    # - 'fog'
-    # - 'frost'
-    # - 'gaussian_noise'
-    # - 'glass_blur'
+    - 'elastic_transform'
+    - 'fog'
+    - 'frost'
+    - 'gaussian_noise'
+    - 'glass_blur'
     - 'impulse_noise'
-    # - 'jpeg_compression'
-    # - 'motion_blur'
-    # - 'pixelate'
-    # - 'shot_noise'
-    # - 'snow'
-    # - 'zoom_blur'
+    - 'jpeg_compression'
+    - 'motion_blur'
+    - 'pixelate'
+    - 'shot_noise'
+    - 'snow'
+    - 'zoom_blur'
   SEVERITIES:
     # - 1
     # - 2

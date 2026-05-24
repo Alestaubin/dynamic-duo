@@ -9,22 +9,30 @@ def _pil_collate_fn(batch):
     return list(images), torch.tensor(labels)
 
 
-def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=256, num_workers=4):
+def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=256, num_workers=4, fraction=1.0, seed=None):
     """
     Load the ImageNet-C dataset for a given corruption type and severity level.
     Returns a DataLoader of (list[PIL.Image], LongTensor) batches — no preprocessing
     applied so each model can apply its own transform in forward.
+
+    fraction: proportion of each subset to use (0 < fraction <= 1.0).
     """
     if isinstance(severities, int):
         severities = [severities]
     if isinstance(corruption_types, str):
         corruption_types = [corruption_types]
 
-    subsets = [
-        datasets.ImageFolder(os.path.join(data_dir, corruption, str(severity)))
-        for corruption in corruption_types
-        for severity in severities
-    ]
+    subsets = []
+    for corruption in corruption_types:
+        for severity in severities:
+            ds = datasets.ImageFolder(os.path.join(data_dir, corruption, str(severity)))
+            if fraction < 1.0:
+                n = max(1, int(len(ds) * fraction))
+                generator = torch.Generator().manual_seed(seed) if seed is not None else None
+                indices = torch.randperm(len(ds), generator=generator)[:n].tolist()
+                ds = torch.utils.data.Subset(ds, indices)
+            subsets.append(ds)
+
     combined = torch.utils.data.ConcatDataset(subsets)
     pin_memory = device.type == "cuda"
     return torch.utils.data.DataLoader(

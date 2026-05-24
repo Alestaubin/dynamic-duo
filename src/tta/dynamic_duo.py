@@ -14,6 +14,8 @@ import wandb
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logging.getLogger("src.tta.dynamic_duo").setLevel(logging.DEBUG)
+
 
 _MODES = {"both_duo", "large_duo", "small_duo",
           "large_indep", "small_indep", "both_indep"}
@@ -62,6 +64,7 @@ class DynamicDuo(nn.Module):
 
         self.adapt_large, self.adapt_small, _ = _MODE_SPEC[mode]
         logger.info(f"Initialized DynamicDuo | mode={mode} steps={steps} adapt_large={self.adapt_large} adapt_small={self.adapt_small}")
+        self._reset_diagnostics()
         if self.adapt_large:
             assert large_optimizer is not None, f"{mode} needs a large optimizer"
             self.large_model_state, self.large_optimizer_state = \
@@ -72,20 +75,40 @@ class DynamicDuo(nn.Module):
             self.small_model_state, self.small_optimizer_state = \
                 copy_model_and_optimizer(self.small, self.small_optimizer)
 
-    def forward(self, x):
+    def forward(self, x, labels=None):
         for _ in range(self.steps):
-            outputs = forward_and_adapt(
+            outputs, z_large, z_small = forward_and_adapt(
                 x,
                 self.large, self.large_preprocess, self.large_optimizer,
                 self.small, self.small_preprocess, self.small_optimizer,
                 self.joint_calibrator,
                 self.mode,
             )
+        if logger.isEnabledFor(logging.DEBUG) and labels is not None:
+            self._log_batch_diagnostics(z_large, z_small, outputs, labels)
         return outputs
-    
+
+    def _reset_diagnostics(self):
+        self._diag = {k: {"n": 0, "acc_sum": 0.0, "nll_sum": 0.0}
+                      for k in ("large", "small", "duo")}
+
+    def _log_batch_diagnostics(self, z_large, z_small, z_duo, labels):
+        labels_cpu = labels.cpu()
+        for name, logits in (("large", z_large), ("small", z_small), ("duo", z_duo)):
+            probs = F.softmax(logits.detach().cpu(), dim=1)
+            acc = (probs.argmax(1) == labels_cpu).float().mean().item()
+            nll = F.nll_loss(torch.log(probs.clamp(min=1e-8)), labels_cpu).item()
+            d = self._diag[name]
+            d["n"] += 1
+            d["acc_sum"] += acc
+            d["nll_sum"] += nll
+            avg_acc = d["acc_sum"] / d["n"]
+            avg_nll = d["nll_sum"] / d["n"]
+            logger.debug(f"  {name:5s}: acc={acc:.4f} (avg={avg_acc:.4f})  nll={nll:.4f} (avg={avg_nll:.4f})")
+
     def reset(self):
         """Reset the model and optimizer states to before adaptation."""
-
+        self._reset_diagnostics()
         if self.adapt_large:
             logger.info("Resetting large model to pre-adaptation state")
             load_model_and_optimizer(
@@ -117,7 +140,7 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
         zs = z_small if adapt_small else z_small.detach()
         z_bar = joint_calibrator(zl, zs)
         loss = softmax_entropy(z_bar).mean(0)
-        logger.info(f"duo loss={loss.item():.4f}")
+        logger.debug(f"duo loss={loss.item():.4f}")
 
         loss.backward()
         for opt, do in ((large_optimizer, adapt_large),
@@ -132,17 +155,19 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
     else:  # indep
         if adapt_large:
             large_loss = softmax_entropy(z_large).mean(0)
-            logger.info(f"large indep loss={large_loss.item():.4f}")
+            logger.debug(f"large indep loss={large_loss.item():.4f}")
             large_loss.backward()
             large_optimizer.step(); large_optimizer.zero_grad()
         if adapt_small:
             small_loss = softmax_entropy(z_small).mean(0)
-            logger.info(f"small indep loss={small_loss.item():.4f}")
+            logger.debug(f"small indep loss={small_loss.item():.4f}")
             small_loss.backward()
             small_optimizer.step(); small_optimizer.zero_grad()
 
     with torch.no_grad():
-        return joint_calibrator(large(x_large), small(x_small))
+        z_large_final = large(x_large)
+        z_small_final = small(x_small)
+        return joint_calibrator(z_large_final, z_small_final), z_large_final, z_small_final
     
 def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, mode, cfg, steps):
     """Configure a DynamicDuo for TENT adaptation.
@@ -185,7 +210,7 @@ def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
     all_outputs = []
     all_labels = []
     for imgs, labels in tqdm(data_loader, desc="run"):
-        outputs = duo(imgs)
+        outputs = duo(imgs, labels=labels)
         all_outputs.append(outputs.cpu())
         all_labels.append(labels.cpu())
 
@@ -195,6 +220,7 @@ def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
                 batch_labels_cpu = labels.cpu()
                 batch_acc = (batch_probs.argmax(1) == batch_labels_cpu).float().mean().item()
                 batch_nll = F.nll_loss(torch.log(batch_probs.clamp(min=1e-8)), batch_labels_cpu).item()
+                logger.info(f"{wandb_prefix} batch_acc={batch_acc:.4f} batch_nll={batch_nll:.4f}")
             wandb_run.log({
                 f"{wandb_prefix}batch_acc": batch_acc,
                 f"{wandb_prefix}batch_nll": batch_nll,
@@ -205,7 +231,7 @@ def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
 
     return probs, torch.cat(all_labels)
 
-def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos"):
+def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", fraction=1.0, seed=None):
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     run_name = (
         f"{duo.mode} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | "
@@ -246,7 +272,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos"):
                 logger.warning("not resetting model")
             loader = load_imagenetC(cfg["TEST_DIR"], severity, [corruption_type],
                                     device=next(duo.parameters()).device,
-                                    batch_size=cfg["LARGE"]["BS"])
+                                    batch_size=cfg["LARGE"]["BS"], fraction=fraction, seed=seed)
             prefix = f"{corruption_type}/s{severity}/"
             probs, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
             metrics = get_metrics_dict(probs, labels)

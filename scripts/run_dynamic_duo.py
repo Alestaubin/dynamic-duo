@@ -9,7 +9,9 @@ import torch
 python scripts/run_dynamic_duo.py \
     --config cfgs/dynamic_duo_config.yaml \
     --mode both_duo \
-    --steps 1
+    --steps 1 \
+    --fraction 1 \
+    --seed 0
 """
 
 if __name__ == "__main__":
@@ -17,6 +19,8 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
     parser.add_argument("--mode", type=str, default="both_duo", help="Dynamic Duo mode to run")
     parser.add_argument("--steps", type=int, default=1, help="Number of adaptation steps per batch")
+    parser.add_argument("--fraction", type=float, default=1.0, help="Fraction of ImageNet-C to evaluate on (0 < fraction <= 1.0)")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility (when using fraction < 1.0)")  
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,4 +44,4 @@ if __name__ == "__main__":
         steps=args.steps,
     )
     # Evaluate Dynamic Duo on ImageNet-C
-    evaluate_dynamic_duo(duo, config)
+    evaluate_dynamic_duo(duo, config, fraction=args.fraction, seed=args.seed)
