@@ -8,6 +8,11 @@ def _pil_collate_fn(batch):
     images, labels = zip(*batch)
     return list(images), torch.tensor(labels)
 
+def _norm_logits(z: torch.Tensor) -> torch.Tensor:
+    """zero-mean unit-std normalization across classes."""
+    mu = z.mean(dim=-1, keepdim=True)
+    sd = z.std(dim=-1, keepdim=True).clamp(min=1e-6)
+    return (z - mu) / sd
 
 def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=256, num_workers=4, fraction=1.0, seed=None):
     """

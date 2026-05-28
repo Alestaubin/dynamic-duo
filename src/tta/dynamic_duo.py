@@ -3,7 +3,7 @@ import torch.jit
 import torch.nn as nn
 import torch.optim as optim
 from src.tta.tent import copy_model_and_optimizer, load_model_and_optimizer, setup_tent, softmax_entropy
-from src.utils.data import load_imagenetC
+from src.utils.data import load_imagenetC, _norm_logits
 from src.utils.metrics import get_metrics_dict
 from src.utils.model import _preprocess_batch
 import logging
@@ -84,12 +84,13 @@ class DynamicDuo(nn.Module):
                 self.joint_calibrator,
                 self.mode,
             )
-        if logger.isEnabledFor(logging.DEBUG) and labels is not None:
+        if labels is not None:
             self._log_batch_diagnostics(z_large, z_small, outputs, labels)
         return outputs
 
     def _reset_diagnostics(self):
-        self._diag = {k: {"n": 0, "acc_sum": 0.0, "nll_sum": 0.0}
+        self._diag = {k: {"n": 0, "acc_sum": 0.0, "nll_sum": 0.0, "ent_sum": 0.0,
+                          "acc_last": 0.0, "nll_last": 0.0, "ent_last": 0.0}
                       for k in ("large", "small", "duo")}
 
     def _log_batch_diagnostics(self, z_large, z_small, z_duo, labels):
@@ -98,13 +99,20 @@ class DynamicDuo(nn.Module):
             probs = F.softmax(logits.detach().cpu(), dim=1)
             acc = (probs.argmax(1) == labels_cpu).float().mean().item()
             nll = F.nll_loss(torch.log(probs.clamp(min=1e-8)), labels_cpu).item()
+            ent = softmax_entropy(logits.detach()).mean().item()
             d = self._diag[name]
             d["n"] += 1
             d["acc_sum"] += acc
             d["nll_sum"] += nll
-            avg_acc = d["acc_sum"] / d["n"]
-            avg_nll = d["nll_sum"] / d["n"]
-            logger.debug(f"  {name:5s}: acc={acc:.4f} (avg={avg_acc:.4f})  nll={nll:.4f} (avg={avg_nll:.4f})")
+            d["ent_sum"] += ent
+            d["acc_last"] = acc
+            d["nll_last"] = nll
+            d["ent_last"] = ent
+            if logger.isEnabledFor(logging.DEBUG):
+                avg_acc = d["acc_sum"] / d["n"]
+                avg_nll = d["nll_sum"] / d["n"]
+                avg_ent = d["ent_sum"] / d["n"]
+                logger.debug(f"  {name:5s}: acc={acc:.4f} (avg={avg_acc:.4f})  nll={nll:.4f} (avg={avg_nll:.4f})  ent={ent:.4f} (avg={avg_ent:.4f})")
 
     def reset(self):
         """Reset the model and optimizer states to before adaptation."""
@@ -131,9 +139,9 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
     device = next(large.parameters()).device
     x_large = _preprocess_batch(x, large_preprocess, device)
     x_small = _preprocess_batch(x, small_preprocess, device)
-
-    z_large = large(x_large)
-    z_small = small(x_small)
+    
+    z_large = _norm_logits(large(x_large))
+    z_small = _norm_logits(small(x_small))
 
     if signal == "duo":
         zl = z_large if adapt_large else z_large.detach()
@@ -151,6 +159,7 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
                         (small_optimizer, adapt_small)):
             if do and opt is not None:
                 opt.zero_grad()
+        joint_calibrator.zero_grad(set_to_none=True)
 
     else:  # indep
         if adapt_large:
@@ -165,16 +174,13 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
             small_optimizer.step(); small_optimizer.zero_grad()
 
     with torch.no_grad():
-        z_large_final = large(x_large)
-        z_small_final = small(x_small)
-        return joint_calibrator(z_large_final, z_small_final), z_large_final, z_small_final
-    
-def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, mode, cfg, steps):
-    """Configure a DynamicDuo for TENT adaptation.
+        # z_large_final = large(x_large)
+        # z_small_final = small(x_small)
+        return joint_calibrator(z_large, z_small), z_large, z_small
 
-    This is a helper function to set up the DynamicDuo with the appropriate
-    optimizers and calibrator for the selected mode. It will tent the inner
-    models, set up the optimizers, and then wrap them in a DynamicDuo.
+def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, mode, cfg, steps):
+    """
+    Configure a DynamicDuo for TENT adaptation.
     """
     assert mode in _MODES, f"Invalid mode {mode}. Must be one of {_MODES}."
     adapt_large, adapt_small, signal = _MODE_SPEC[mode]
@@ -215,16 +221,17 @@ def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
         all_labels.append(labels.cpu())
 
         if wandb_run is not None:
-            with torch.no_grad():
-                batch_probs = F.softmax(outputs.detach().cpu(), dim=1)
-                batch_labels_cpu = labels.cpu()
-                batch_acc = (batch_probs.argmax(1) == batch_labels_cpu).float().mean().item()
-                batch_nll = F.nll_loss(torch.log(batch_probs.clamp(min=1e-8)), batch_labels_cpu).item()
-                logger.info(f"{wandb_prefix} batch_acc={batch_acc:.4f} batch_nll={batch_nll:.4f}")
-            wandb_run.log({
-                f"{wandb_prefix}batch_acc": batch_acc,
-                f"{wandb_prefix}batch_nll": batch_nll,
-            })
+            log_dict = {}
+            for name in ("large", "small", "duo"):
+                d = duo._diag[name]
+                if d["n"] > 0:
+                    avg_acc = d["acc_sum"] / d["n"]
+                    avg_ent = d["ent_sum"] / d["n"]
+                    log_dict[f"{wandb_prefix}{name}/batch_acc"] = d["acc_last"]
+                    log_dict[f"{wandb_prefix}{name}/avg_acc"] = avg_acc
+                    log_dict[f"{wandb_prefix}{name}/batch_ent"] = d["ent_last"]
+                    log_dict[f"{wandb_prefix}{name}/avg_ent"] = avg_ent
+            wandb_run.log(log_dict)
 
     logits = torch.cat(all_outputs)
     probs = F.softmax(logits, dim=1)

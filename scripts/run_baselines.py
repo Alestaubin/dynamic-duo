@@ -3,9 +3,10 @@ python scripts/run_baselines.py --config cfgs/dynamic_duo_config.yaml --mode joi
 python scripts/run_baselines.py --config cfgs/dynamic_duo_config.yaml --mode large --fraction 0.1 --seed 0
 """
 from src.utils.model import get_model, _preprocess_batch
-from src.utils.data import load_config, load_imagenetC
+from src.utils.data import load_config, load_imagenetC, _norm_logits
 from src.utils.metrics import get_metrics_dict
 from src.calibrators.fixed_TS import JointFixedTS
+from src.tta.tent import softmax_entropy
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -77,29 +78,45 @@ if __name__ == "__main__":
             )
             prefix = f"{corruption}/s{severity}/"
             all_probs, all_labels = [], []
+            diag = {"large": {"n": 0, "acc_sum": 0.0, "ent_sum": 0.0},
+                    "small": {"n": 0, "acc_sum": 0.0, "ent_sum": 0.0},
+                    "duo":   {"n": 0, "acc_sum": 0.0, "ent_sum": 0.0}}
 
             with torch.no_grad():
                 for imgs, labels in tqdm(loader, desc=f"{corruption} s{severity}"):
-                    if args.mode == "large":
-                        x = _preprocess_batch(imgs, large_preprocess, device)
-                        logits = large_model(x)
-                    elif args.mode == "small":
-                        x = _preprocess_batch(imgs, small_preprocess, device)
-                        logits = small_model(x)
-                    else:  # joint
-                        x_large = _preprocess_batch(imgs, large_preprocess, device)
-                        x_small = _preprocess_batch(imgs, small_preprocess, device)
-                        logits = calibrator(large_model(x_large), small_model(x_small))
+                    x_large = _preprocess_batch(imgs, large_preprocess, device)
+                    x_small = _preprocess_batch(imgs, small_preprocess, device)
+                    z_large = _norm_logits(large_model(x_large))
+                    z_small = _norm_logits(small_model(x_small))
+                    z_duo   = calibrator(z_large, z_small)
 
-                    batch_probs = F.softmax(logits.cpu(), dim=1)
+                    if args.mode == "large":
+                        logits = z_large
+                    elif args.mode == "small":
+                        logits = z_small
+                    else:  # joint
+                        logits = z_duo
+                    components = [("large", z_large), ("small", z_small), ("duo", z_duo)]
+
                     batch_labels_cpu = labels.cpu()
-                    batch_acc = (batch_probs.argmax(1) == batch_labels_cpu).float().mean().item()
-                    batch_nll = F.nll_loss(torch.log(batch_probs.clamp(min=1e-8)), batch_labels_cpu).item()
-                    wandb_run.log({
-                        f"{prefix}batch_acc": batch_acc,
-                        f"{prefix}batch_nll": batch_nll,
-                    })
-                    all_probs.append(batch_probs)
+                    log_dict = {}
+                    for name, z in components:
+                        probs = F.softmax(z.cpu(), dim=1)
+                        acc = (probs.argmax(1) == batch_labels_cpu).float().mean().item()
+                        nll = F.nll_loss(torch.log(probs.clamp(min=1e-8)), batch_labels_cpu).item()
+                        ent = softmax_entropy(z).mean().item()
+                        d = diag[name]
+                        d["n"] += 1
+                        d["acc_sum"] += acc
+                        d["ent_sum"] += ent
+                        log_dict[f"{prefix}{name}/batch_acc"] = acc
+                        log_dict[f"{prefix}{name}/avg_acc"]   = d["acc_sum"] / d["n"]
+                        log_dict[f"{prefix}{name}/batch_nll"] = nll
+                        log_dict[f"{prefix}{name}/batch_ent"] = ent
+                        log_dict[f"{prefix}{name}/avg_ent"]   = d["ent_sum"] / d["n"]
+                    wandb_run.log(log_dict)
+
+                    all_probs.append(F.softmax(logits.cpu(), dim=1))
                     all_labels.append(batch_labels_cpu)
 
             metrics = get_metrics_dict(torch.cat(all_probs), torch.cat(all_labels))
