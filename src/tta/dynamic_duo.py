@@ -2,7 +2,7 @@ import torch
 import torch.jit
 import torch.nn as nn
 import torch.optim as optim
-from src.tta.tent import copy_model_and_optimizer, load_model_and_optimizer, setup_tent, softmax_entropy
+from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, setup_tent, softmax_entropy, collect_params
 from src.utils.data import load_imagenetC, _norm_logits
 from src.utils.metrics import get_metrics_dict
 from src.utils.model import _preprocess_batch
@@ -190,10 +190,31 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
 
     if adapt_large:
         logger.info(f"Configuring large model with norm={cfg['LARGE']['NORM']}")
-        large, large_optimizer = setup_tent(large, cfg["LARGE"]["NORM"], cfg, opt_cfg=cfg["LARGE"]["OPTIM"])
+        large_model = configure_model(large, cfg["LARGE"]["NORM"])
+        params, param_names = collect_params(large_model, cfg["LARGE"]["NORM"])
+        
+        if not params:
+            raise ValueError("No parameters found for adaptation. Check if model has Norm layers.")
+        
+        large_optimizer = setup_optimizer(params, cfg)
+
+        logger.info(f"model for adaptation: %s", large_model)
+        logger.info(f"params for adaptation: %s", param_names)
+        logger.info(f"optimizer for adaptation: %s", large_optimizer)
+
     if adapt_small:
         logger.info(f"Configuring small model with norm={cfg['SMALL']['NORM']}")
-        small, small_optimizer = setup_tent(small, cfg["SMALL"]["NORM"], cfg, opt_cfg=cfg["SMALL"]["OPTIM"])
+        small_model = configure_model(small, cfg["SMALL"]["NORM"])
+        params, param_names = collect_params(small_model, cfg["SMALL"]["NORM"])
+        
+        if not params:
+            raise ValueError("No parameters found for adaptation. Check if model has Norm layers.")
+        
+        small_optimizer = setup_optimizer(params, cfg)
+        logger.info(f"model for adaptation: %s", small_model)
+        logger.info(f"params for adaptation: %s", param_names)
+        logger.info(f"optimizer for adaptation: %s", small_optimizer)
+
 
     dynamic_duo = DynamicDuo(
         large=large,

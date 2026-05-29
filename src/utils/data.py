@@ -14,13 +14,13 @@ def _norm_logits(z: torch.Tensor) -> torch.Tensor:
     sd = z.std(dim=-1, keepdim=True).clamp(min=1e-6)
     return (z - mu) / sd
 
-def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=256, num_workers=4, fraction=1.0, seed=None):
+def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=256, num_workers=4, num_samples=None, shuffle=False, seed=None):
     """
     Load the ImageNet-C dataset for a given corruption type and severity level.
     Returns a DataLoader of (list[PIL.Image], LongTensor) batches — no preprocessing
     applied so each model can apply its own transform in forward.
 
-    fraction: proportion of each subset to use (0 < fraction <= 1.0).
+    num_samples: number of samples to use from each subset (if None, use all).
     """
     if isinstance(severities, int):
         severities = [severities]
@@ -31,17 +31,18 @@ def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=25
     for corruption in corruption_types:
         for severity in severities:
             ds = datasets.ImageFolder(os.path.join(data_dir, corruption, str(severity)))
-            if fraction < 1.0:
-                n = max(1, int(len(ds) * fraction))
+            if num_samples is not None:
+                n = min(num_samples, len(ds))
+                print(f"Sampling {n} examples from {len(ds)} for corruption {corruption} severity {severity}")
                 generator = torch.Generator().manual_seed(seed) if seed is not None else None
-                indices = torch.randperm(len(ds), generator=generator)[:n].tolist()
+                indices = torch.randperm(len(ds), generator=generator)[:n].tolist() if shuffle else list(range(n))
                 ds = torch.utils.data.Subset(ds, indices)
             subsets.append(ds)
 
     combined = torch.utils.data.ConcatDataset(subsets)
     pin_memory = device.type == "cuda"
     return torch.utils.data.DataLoader(
-        combined, batch_size=batch_size, shuffle=False,
+        combined, batch_size=batch_size, shuffle=shuffle,
         num_workers=num_workers, pin_memory=pin_memory,
         collate_fn=_pil_collate_fn,
     )
