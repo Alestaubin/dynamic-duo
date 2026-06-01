@@ -1,18 +1,9 @@
-import argparse
-import wandb
-
-from src.utils.data import load_config, load_imagenetC
-from src.utils.metrics import get_metrics_dict
-from src.utils.model import get_model
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import logging
 from copy import deepcopy
 from torch.nn import functional as F
-from src.utils.model import _preprocess_batch
-from tqdm import tqdm
-
 """
 python src/tta/tent.py  --config cfgs/dynamic_duo_config.yaml --model large --steps 1 --fraction 0.1 --seed 0
 """
@@ -155,7 +146,7 @@ def setup_tent(model, norm_type, cfg):
     
     optimizer = setup_optimizer(params, cfg)
 
-    logger.info(f"model for adaptation: %s", model)
+    # logger.info(f"model for adaptation: %s", model)
     logger.info(f"params for adaptation: %s", param_names)
     logger.info(f"optimizer for adaptation: %s", optimizer)
 

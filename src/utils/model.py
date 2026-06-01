@@ -1,4 +1,5 @@
 import torchvision.models as models
+from torchvision import transforms
 
 def get_model(model_name, freeze=True):
     """
@@ -86,7 +87,10 @@ def load_resnet50():
     """
     print("Loading ResNet-50 (Pretrained: ImageNet-1K)...")
     weights = models.ResNet50_Weights.DEFAULT
-    preprocess = weights.transforms()
+    preprocess = transforms.Compose([
+        transforms.CenterCrop(224),   # no-op on 224 imgs; no resize, no normalize
+        transforms.ToTensor(),        # PIL -> [0,1] tensor, that's all
+    ])
     model = models.resnet50(weights=weights)
     model.eval() 
     return model, preprocess

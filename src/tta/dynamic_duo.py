@@ -2,7 +2,7 @@ import torch
 import torch.jit
 import torch.nn as nn
 import torch.optim as optim
-from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, setup_tent, softmax_entropy, collect_params
+from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, softmax_entropy, collect_params
 from src.utils.data import load_imagenetC, _norm_logits
 from src.utils.metrics import get_metrics_dict
 from src.utils.model import _preprocess_batch
@@ -140,8 +140,10 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
     x_large = _preprocess_batch(x, large_preprocess, device)
     x_small = _preprocess_batch(x, small_preprocess, device)
     
-    z_large = _norm_logits(large(x_large))
-    z_small = _norm_logits(small(x_small))
+    z_large = large(x_large)
+    z_small = small(x_small)
+    # z_large = _norm_logits(raw_large)   # for calibrator
+    # z_small = _norm_logits(raw_small)
 
     if signal == "duo":
         zl = z_large if adapt_large else z_large.detach()
@@ -174,8 +176,6 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
             small_optimizer.step(); small_optimizer.zero_grad()
 
     with torch.no_grad():
-        # z_large_final = large(x_large)
-        # z_small_final = small(x_small)
         return joint_calibrator(z_large, z_small), z_large, z_small
 
 def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, mode, cfg, steps):
@@ -196,7 +196,7 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         if not params:
             raise ValueError("No parameters found for adaptation. Check if model has Norm layers.")
         
-        large_optimizer = setup_optimizer(params, cfg)
+        large_optimizer = setup_optimizer(params, cfg["LARGE"]["OPTIM"])
 
         logger.info(f"model for adaptation: %s", large_model)
         logger.info(f"params for adaptation: %s", param_names)
@@ -210,7 +210,7 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         if not params:
             raise ValueError("No parameters found for adaptation. Check if model has Norm layers.")
         
-        small_optimizer = setup_optimizer(params, cfg)
+        small_optimizer = setup_optimizer(params, cfg["SMALL"]["OPTIM"])
         logger.info(f"model for adaptation: %s", small_model)
         logger.info(f"params for adaptation: %s", param_names)
         logger.info(f"optimizer for adaptation: %s", small_optimizer)
