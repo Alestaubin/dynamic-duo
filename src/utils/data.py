@@ -1,7 +1,11 @@
 import os
+from typing import Callable, Dict, Optional, Sequence, Set, Tuple, Union
 import yaml
 import torch
 from torchvision import datasets
+from pathlib import Path
+from src.utils.loaders import CustomImageFolder
+import torch.utils.data as data
 
 
 def _pil_collate_fn(batch):
@@ -14,7 +18,7 @@ def _norm_logits(z: torch.Tensor) -> torch.Tensor:
     sd = z.std(dim=-1, keepdim=True).clamp(min=1e-6)
     return (z - mu) / sd
 
-def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=256, num_workers=4, num_samples=None, shuffle=False, seed=None):
+def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=256, num_workers=4, num_samples=None, seed=None):
     """
     Load the ImageNet-C dataset for a given corruption type and severity level.
     Returns a DataLoader of (list[PIL.Image], LongTensor) batches — no preprocessing
@@ -22,6 +26,9 @@ def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=25
 
     num_samples: number of samples to use from each subset (if None, use all).
     """
+    
+    shuffle = True
+
     if isinstance(severities, int):
         severities = [severities]
     if isinstance(corruption_types, str):
@@ -41,11 +48,45 @@ def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=25
 
     combined = torch.utils.data.ConcatDataset(subsets)
     pin_memory = device.type == "cuda"
+
+    # Seed the DataLoader's shuffle so batch order is reproducible too.
+    loader_generator = torch.Generator().manual_seed(seed) if seed is not None else None
+
     return torch.utils.data.DataLoader(
         combined, batch_size=batch_size, shuffle=shuffle,
         num_workers=num_workers, pin_memory=pin_memory,
         collate_fn=_pil_collate_fn,
+        generator=loader_generator,
     )
+
+def load_imagenetc(
+    n_examples: Optional[int] = 5000,
+    severity: int = 5,
+    data_dir: str = './data/ImageNet-C',
+    shuffle: bool = False,
+    corruptions: Sequence[str] = ("snow",),
+    prepr: Callable = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if n_examples > 50000:
+        raise ValueError(
+            'The evaluation is currently possible on at most 50000 points.')
+
+    assert len(
+        corruptions
+    ) == 1, "so far only one corruption is supported"
+
+    data_folder_path = Path(data_dir) / str(corruptions[0]) / str(severity)
+    
+    imagenet = CustomImageFolder(data_folder_path, prepr)
+    test_loader = data.DataLoader(imagenet,
+                                  batch_size=n_examples,
+                                  shuffle=shuffle,
+                                  num_workers=2)
+
+    x_test, y_test, paths = next(iter(test_loader))
+
+    return x_test, y_test
+
 
 def load_config(config_path):
     with open(config_path, "r") as f:

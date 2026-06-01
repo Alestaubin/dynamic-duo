@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 from robustbench.data import load_imagenetc
 
-
+SEED = 0
 OPTIM = "Adam"
 LR = 0.0001
 BETA = 0.9
@@ -46,7 +46,7 @@ def evaluate_1(corruptions, severities, bs, test_dir):
                 logger.warning("not resetting model")
             loader = load_imagenetC(
                 test_dir, severity, [corruption_type],
-                device=device, batch_size=bs, num_samples=5000, shuffle=False, seed=None
+                device=device, batch_size=bs, num_samples=20000, seed=0
             )
             all_probs, all_labels = [], []
             for imgs, labels in tqdm(loader, desc=f"{corruption_type} s{severity}"):
@@ -117,13 +117,13 @@ if __name__ == '__main__':
     # your side
     loader = load_imagenetC("./data/ImageNet-C", 3, ["gaussian_noise"],
                             device=device, batch_size=128,
-                            num_samples=128, shuffle=False, seed=None)
+                            num_samples=128, seed=SEED)
     imgs, _ = next(iter(loader))
     xs = _preprocess_batch(imgs, preprocess, device)
     print("ours ", xs.shape, xs.min().item(), xs.max().item(),
         xs.mean().item(), xs.std().item())
 
-    evaluate_2(corruptions, severities, bs, test_dir)
+    # evaluate_2(corruptions, severities, bs, test_dir)
     evaluate_1(corruptions, severities, bs, test_dir)
 
 # def evaluate_3(corruptions, severities, bs, test_dir):
