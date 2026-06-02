@@ -1,11 +1,7 @@
 import os
-from typing import Callable, Dict, Optional, Sequence, Set, Tuple, Union
 import yaml
 import torch
 from torchvision import datasets
-from pathlib import Path
-from src.utils.loaders import CustomImageFolder
-import torch.utils.data as data
 
 
 def _pil_collate_fn(batch):
@@ -26,7 +22,7 @@ def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=25
 
     num_samples: number of samples to use from each subset (if None, use all).
     """
-    
+
     shuffle = True
 
     if isinstance(severities, int):
@@ -58,34 +54,6 @@ def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=25
         collate_fn=_pil_collate_fn,
         generator=loader_generator,
     )
-
-def load_imagenetc(
-    n_examples: Optional[int] = 5000,
-    severity: int = 5,
-    data_dir: str = './data/ImageNet-C',
-    shuffle: bool = False,
-    corruptions: Sequence[str] = ("snow",),
-    prepr: Callable = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    if n_examples > 50000:
-        raise ValueError(
-            'The evaluation is currently possible on at most 50000 points.')
-
-    assert len(
-        corruptions
-    ) == 1, "so far only one corruption is supported"
-
-    data_folder_path = Path(data_dir) / str(corruptions[0]) / str(severity)
-    
-    imagenet = CustomImageFolder(data_folder_path, prepr)
-    test_loader = data.DataLoader(imagenet,
-                                  batch_size=n_examples,
-                                  shuffle=shuffle,
-                                  num_workers=2)
-
-    x_test, y_test, paths = next(iter(test_loader))
-
-    return x_test, y_test
 
 
 def load_config(config_path):

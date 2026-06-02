@@ -1,7 +1,5 @@
 """
-python scripts/run_baselines.py --config cfgs/dynamic_duo_config.yaml --mode joint
-python scripts/run_baselines.py --config cfgs/dynamic_duo_config.yaml --mode large --fraction 0.1 --seed 0
-python scripts/run_baselines.py --config cfgs/dynamic_duo_config.yaml --mode frozen
+python scripts/run_baselines.py --config cfgs/dynamic_duo_config.yaml --seed 0
 """
 from src.utils.model import get_model, _preprocess_batch
 from src.utils.data import load_config, load_imagenetC, _norm_logits
@@ -18,14 +16,11 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-_MODES = {"large", "small", "joint", "frozen"}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run baselines on ImageNet-C")
     parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
-    parser.add_argument("--mode", type=str, default="joint", choices=list(_MODES),
-                        help="Which model(s) to evaluate: large, small, joint (calibrated ensemble), or frozen (all three, no TTA)")
-    parser.add_argument("--fraction", type=float, default=1.0, help="Fraction of dataset to evaluate on")
+    parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to use from each corruption/severity subset (default: all)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for fraction sampling")
     args = parser.parse_args()
 
@@ -40,7 +35,7 @@ if __name__ == "__main__":
     calibrator = JointFixedTS(config["CALIBRATOR"]["TL"], config["CALIBRATOR"]["TS"])
 
     run_name = (
-        f"baseline-{args.mode} | "
+        f"baseline | "
         f"{config['LARGE']['NAME']}+{config['SMALL']['NAME']} | "
         f"Tl={config['CALIBRATOR']['TL']} Ts={config['CALIBRATOR']['TS']}"
     )
@@ -48,12 +43,11 @@ if __name__ == "__main__":
         project="dynamic-duos",
         name=run_name,
         config={
-            "mode": args.mode,
             "large/name": config["LARGE"]["NAME"],
             "small/name": config["SMALL"]["NAME"],
             "calibrator/Tl": config["CALIBRATOR"]["TL"],
             "calibrator/Ts": config["CALIBRATOR"]["TS"],
-            "fraction": args.fraction,
+            "num_samples": args.num_samples,
             "seed": args.seed,
             "eval/corruptions": config["EVAL"]["CORRUPTIONS"],
             "eval/severities": config["EVAL"]["SEVERITIES"],
@@ -63,16 +57,16 @@ if __name__ == "__main__":
     results_rows = []
     for severity in config["EVAL"]["SEVERITIES"]:
         for corruption in config["EVAL"]["CORRUPTIONS"]:
-            logger.info(f"Evaluating baseline ({args.mode}) on {corruption} severity {severity}")
+            logger.info(f"Evaluating baseline on {corruption} severity {severity}")
             loader = load_imagenetC(
                 config["TEST_DIR"], severity, [corruption],
                 device=device,
                 batch_size=config["LARGE"]["BS"],
-                fraction=args.fraction,
+                num_samples=args.num_samples,
                 seed=args.seed,
             )
             prefix = f"{corruption}/s{severity}/"
-            all_probs = {"large": [], "small": [], "duo": []} if args.mode == "frozen" else []
+            all_probs = {"large": [], "small": [], "duo": []}
             all_labels = []
             diag = {"large": {"n": 0, "acc_sum": 0.0, "ent_sum": 0.0},
                     "small": {"n": 0, "acc_sum": 0.0, "ent_sum": 0.0},
@@ -86,17 +80,9 @@ if __name__ == "__main__":
                     z_small = _norm_logits(small_model(x_small))
                     z_duo   = calibrator(z_large, z_small)
 
-                    if args.mode == "large":
-                        logits = z_large
-                    elif args.mode == "small":
-                        logits = z_small
-                    elif args.mode == "joint":
-                        logits = z_duo
-                    components = [("large", z_large), ("small", z_small), ("duo", z_duo)]
-
                     batch_labels_cpu = labels.cpu()
                     log_dict = {}
-                    for name, z in components:
+                    for name, z in (("large", z_large), ("small", z_small), ("duo", z_duo)):
                         probs = F.softmax(z.cpu(), dim=1)
                         acc = (probs.argmax(1) == batch_labels_cpu).float().mean().item()
                         nll = F.nll_loss(torch.log(probs.clamp(min=1e-8)), batch_labels_cpu).item()
@@ -110,28 +96,18 @@ if __name__ == "__main__":
                         log_dict[f"{prefix}{name}/batch_nll"] = nll
                         log_dict[f"{prefix}{name}/batch_ent"] = ent
                         log_dict[f"{prefix}{name}/avg_ent"]   = d["ent_sum"] / d["n"]
-                        if args.mode == "frozen":
-                            all_probs[name].append(probs)
+                        all_probs[name].append(probs)
                     wandb_run.log(log_dict)
-
-                    if args.mode != "frozen":
-                        all_probs.append(F.softmax(logits.cpu(), dim=1))
                     all_labels.append(batch_labels_cpu)
 
             all_labels_cat = torch.cat(all_labels)
-            if args.mode == "frozen":
-                for name in ("large", "small", "duo"):
-                    metrics = get_metrics_dict(torch.cat(all_probs[name]), all_labels_cat)
-                    logger.info(f"Results [{name}] for {corruption} severity {severity}: {metrics}")
-                    wandb_run.log({f"{prefix}{name}/{k}": v for k, v in metrics.items()})
-                    results_rows.append({"model": name, "corruption": corruption, "severity": severity, **metrics})
-            else:
-                metrics = get_metrics_dict(torch.cat(all_probs), all_labels_cat)
-                logger.info(f"Results for {corruption} severity {severity}: {metrics}")
-                wandb_run.log({f"{prefix}{k}": v for k, v in metrics.items()})
-                results_rows.append({"corruption": corruption, "severity": severity, **metrics})
+            for name in ("large", "small", "duo"):
+                metrics = get_metrics_dict(torch.cat(all_probs[name]), all_labels_cat)
+                logger.info(f"[{name}] Results for {corruption} severity {severity}: {metrics}")
+                wandb_run.log({f"{prefix}{name}/{k}": v for k, v in metrics.items()})
+                results_rows.append({"model": name, "corruption": corruption, "severity": severity, **metrics})
 
-    cols = list(results_rows[0].keys())
+    cols = ["model", "corruption", "severity"] + [k for k in results_rows[0] if k not in ("model", "corruption", "severity")]
     table = wandb.Table(columns=cols)
     for row in results_rows:
         table.add_data(*[row[c] for c in cols])

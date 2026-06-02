@@ -259,7 +259,7 @@ def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
 
     return probs, torch.cat(all_labels)
 
-def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", fraction=1.0, seed=None):
+def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None):
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     run_name = (
         f"{duo.mode} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | "
@@ -300,7 +300,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", fraction=1.0, s
                 logger.warning("not resetting model")
             loader = load_imagenetC(cfg["TEST_DIR"], severity, [corruption_type],
                                     device=next(duo.parameters()).device,
-                                    batch_size=cfg["LARGE"]["BS"], fraction=fraction, seed=seed)
+                                    batch_size=cfg["LARGE"]["BS"], num_samples=num_samples, seed=seed)
             prefix = f"{corruption_type}/s{severity}/"
             probs, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
             metrics = get_metrics_dict(probs, labels)

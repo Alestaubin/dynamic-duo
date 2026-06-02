@@ -1,6 +1,8 @@
 """
 python scripts/run_tent.py --config cfgs/dynamic_duo_config.yaml --mode large --steps 1
-python scripts/run_tent.py --config cfgs/dynamic_duo_config.yaml --mode small --steps 1 --fraction 0.1 --seed 0
+python scripts/run_tent.py --config cfgs/dynamic_duo_config.yaml --mode small --steps 1 --num_samples 5000 --seed 0
+
+python scripts/run_tent.py --config cfgs/dynamic_duo_config.yaml --mode small --steps 1 --num_samples 5000 --seed 0
 """
 from src.utils.model import get_model, _preprocess_batch
 from src.utils.data import load_config, load_imagenetC, _norm_logits
@@ -25,31 +27,28 @@ if __name__ == "__main__":
     parser.add_argument("--config",   type=str,   required=True)
     parser.add_argument("--mode",     type=str,   default="large", choices=list(_MODES))
     parser.add_argument("--steps",    type=int,   default=1,  help="Adaptation steps per batch")
-    parser.add_argument("--fraction", type=float, default=1.0)
+    parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to use from each corruption/severity subset (default: all)")
     parser.add_argument("--seed",     type=int,   default=None)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = load_config(args.config)
 
-    large_model, large_preprocess = get_model(config["LARGE"]["NAME"])
-    small_model, small_preprocess = get_model(config["SMALL"]["NAME"])
-    large_model = large_model.to(device)
-    small_model = small_model.to(device)
-
     calibrator = JointFixedTS(config["CALIBRATOR"]["TL"], config["CALIBRATOR"]["TS"])
 
     # Configure TENT on the adapted model; keep the other frozen in eval.
     if args.mode == "large":
         model_cfg = config["LARGE"]
-        large_model, optimizer = setup_tent(large_model, model_cfg["NORM"], config, opt_cfg=model_cfg["OPTIM"])
-        model_state, opt_state = copy_model_and_optimizer(large_model, optimizer)
-        small_model.eval()
+        model, preprocess = get_model(config["LARGE"]["NAME"])
+        model = model.to(device)
+        model = setup_tent(model, norm_type="BN", cfg=model_cfg["OPTIM"])
     else:
         model_cfg = config["SMALL"]
-        small_model, optimizer = setup_tent(small_model, model_cfg["NORM"], config, opt_cfg=model_cfg["OPTIM"])
-        model_state, opt_state = copy_model_and_optimizer(small_model, optimizer)
-        large_model.eval()
+        model, preprocess = get_model(config["SMALL"]["NAME"])
+        model = model.to(device)
+        model = setup_tent(model, norm_type="BN", cfg=model_cfg["OPTIM"])
+    
+    model.eval()
 
     run_name = (
         f"tent-{args.mode} | "
@@ -74,22 +73,18 @@ if __name__ == "__main__":
             "eval/severities":  config["EVAL"]["SEVERITIES"],
         },
     )
-
     results_rows = []
     for severity in config["EVAL"]["SEVERITIES"]:
         for corruption in config["EVAL"]["CORRUPTIONS"]:
             logger.info(f"TENT ({args.mode}) | {corruption} severity {severity}")
 
-            if args.mode == "large":
-                load_model_and_optimizer(large_model, optimizer, model_state, opt_state)
-            else:
-                load_model_and_optimizer(small_model, optimizer, model_state, opt_state)
+            model.reset()  # reset TENT
 
             loader = load_imagenetC(
                 config["TEST_DIR"], severity, [corruption],
                 device=device,
                 batch_size=config["LARGE"]["BS"],
-                fraction=args.fraction,
+                num_samples=args.num_samples,
                 seed=args.seed,
             )
             prefix = f"{corruption}/s{severity}/"
@@ -99,40 +94,29 @@ if __name__ == "__main__":
                     "duo":   {"n": 0, "acc_sum": 0.0, "ent_sum": 0.0}}
 
             for imgs, labels in tqdm(loader, desc=f"{corruption} s{severity}"):
-                x_large = _preprocess_batch(imgs, large_preprocess, device)
-                x_small = _preprocess_batch(imgs, small_preprocess, device)
+                x = _preprocess_batch(imgs, preprocess, device)
 
-                # Adapt for `steps` iterations, then do a clean final inference.
-                for _ in range(args.steps):
-                    if args.mode == "large":
-                        forward_and_adapt(x_large, large_model, optimizer)
-                    else:
-                        forward_and_adapt(x_small, small_model, optimizer)
-
-                with torch.no_grad():
-                    z_large = _norm_logits(large_model(x_large))
-                    z_small = _norm_logits(small_model(x_small))
-                    z_duo   = calibrator(z_large, z_small)
+                z_out = model.forward(x)
 
                 batch_labels_cpu = labels.cpu()
                 log_dict = {}
-                for name, z in (("large", z_large), ("small", z_small), ("duo", z_duo)):
-                    probs = F.softmax(z.cpu(), dim=1)
-                    acc = (probs.argmax(1) == batch_labels_cpu).float().mean().item()
-                    nll = F.nll_loss(torch.log(probs.clamp(min=1e-8)), batch_labels_cpu).item()
-                    ent = softmax_entropy(z).mean().item()
-                    d = diag[name]
-                    d["n"] += 1
-                    d["acc_sum"] += acc
-                    d["ent_sum"] += ent
-                    log_dict[f"{prefix}{name}/batch_acc"] = acc
-                    log_dict[f"{prefix}{name}/avg_acc"]   = d["acc_sum"] / d["n"]
-                    log_dict[f"{prefix}{name}/batch_nll"] = nll
-                    log_dict[f"{prefix}{name}/batch_ent"] = ent
-                    log_dict[f"{prefix}{name}/avg_ent"]   = d["ent_sum"] / d["n"]
+                name = args.mode
+                z = z_out
+                probs = F.softmax(z.cpu(), dim=1)
+                acc = (probs.argmax(1) == batch_labels_cpu).float().mean().item()
+                nll = F.nll_loss(torch.log(probs.clamp(min=1e-8)), batch_labels_cpu).item()
+                ent = softmax_entropy(z).mean().item()
+                d = diag[name]
+                d["n"] += 1
+                d["acc_sum"] += acc
+                d["ent_sum"] += ent
+                log_dict[f"{prefix}{name}/batch_acc"] = acc
+                log_dict[f"{prefix}{name}/avg_acc"]   = d["acc_sum"] / d["n"]
+                log_dict[f"{prefix}{name}/batch_nll"] = nll
+                log_dict[f"{prefix}{name}/batch_ent"] = ent
+                log_dict[f"{prefix}{name}/avg_ent"]   = d["ent_sum"] / d["n"]
                 wandb_run.log(log_dict)
 
-                z_out = z_large if args.mode == "large" else z_small
                 all_probs.append(F.softmax(z_out.cpu(), dim=1))
                 all_labels.append(batch_labels_cpu)
 
