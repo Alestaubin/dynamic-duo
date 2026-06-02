@@ -83,7 +83,7 @@ if __name__ == "__main__":
             loader = load_imagenetC(
                 config["TEST_DIR"], severity, [corruption],
                 device=device,
-                batch_size=config["LARGE"]["BS"],
+                batch_size=config["BS"],
                 num_samples=args.num_samples,
                 seed=args.seed,
             )

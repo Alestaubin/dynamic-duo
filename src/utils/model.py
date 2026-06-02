@@ -87,12 +87,13 @@ def load_resnet50():
     """
     print("Loading ResNet-50 (Pretrained: ImageNet-1K)...")
     weights = models.ResNet50_Weights.DEFAULT
-    preprocess = transforms.Compose([
-        transforms.CenterCrop(224),   # no-op on 224 imgs; no resize, no normalize
-        transforms.ToTensor(),        # PIL -> [0,1] tensor, that's all
-    ])
+    preprocess = weights.transforms()
+    # preprocess = transforms.Compose([
+    #     transforms.CenterCrop(224),   # no-op on 224 imgs; no resize, no normalize
+    #     transforms.ToTensor(),        # PIL -> [0,1] tensor, that's all
+    # ])
     model = models.resnet50(weights=weights)
-    model.eval() 
+    model.eval()
     return model, preprocess
 
 def load_resnet18():

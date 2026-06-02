@@ -1,6 +1,8 @@
 TEST_DIR: ./data/ImageNet-C
 VAL_DIR: ./data/imagenet/val
-CALIBRATOR: 
+BS: 128
+WORKERS: 8
+CALIBRATOR:
   NAME: FixedTS
   TS: 1.109
   TL: 0.621
@@ -16,10 +18,8 @@ CALIBRATOR:
     - 4
     - 5
 
-LARGE: 
+LARGE:
   NAME: vit_b_16
-  BS: 128
-  WORKERS: 8
   NORM: LN
   OPTIM:    
     METHOD: "Adam"
@@ -35,10 +35,8 @@ LARGE:
     # NESTEROV: false
     # DAMPENING: 0.0
 
-SMALL: 
+SMALL:
   NAME: resnet50
-  BS: 128
-  WORKERS: 8
   NORM: BN
   OPTIM:
     METHOD: "Adam"

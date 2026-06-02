@@ -55,6 +55,21 @@ def load_imagenetC(data_dir, severities, corruption_types, device, batch_size=25
         generator=loader_generator,
     )
 
+def load_imagenet_val(data_dir, device, batch_size=256, num_workers=4, num_samples=None, seed=None):
+    ds = datasets.ImageFolder(os.path.join(data_dir, "val"))
+    if num_samples is not None:
+        n = min(num_samples, len(ds))
+        print(f"Sampling {n} examples from {len(ds)} for clean val")
+        generator = torch.Generator().manual_seed(seed) if seed is not None else None
+        indices = torch.randperm(len(ds), generator=generator)[:n].tolist()
+        ds = torch.utils.data.Subset(ds, indices)
+    pin_memory = device.type == "cuda"
+    return torch.utils.data.DataLoader(
+        ds, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=pin_memory,
+        collate_fn=_pil_collate_fn,
+        generator=torch.Generator().manual_seed(seed) if seed is not None else None,
+    )
 
 def load_config(config_path):
     with open(config_path, "r") as f:

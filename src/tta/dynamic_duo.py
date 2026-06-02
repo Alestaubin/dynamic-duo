@@ -18,7 +18,7 @@ logging.getLogger("src.tta.dynamic_duo").setLevel(logging.DEBUG)
 
 
 _MODES = {"both_duo", "large_duo", "small_duo",
-          "large_indep", "small_indep", "both_indep"}
+          "large_indep", "small_indep", "both_indep", "no_adapt"}
 
 # (adapt_large, adapt_small, signal) for each mode.
 _MODE_SPEC = {
@@ -28,6 +28,7 @@ _MODE_SPEC = {
     "large_indep":  (True,  False, "indep"),
     "small_indep":  (False, True,  "indep"),
     "both_indep":   (True,  True,  "indep"),
+    "no_adapt":     (False, False, None),
 }
 
 class DynamicDuo(nn.Module):
@@ -142,8 +143,8 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
     
     z_large = large(x_large)
     z_small = small(x_small)
-    # z_large = _norm_logits(raw_large)   # for calibrator
-    # z_small = _norm_logits(raw_small)
+    # z_large = _norm_logits(z_large)
+    # z_small = _norm_logits(z_small)
 
     if signal == "duo":
         zl = z_large if adapt_large else z_large.detach()
@@ -161,9 +162,10 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
                         (small_optimizer, adapt_small)):
             if do and opt is not None:
                 opt.zero_grad()
+        
         joint_calibrator.zero_grad(set_to_none=True)
 
-    else:  # indep
+    elif signal == "indep":  # indep
         if adapt_large:
             large_loss = softmax_entropy(z_large).mean(0)
             logger.debug(f"large indep loss={large_loss.item():.4f}")
@@ -174,9 +176,24 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
             logger.debug(f"small indep loss={small_loss.item():.4f}")
             small_loss.backward()
             small_optimizer.step(); small_optimizer.zero_grad()
+    elif signal is None:
+        pass  # no adaptation, just forward
+    else:
+        raise ValueError(f"Invalid signal {signal} in mode {mode}")
 
     with torch.no_grad():
         return joint_calibrator(z_large, z_small), z_large, z_small
+
+def _configure_model_frozen(model, norm_type):
+    """Put a non-adapting model in train mode with batch statistics but no grad.
+
+    This gives better-calibrated logits on corrupted data (batch stats replace
+    stale running stats) without allowing any parameter adaptation.
+    """
+    configure_model(model, norm_type)
+    model.requires_grad_(False)
+    return model
+
 
 def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, mode, cfg, steps):
     """
@@ -192,28 +209,34 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         logger.info(f"Configuring large model with norm={cfg['LARGE']['NORM']}")
         large_model = configure_model(large, cfg["LARGE"]["NORM"])
         params, param_names = collect_params(large_model, cfg["LARGE"]["NORM"])
-        
+
         if not params:
             raise ValueError("No parameters found for adaptation. Check if model has Norm layers.")
-        
+
         large_optimizer = setup_optimizer(params, cfg["LARGE"]["OPTIM"])
 
         logger.info(f"model for adaptation: %s", large_model)
         logger.info(f"params for adaptation: %s", param_names)
         logger.info(f"optimizer for adaptation: %s", large_optimizer)
+    elif signal == "duo":
+        logger.info(f"Configuring large model (frozen, batch stats) with norm={cfg['LARGE']['NORM']}")
+        _configure_model_frozen(large, cfg["LARGE"]["NORM"])
 
     if adapt_small:
         logger.info(f"Configuring small model with norm={cfg['SMALL']['NORM']}")
         small_model = configure_model(small, cfg["SMALL"]["NORM"])
         params, param_names = collect_params(small_model, cfg["SMALL"]["NORM"])
-        
+
         if not params:
             raise ValueError("No parameters found for adaptation. Check if model has Norm layers.")
-        
+
         small_optimizer = setup_optimizer(params, cfg["SMALL"]["OPTIM"])
         logger.info(f"model for adaptation: %s", small_model)
         logger.info(f"params for adaptation: %s", param_names)
         logger.info(f"optimizer for adaptation: %s", small_optimizer)
+    elif signal == "duo":
+        logger.info(f"Configuring small model (frozen, batch stats) with norm={cfg['SMALL']['NORM']}")
+        _configure_model_frozen(small, cfg["SMALL"]["NORM"])
 
 
     dynamic_duo = DynamicDuo(
@@ -300,7 +323,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                 logger.warning("not resetting model")
             loader = load_imagenetC(cfg["TEST_DIR"], severity, [corruption_type],
                                     device=next(duo.parameters()).device,
-                                    batch_size=cfg["LARGE"]["BS"], num_samples=num_samples, seed=seed)
+                                    batch_size=cfg["BS"], num_samples=num_samples, seed=seed)
             prefix = f"{corruption_type}/s{severity}/"
             probs, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
             metrics = get_metrics_dict(probs, labels)
