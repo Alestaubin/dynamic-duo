@@ -90,7 +90,6 @@ def main():
         "small_model": small_name,
         "clean_val": True,
         "cal_corruptions": cal_corruptions,
-        "test_samples_per_distortion": args.test_samples_per_distortion,
         "severities": cfg["CALIBRATOR"].get("SEVERITIES", []),
     }
     cal.save(args.out, trained_on=trained_on)

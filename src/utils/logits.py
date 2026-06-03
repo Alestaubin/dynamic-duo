@@ -2,6 +2,7 @@ import os
 import torch
 from torch.utils.data import DataLoader
 from torchvision import datasets
+from tqdm import tqdm
 
 from src.utils.data import load_imagenetC, _pil_collate_fn
 from src.utils.model import get_model, _preprocess_batch
@@ -56,7 +57,7 @@ def get_model_logits(
 
     all_logits, all_labels = [], []
     with torch.no_grad():
-        for imgs, labels in loader:
+        for imgs, labels in tqdm(loader, desc=f"{model_name}/{split_key}"):
             x = _preprocess_batch(imgs, preprocess, device)
             all_logits.append(model(x).cpu())
             all_labels.append(labels)

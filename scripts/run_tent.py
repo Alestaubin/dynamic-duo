@@ -5,7 +5,7 @@ python scripts/run_tent.py --config cfgs/dynamic_duo_config.yaml --mode small --
 python scripts/run_tent.py --config cfgs/dynamic_duo_config.yaml --mode small --steps 1 --num_samples 5000 --seed 0
 """
 from src.utils.model import get_model, _preprocess_batch
-from src.utils.data import load_config, load_imagenetC, _norm_logits
+from src.utils.data import load_config, load_imagenetC
 from src.utils.metrics import get_metrics_dict
 from src.calibrators.fixed_TS import JointFixedTS
 from src.tta.tent import (setup_tent, copy_model_and_optimizer,
