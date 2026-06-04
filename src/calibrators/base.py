@@ -29,3 +29,6 @@ class IdentityCalibrator(BaseCalibrator):
         return logits
     def tune(self, *args, **kwargs):
         pass
+
+class _NoOpModule(nn.Module):
+    def eval(self): return self

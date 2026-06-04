@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from src.calibrators.base import BaseJointCalibrator
+from src.calibrators.base import BaseJointCalibrator, _NoOpModule
 
 
 class JointFixedTS(BaseJointCalibrator):
@@ -126,7 +126,4 @@ class JointFixedTS(BaseJointCalibrator):
             print(f"  trained on: {calibrator.trained_on}")
 
         return calibrator
-
-class _NoOpModule(nn.Module):
-    def eval(self): return self
 

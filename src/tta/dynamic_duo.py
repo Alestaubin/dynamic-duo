@@ -3,7 +3,7 @@ import torch.jit
 import torch.nn as nn
 import torch.optim as optim
 from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, softmax_entropy, collect_params
-from src.utils.data import load_imagenetC, _norm_logits
+from src.utils.data import load_imagenetC
 from src.utils.metrics import get_metrics_dict
 from src.utils.model import _preprocess_batch
 import logging
@@ -14,7 +14,7 @@ import wandb
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-logging.getLogger("src.tta.dynamic_duo").setLevel(logging.DEBUG)
+# logging.getLogger("src.tta.dynamic_duo").setLevel(logging.DEBUG)
 
 
 _MODES = {"both_duo", "large_duo", "small_duo",
@@ -31,6 +31,8 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
+_CALIB_MODES = {"fixed_ts", "coca"}
+
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
 
@@ -38,6 +40,23 @@ class DynamicDuo(nn.Module):
     BN affine params require grad, batch stats forced) and drives adaptation
     according to the selected mode. This module is the sole owner of the
     backward/step calls — the inner models should NOT be Tent-wrapped.
+
+    Calibrators
+    -----------
+    `joint_calibrator` is a `BaseJointCalibrator`, used through its interface:
+      * `calibrate_with_grad(z_l, z_s)` on the adaptation (loss) path,
+      * `calibrate(z_l, z_s)` on the no-grad inference path.
+    The first logits argument is the large (anchor) model.
+
+    Exactly two calibration regimes are supported (`calibration_mode`):
+      * "fixed_ts"  -> JointFixedTS: two temperatures fit on held-out data
+                       before test time. Frozen here, so under the duo entropy
+                       loss only the models' BN params adapt. Never reset.
+      * "coca"      -> JointCoca: self-adapting. It fits its own temperature
+                       per batch inside calibrate(); DynamicDuo neither freezes
+                       nor steps nor resets it.
+
+    There is no test-time-trainable (model-owned) calibrator regime anymore.
     """
     def __init__(
         self,
@@ -50,9 +69,12 @@ class DynamicDuo(nn.Module):
         joint_calibrator: nn.Module,
         mode: str = "both_duo",
         steps: int = 1,
+        calibration_mode: str = "fixed_ts",
     ):
         super().__init__()
         assert mode in _MODES, f"Invalid mode {mode}. Must be one of {_MODES}."
+        assert calibration_mode in _CALIB_MODES, \
+            f"Invalid calibration mode {calibration_mode}. Must be one of {_CALIB_MODES}"
         self.large = large
         self.large_preprocess = large_preprocess
         self.small = small
@@ -62,10 +84,20 @@ class DynamicDuo(nn.Module):
         self.small_optimizer = small_optimizer
         self.mode = mode
         self.steps = steps
+        self.calibration_mode = calibration_mode
 
         self.adapt_large, self.adapt_small, _ = _MODE_SPEC[mode]
-        logger.info(f"Initialized DynamicDuo | mode={mode} steps={steps} adapt_large={self.adapt_large} adapt_small={self.adapt_small}")
+        logger.info(
+            f"Initialized DynamicDuo | mode={mode} steps={steps} "
+            f"adapt_large={self.adapt_large} adapt_small={self.adapt_small} "
+            f"calibration_mode={calibration_mode}"
+        )
         self._reset_diagnostics()
+
+        # Keep the calibrator on the models' device for a consistent graph.
+        device = next(self.large.parameters()).device
+        self.joint_calibrator.to(device)
+
         if self.adapt_large:
             assert large_optimizer is not None, f"{mode} needs a large optimizer"
             self.large_model_state, self.large_optimizer_state = \
@@ -75,6 +107,21 @@ class DynamicDuo(nn.Module):
             assert small_optimizer is not None, f"{mode} needs a small optimizer"
             self.small_model_state, self.small_optimizer_state = \
                 copy_model_and_optimizer(self.small, self.small_optimizer)
+
+        if calibration_mode == "fixed_ts":
+            # Fixed calibrator (pre-tuned): freeze so test-time grads cannot move
+            # its temperatures. Grad still flows to the model logits.
+            n_frozen = 0
+            for p in self.joint_calibrator.parameters():
+                p.requires_grad_(False)
+                n_frozen += 1
+            logger.info(
+                f"Calibrator FIXED (fixed_ts) | froze {n_frozen} param tensors "
+                f"(assumed pre-tuned on held-out data)"
+            )
+        elif calibration_mode == "coca":
+            # Self-adapting: owns its optimization internally, fits per batch.
+            logger.info("Calibrator SELF-ADAPTING (coca) | fits its temperature per batch")
 
     def forward(self, x, labels=None):
         for _ in range(self.steps):
@@ -87,7 +134,7 @@ class DynamicDuo(nn.Module):
             )
         if labels is not None:
             self._log_batch_diagnostics(z_large, z_small, outputs, labels)
-        return outputs
+        return outputs, z_large, z_small
 
     def _reset_diagnostics(self):
         self._diag = {k: {"n": 0, "acc_sum": 0.0, "nll_sum": 0.0, "ent_sum": 0.0,
@@ -131,6 +178,9 @@ class DynamicDuo(nn.Module):
                 self.small, self.small_optimizer,
                 self.small_model_state, self.small_optimizer_state
             )
+        # Calibrator: fixed_ts is frozen (nothing to reset); coca self-adapts
+        # fresh each batch (reset_each_batch), so there is nothing to restore.
+
 
 @torch.enable_grad()
 def forward_and_adapt(x, large, large_preprocess, large_optimizer,
@@ -140,14 +190,18 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
     device = next(large.parameters()).device
     x_large = _preprocess_batch(x, large_preprocess, device)
     x_small = _preprocess_batch(x, small_preprocess, device)
-    
+
     z_large = large(x_large)
     z_small = small(x_small)
 
     if signal == "duo":
         zl = z_large if adapt_large else z_large.detach()
         zs = z_small if adapt_small else z_small.detach()
-        z_bar = joint_calibrator(zl, zs)
+        # Differentiable calibration path. fixed_ts: temps frozen, grad flows
+        # only to the un-detached model logits. coca: fits its tau internally on
+        # detached logits (separate optimizer/loss), returns aggregated logits
+        # that are differentiable w.r.t. the model logits.
+        z_bar = joint_calibrator.calibrate_with_grad(zl, zs)
         loss = softmax_entropy(z_bar).mean(0)
         logger.debug(f"duo loss={loss.item():.4f}")
 
@@ -159,9 +213,8 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
         for opt, do in ((large_optimizer, adapt_large),
                         (small_optimizer, adapt_small)):
             if do and opt is not None:
-                opt.zero_grad()
-        
-        joint_calibrator.zero_grad(set_to_none=True)
+                opt.zero_grad(set_to_none=True)
+        # No calibrator grad to clear: fixed_ts is frozen, coca manages its own.
 
     elif signal == "indep":  # indep
         if adapt_large:
@@ -180,7 +233,9 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
         raise ValueError(f"Invalid signal {signal} in mode {mode}")
 
     with torch.no_grad():
-        return joint_calibrator(z_large, z_small), z_large, z_small
+        # Inference path: calibrate() (no-grad combination). For coca this reuses
+        # the tau already fit on this batch by calibrate_with_grad (same logits).
+        return joint_calibrator.calibrate(z_large, z_small), z_large, z_small
 
 def _configure_model_frozen(model, norm_type):
     """Put a non-adapting model in train mode with batch statistics but no grad.
@@ -188,12 +243,12 @@ def _configure_model_frozen(model, norm_type):
     This gives better-calibrated logits on corrupted data (batch stats replace
     stale running stats) without allowing any parameter adaptation.
     """
-    configure_model(model, norm_type)
+    model = configure_model(model, norm_type)
     model.requires_grad_(False)
     return model
 
 
-def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, mode, cfg, steps):
+def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, calibration_mode, mode, cfg, steps):
     """
     Configure a DynamicDuo for TENT adaptation.
     """
@@ -245,21 +300,24 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         small_preprocess=small_preprocess,
         small_optimizer=small_optimizer,
         joint_calibrator=joint_calibrator,
+        calibration_mode=calibration_mode,
         mode=mode,
-        steps=steps
+        steps=steps, 
     )
     return dynamic_duo
 
 def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
     """
     Run a forward pass through the DynamicDuo on the given data loader.
-
+    Returns a dict of {model_name: probs} and labels.
     """
-    all_outputs = []
+    all_duo, all_large, all_small = [], [], []
     all_labels = []
     for imgs, labels in tqdm(data_loader, desc="run"):
-        outputs = duo(imgs, labels=labels)
-        all_outputs.append(outputs.cpu())
+        outputs, z_large, z_small = duo(imgs, labels=labels)
+        all_duo.append(outputs.detach().cpu())
+        all_large.append(z_large.detach().cpu())
+        all_small.append(z_small.detach().cpu())
         all_labels.append(labels.cpu())
 
         if wandb_run is not None:
@@ -275,15 +333,18 @@ def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
                     log_dict[f"{wandb_prefix}{name}/avg_ent"] = avg_ent
             wandb_run.log(log_dict)
 
-    logits = torch.cat(all_outputs)
-    probs = F.softmax(logits, dim=1)
-
-    return probs, torch.cat(all_labels)
+    labels = torch.cat(all_labels)
+    probs = {
+        "duo":   F.softmax(torch.cat(all_duo),   dim=1),
+        "large": F.softmax(torch.cat(all_large), dim=1),
+        "small": F.softmax(torch.cat(all_small), dim=1),
+    }
+    return probs, labels
 
 def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None):
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     run_name = (
-        f"{duo.mode} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | "
+        f"{duo.mode} | {duo.calibration_mode} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | "
         f"Tl={cfg['CALIBRATOR']['TL']} Ts={cfg['CALIBRATOR']['TS']} | steps={duo.steps}"
     )
     wandb_run = wandb.init(
@@ -291,6 +352,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
         name=run_name,
         config={
             "mode": duo.mode,
+            "calibration_mode": duo.calibration_mode,
             "adapt_large": adapt_large,
             "adapt_small": adapt_small,
             "signal": signal,
@@ -323,12 +385,19 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                                     device=next(duo.parameters()).device,
                                     batch_size=cfg["BS"], num_samples=num_samples, seed=seed)
             prefix = f"{corruption_type}/s{severity}/"
-            probs, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
-            metrics = get_metrics_dict(probs, labels)
-            logger.info(f"Results for {corruption_type} severity {severity}: {metrics}")
+            probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
+            metrics_by_model = {name: get_metrics_dict(p, labels) for name, p in probs_dict.items()}
 
-            wandb_run.log({f"{prefix}{k}": v for k, v in metrics.items()})
-            results_rows.append({"corruption": corruption_type, "severity": severity, **metrics})
+            wandb_log = {}
+            for model_name, metrics in metrics_by_model.items():
+                wandb_log.update({f"{prefix}{model_name}/{k}": v for k, v in metrics.items()})
+            wandb_run.log(wandb_log)
+
+            logger.info(f"Results for {corruption_type} severity {severity}: {metrics_by_model['duo']}")
+            row = {"mode": duo.mode, "corruption": corruption_type, "severity": severity}
+            for model_name, metrics in metrics_by_model.items():
+                row.update({f"{model_name}/{k}": v for k, v in metrics.items()})
+            results_rows.append(row)
 
     if results_rows:
         cols = list(results_rows[0].keys())
