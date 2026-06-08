@@ -31,11 +31,6 @@ Conventions (matching the paper)
   tau = exp(rho), rho the free scalar, purely to keep tau > 0 under gradient
   steps (otherwise a step can drive tau negative and exp(p_s/tau) blows up).
   This does not change the objective in Eqn. 1 -- it is still one parameter.
-
-Numerical note: Eqn. 2 uses raw exp(logits), faithfully reproduced here. For
-classifiers with very large logits this can overflow in float32; if you hit
-that, the honest fix is to clamp logits upstream or switch the projection to
-softmax, but the default below is the literal paper objective.
 """
 
 from __future__ import annotations

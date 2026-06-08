@@ -16,21 +16,6 @@ class JointCoca(BaseJointCalibrator):
     (COCA Eqns 1-2, via CocaTemperature), then returns aggregated ensemble
     logits.
 
-    Aggregation (logit space):
-        p_e = (z_l + z_s / tau) / 2          # anchor + tau-aligned source mean
-
-    Sharpness-preserving rescale (per sample, detached):
-        T   = max_c p_e / max_c z_l
-        out = p_e / T                        # => max_c out == max_c z_l
-
-    so aggregation never changes the magnitude of the winning logit relative to
-    the anchor. T is treated as a constant (no grad through the max), so on the
-    duo loss path gradients flow into the model logits exactly as with any other
-    calibrator.
-
-    Regime: self-adapting. It owns its optimizer (inside CocaTemperature) and
-    fits tau itself per batch -- DynamicDuo neither freezes nor steps it.
-
     Note: DynamicDuo calls the calibrator twice per batch (calibrate_with_grad
     on the loss path, then calibrate on the output path), so tau is fit twice.
     With reset_each_batch=True the two fits run on the same logits from tau=1 and

@@ -1,5 +1,4 @@
 import torch
-import torch.jit
 import torch.nn as nn
 import torch.optim as optim
 from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, softmax_entropy, collect_params
@@ -31,7 +30,7 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "coca"}
+_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -48,13 +47,17 @@ class DynamicDuo(nn.Module):
       * `calibrate(z_l, z_s)` on the no-grad inference path.
     The first logits argument is the large (anchor) model.
 
-    Exactly two calibration regimes are supported (`calibration_mode`):
-      * "fixed_ts"  -> JointFixedTS: two temperatures fit on held-out data
-                       before test time. Frozen here, so under the duo entropy
-                       loss only the models' BN params adapt. Never reset.
-      * "coca"      -> JointCoca: self-adapting. It fits its own temperature
-                       per batch inside calibrate(); DynamicDuo neither freezes
-                       nor steps nor resets it.
+    Calibration modes (`calibration_mode`):
+      * "fixed_ts"   -> JointFixedTS pre-tuned on held-out data. Frozen here;
+                        only BN params adapt. Never reset.
+      * "coca"       -> JointCoca: self-adapting per batch (owns its optimizer).
+      * "duo_entropy"-> JointDuoEntropy: like coca but minimises ensemble
+                        entropy with two temperatures.
+      * "oracle_ts"  -> JointFixedTS fitted per-corruption on the test data
+                        itself (uses test labels — cheating oracle baseline).
+                        evaluate_dynamic_duo handles the tuning; the calibrator
+                        starts unfrozen and is frozen after each per-corruption
+                        fit. Not valid outside evaluate_dynamic_duo.
 
     There is no test-time-trainable (model-owned) calibrator regime anymore.
     """
@@ -119,9 +122,13 @@ class DynamicDuo(nn.Module):
                 f"Calibrator FIXED (fixed_ts) | froze {n_frozen} param tensors "
                 f"(assumed pre-tuned on held-out data)"
             )
-        elif calibration_mode == "coca":
+        elif calibration_mode in {"coca", "duo_entropy"}:
             # Self-adapting: owns its optimization internally, fits per batch.
-            logger.info("Calibrator SELF-ADAPTING (coca) | fits its temperature per batch")
+            logger.info(f"Calibrator SELF-ADAPTING ({calibration_mode}) | fits its temperature(s) per batch")
+        elif calibration_mode == "oracle_ts":
+            # Oracle: temperatures fitted per-corruption by evaluate_dynamic_duo.
+            # Left unfrozen here; evaluate_dynamic_duo freezes after each fit.
+            logger.info("Calibrator ORACLE (oracle_ts) | will be fitted per-corruption on test data")
 
     def forward(self, x, labels=None):
         for _ in range(self.steps):
@@ -271,7 +278,7 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         logger.info(f"model for adaptation: %s", large_model)
         logger.info(f"params for adaptation: %s", param_names)
         logger.info(f"optimizer for adaptation: %s", large_optimizer)
-    elif signal == "duo":
+    else: #if signal == "duo":
         logger.info(f"Configuring large model (frozen, batch stats) with norm={cfg['LARGE']['NORM']}")
         _configure_model_frozen(large, cfg["LARGE"]["NORM"])
 
@@ -287,7 +294,7 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         logger.info(f"model for adaptation: %s", small_model)
         logger.info(f"params for adaptation: %s", param_names)
         logger.info(f"optimizer for adaptation: %s", small_optimizer)
-    elif signal == "duo":
+    else: #if signal == "duo":
         logger.info(f"Configuring small model (frozen, batch stats) with norm={cfg['SMALL']['NORM']}")
         _configure_model_frozen(small, cfg["SMALL"]["NORM"])
 
@@ -341,11 +348,24 @@ def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
     }
     return probs, labels
 
+@torch.no_grad()
+def collect_logits(large, large_preprocess, small, small_preprocess, data_loader):
+    """Forward pass over data_loader without any adaptation; returns stacked logits and labels."""
+    device = next(large.parameters()).device
+    all_z_l, all_z_s, all_labels = [], [], []
+    for imgs, labels in tqdm(data_loader, desc="collect logits"):
+        x_l = _preprocess_batch(imgs, large_preprocess, device)
+        x_s = _preprocess_batch(imgs, small_preprocess, device)
+        all_z_l.append(large(x_l).cpu())
+        all_z_s.append(small(x_s).cpu())
+        all_labels.append(labels.cpu())
+    return torch.cat(all_z_l), torch.cat(all_z_s), torch.cat(all_labels)
+
+
 def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None):
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     run_name = (
-        f"{duo.mode} | {duo.calibration_mode} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | "
-        f"Tl={cfg['CALIBRATOR']['TL']} Ts={cfg['CALIBRATOR']['TS']} | steps={duo.steps}"
+        f"{duo.mode} | {duo.calibration_mode} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
     )
     wandb_run = wandb.init(
         project=wandb_project,
@@ -365,8 +385,10 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             "small/norm": cfg["SMALL"]["NORM"],
             "small/lr": cfg["SMALL"]["OPTIM"]["LR"],
             "small/optim": cfg["SMALL"]["OPTIM"]["METHOD"],
-            "calibrator/Tl": cfg["CALIBRATOR"]["TL"],
-            "calibrator/Ts": cfg["CALIBRATOR"]["TS"],
+            **({
+                "calibrator/Tl": cfg["CALIBRATOR"]["TL"],
+                "calibrator/Ts": cfg["CALIBRATOR"]["TS"],
+            } if duo.calibration_mode == "fixed_ts" else {}),
             "eval/corruptions": cfg["EVAL"]["CORRUPTIONS"],
             "eval/severities": cfg["EVAL"]["SEVERITIES"],
         },
@@ -381,10 +403,37 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                 logger.info("resetting model")
             except:
                 logger.warning("not resetting model")
-            loader = load_imagenetC(cfg["TEST_DIR"], severity, [corruption_type],
-                                    device=next(duo.parameters()).device,
-                                    batch_size=cfg["BS"], num_samples=num_samples, seed=seed)
+
             prefix = f"{corruption_type}/s{severity}/"
+            device = next(duo.parameters()).device
+            loader_kwargs = dict(
+                severities=severity, corruption_types=[corruption_type],
+                device=device, batch_size=cfg["BS"],
+                num_samples=num_samples, seed=seed,
+            )
+
+            if duo.calibration_mode == "oracle_ts":
+                # Collect unadapted logits with test labels — the oracle cheat.
+                z_l, z_s, labels_all = collect_logits(
+                    duo.large, duo.large_preprocess,
+                    duo.small, duo.small_preprocess,
+                    load_imagenetC(cfg["TEST_DIR"], **loader_kwargs),
+                )
+                cal = duo.joint_calibrator
+                for p in cal.parameters():
+                    p.requires_grad_(True)
+                cal.tune(z_l, z_s, labels_all)
+                for p in cal.parameters():
+                    p.requires_grad_(False)
+                logger.info(
+                    f"Oracle TS fitted | Tl={cal.Tl.item():.4f}  Ts={cal.Ts.item():.4f}"
+                )
+                wandb_run.log({
+                    f"{prefix}oracle/Tl": cal.Tl.item(),
+                    f"{prefix}oracle/Ts": cal.Ts.item(),
+                })
+
+            loader = load_imagenetC(cfg["TEST_DIR"], **loader_kwargs)
             probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
             metrics_by_model = {name: get_metrics_dict(p, labels) for name, p in probs_dict.items()}
 

@@ -3,6 +3,7 @@ from src.utils.model import get_model
 from src.utils.data import load_config
 from src.calibrators.fixed_TS import JointFixedTS
 from src.calibrators.joint_coca import JointCoca
+from src.calibrators.joint_duo_entropy import JointDuoEntropy
 import argparse
 import torch
 
@@ -35,10 +36,16 @@ if __name__ == "__main__":
     large_model = large_model.to(device)
     small_model = small_model.to(device)
     
-    if args.calibration_mode == "fixed": 
+    if args.calibration_mode == "fixed_ts": 
         calibrator = JointFixedTS(Tl=config["CALIBRATOR"]["TL"], Ts=config["CALIBRATOR"]["TS"])
-    elif args.calibration_mode == "coca": 
+    elif args.calibration_mode == "coca":
         calibrator = JointCoca(num_steps=5, lr=5e-2)
+    elif args.calibration_mode == "duo_entropy":
+        calibrator = JointDuoEntropy(num_steps=10, lr=5e-2)
+    elif args.calibration_mode == "oracle_ts":
+        calibrator = JointFixedTS()  # temperatures fitted per-corruption by evaluate_dynamic_duo
+    else:
+        raise ValueError(f"Invalid calibration mode: {args.calibration_mode}")
 
     # Set up Dynamic Duo
 
