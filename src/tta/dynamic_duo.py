@@ -5,6 +5,7 @@ from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_a
 from src.utils.data import load_imagenetC
 from src.utils.metrics import get_metrics_dict
 from src.utils.model import _preprocess_batch
+from src.utils.logit_transforms import logit_pnorm
 import logging
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -73,6 +74,7 @@ class DynamicDuo(nn.Module):
         mode: str = "both_duo",
         steps: int = 1,
         calibration_mode: str = "fixed_ts",
+        norm_logits: bool = False,
     ):
         super().__init__()
         assert mode in _MODES, f"Invalid mode {mode}. Must be one of {_MODES}."
@@ -88,6 +90,7 @@ class DynamicDuo(nn.Module):
         self.mode = mode
         self.steps = steps
         self.calibration_mode = calibration_mode
+        self.norm_logits = norm_logits
 
         self.adapt_large, self.adapt_small, _ = _MODE_SPEC[mode]
         logger.info(
@@ -138,6 +141,7 @@ class DynamicDuo(nn.Module):
                 self.small, self.small_preprocess, self.small_optimizer,
                 self.joint_calibrator,
                 self.mode,
+                norm_logits=self.norm_logits
             )
         if labels is not None:
             self._log_batch_diagnostics(z_large, z_small, outputs, labels)
@@ -192,7 +196,7 @@ class DynamicDuo(nn.Module):
 @torch.enable_grad()
 def forward_and_adapt(x, large, large_preprocess, large_optimizer,
                       small, small_preprocess, small_optimizer,
-                      joint_calibrator, mode):
+                      joint_calibrator, mode, norm_logits=False):
     adapt_large, adapt_small, signal = _MODE_SPEC[mode]
     device = next(large.parameters()).device
     x_large = _preprocess_batch(x, large_preprocess, device)
@@ -200,6 +204,10 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
 
     z_large = large(x_large)
     z_small = small(x_small)
+
+    if norm_logits:
+        z_large = logit_pnorm(z_large, p=2.0, tau=1.0)
+        z_small = logit_pnorm(z_small, p=2.0, tau=1.0)
 
     if signal == "duo":
         zl = z_large if adapt_large else z_large.detach()
@@ -255,7 +263,7 @@ def _configure_model_frozen(model, norm_type):
     return model
 
 
-def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, calibration_mode, mode, cfg, steps):
+def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, calibration_mode, mode, cfg, steps, norm_logits=False):
     """
     Configure a DynamicDuo for TENT adaptation.
     """
@@ -310,6 +318,7 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         calibration_mode=calibration_mode,
         mode=mode,
         steps=steps, 
+        norm_logits=norm_logits,
     )
     return dynamic_duo
 
@@ -456,8 +465,4 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
         wandb_run.log({"summary/results": table})
 
     wandb_run.finish()
-
-
-def tune_duo(duo, data_loader):
-    pass
 

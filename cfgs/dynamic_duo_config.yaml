@@ -7,8 +7,8 @@ CALIBRATOR:
   # TS: 4.8508
   # TL: 0.4637
   # fit on clean only: 
-  TS: 0.6071
-  TL: 0.8757
+  TS: 1.0
+  TL: 1.0
   CORRUPTIONS:
     - 'gaussian_blur'
     - 'saturate'

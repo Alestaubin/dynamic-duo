@@ -15,6 +15,18 @@ python scripts/run_dynamic_duo.py \
     --num_samples 1000 \
     --seed 0 \
     --calibration_mode coca
+
+source /scratch0/alxstaub/ddenv/bin/activate
+export PYTHONPATH=$PYTHONPATH:~/dynamic-duo
+
+CUDA_VISIBLE_DEVICES=0 
+python scripts/run_dynamic_duo.py \
+    --config cfgs/dynamic_duo_config.yaml \
+    --mode no_adapt \
+    --steps 1 \
+    --seed 0 \
+    --calibration_mode fixed_ts
+
 """
 
 if __name__ == "__main__":
@@ -25,6 +37,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to use from each corruption/severity subset (default: all)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility (when using fraction < 1.0)")  
     parser.add_argument("--calibration_mode", type=str, default="fixed", help="Calibrator mode for combining the duo logits.")
+    parser.add_argument("--norm_logits", action="store_true", help="Whether to apply logit normalization (p-norm) before feeding into the calibrator.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -59,6 +72,7 @@ if __name__ == "__main__":
         calibration_mode=args.calibration_mode,
         cfg = config,
         steps=args.steps,
+        norm_logits=args.norm_logits
     )
     # Evaluate Dynamic Duo on ImageNet-C
     evaluate_dynamic_duo(duo, config, num_samples=args.num_samples, seed=args.seed)

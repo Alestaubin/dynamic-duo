@@ -8,8 +8,7 @@ python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml \
     --out checkpoints/fixed_ts/default
 
 # Val only
-python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml \
-    --out checkpoints/fixed_ts/clean --clean_only
+python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml --out checkpoints/fixed_ts/clean_norm --clean_only
 """
 
 import argparse
@@ -19,7 +18,7 @@ import torch
 from src.utils.data import load_config
 from src.utils.logits import get_model_logits
 from src.calibrators.fixed_TS import JointFixedTS
-
+from src.utils.logit_transforms import logit_pnorm
 
 def main():
     parser = argparse.ArgumentParser()
@@ -61,6 +60,8 @@ def main():
     print("Loading val logits...")
     zl, y = get_logits(large_name)
     zs, _ = get_logits(small_name)
+    zl = logit_pnorm(zl, p=2.0, tau=1.0)
+    zs = logit_pnorm(zs, p=2.0, tau=1.0)
     large_l.append(zl); small_l.append(zs); labels_l.append(y)
 
     # Calibrator corruptions
@@ -73,6 +74,8 @@ def main():
                 print(f"  + calibrator: {corruption} sev={sev}")
                 zl, y = get_logits(large_name, corruption, sev)
                 zs, _ = get_logits(small_name, corruption, sev)
+                zl = logit_pnorm(zl, p=2.0, tau=1.0)
+                zs = logit_pnorm(zs, p=2.0, tau=1.0)
                 large_l.append(zl); small_l.append(zs); labels_l.append(y)
 
 
