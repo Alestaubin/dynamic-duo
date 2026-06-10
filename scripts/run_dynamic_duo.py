@@ -10,11 +10,11 @@ import torch
 """
 python scripts/run_dynamic_duo.py \
     --config cfgs/dynamic_duo_config.yaml \
-    --mode both_duo \
+    --mode no_adapt \
     --steps 1 \
     --num_samples 1000 \
     --seed 0 \
-    --calibration_mode coca
+    --calibration_mode duo_entropy
 
 source /scratch0/alxstaub/ddenv/bin/activate
 export PYTHONPATH=$PYTHONPATH:~/dynamic-duo
@@ -41,6 +41,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     config = load_config(args.config)
     # Load models and preprocessors

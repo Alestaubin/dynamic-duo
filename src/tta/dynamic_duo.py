@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, softmax_entropy, collect_params
 from src.utils.data import load_imagenetC
-from src.utils.metrics import get_metrics_dict
+from src.utils.metrics import get_metrics_dict, get_intersection_metrics
 from src.utils.model import _preprocess_batch
 from src.utils.logit_transforms import logit_pnorm
 import logging
@@ -343,8 +343,11 @@ def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
                 if d["n"] > 0:
                     avg_acc = d["acc_sum"] / d["n"]
                     avg_ent = d["ent_sum"] / d["n"]
+                    avg_nll = d["nll_sum"] / d["n"]
                     log_dict[f"{wandb_prefix}{name}/batch_acc"] = d["acc_last"]
                     log_dict[f"{wandb_prefix}{name}/avg_acc"] = avg_acc
+                    log_dict[f"{wandb_prefix}{name}/batch_nll"] = d["nll_last"]
+                    log_dict[f"{wandb_prefix}{name}/avg_nll"] = avg_nll
                     log_dict[f"{wandb_prefix}{name}/batch_ent"] = d["ent_last"]
                     log_dict[f"{wandb_prefix}{name}/avg_ent"] = avg_ent
             wandb_run.log(log_dict)
@@ -445,16 +448,19 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             loader = load_imagenetC(cfg["TEST_DIR"], **loader_kwargs)
             probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
             metrics_by_model = {name: get_metrics_dict(p, labels) for name, p in probs_dict.items()}
+            intersection_metrics = get_intersection_metrics(probs_dict, labels)
 
             wandb_log = {}
             for model_name, metrics in metrics_by_model.items():
                 wandb_log.update({f"{prefix}{model_name}/{k}": v for k, v in metrics.items()})
+            wandb_log.update({f"{prefix}intersection/{k}": v for k, v in intersection_metrics.items()})
             wandb_run.log(wandb_log)
 
             logger.info(f"Results for {corruption_type} severity {severity}: {metrics_by_model['duo']}")
             row = {"mode": duo.mode, "corruption": corruption_type, "severity": severity}
             for model_name, metrics in metrics_by_model.items():
                 row.update({f"{model_name}/{k}": v for k, v in metrics.items()})
+            row.update({f"intersection/{k}": v for k, v in intersection_metrics.items()})
             results_rows.append(row)
 
     if results_rows:

@@ -15,6 +15,7 @@ export PYTHONPATH=$PYTHONPATH:~/dynamic-duo
 nvidia-smi
 
 tmux new -s duo
+
 source /scratch0/alxstaub/ddenv/bin/activate
 # inside the session, run your python command
 # detach with Ctrl-b then d; reattach later with: tmux attach -t duo
