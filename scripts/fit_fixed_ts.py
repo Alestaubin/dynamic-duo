@@ -8,8 +8,7 @@ python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml \
     --out checkpoints/fixed_ts/default
 
 # Val only
-python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml \
-    --out checkpoints/fixed_ts/clean --clean_only
+python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml --out checkpoints/fixed_ts/clean --clean_only
 """
 
 import argparse
@@ -19,7 +18,7 @@ import torch
 from src.utils.data import load_config
 from src.utils.logits import get_model_logits
 from src.calibrators.fixed_TS import JointFixedTS
-
+from src.utils.logit_transforms import logit_pnorm
 
 def main():
     parser = argparse.ArgumentParser()
@@ -32,13 +31,14 @@ def main():
                         help="Train on clean val only; ignore calibrator corruptions")
     parser.add_argument("--no_save_if_exists", action="store_true",
                         help="Skip if output already exists")
+    parser.add_argument("--norm_logits", action="store_true", help="Whether to apply logit normalization (p-norm) before fitting the calibrator.")
     args = parser.parse_args()
 
     if args.no_save_if_exists and os.path.exists(os.path.join(args.out, "config.json")):
         print(f"Already exists: {args.out} — skipping")
         return
 
-    cfg         = load_config(args.config)
+    cfg         = load_config(args.config)  
     large_name  = cfg["LARGE"]["NAME"]
     small_name  = cfg["SMALL"]["NAME"]
     val_dir     = cfg["VAL_DIR"]
@@ -61,6 +61,9 @@ def main():
     print("Loading val logits...")
     zl, y = get_logits(large_name)
     zs, _ = get_logits(small_name)
+    if args.norm_logits:
+        zl = logit_pnorm(zl, p=2.0, tau=1.0)
+        zs = logit_pnorm(zs, p=2.0, tau=1.0)
     large_l.append(zl); small_l.append(zs); labels_l.append(y)
 
     # Calibrator corruptions
@@ -73,6 +76,9 @@ def main():
                 print(f"  + calibrator: {corruption} sev={sev}")
                 zl, y = get_logits(large_name, corruption, sev)
                 zs, _ = get_logits(small_name, corruption, sev)
+                if args.norm_logits:
+                    zl = logit_pnorm(zl, p=2.0, tau=1.0)
+                    zs = logit_pnorm(zs, p=2.0, tau=1.0)
                 large_l.append(zl); small_l.append(zs); labels_l.append(y)
 
 
