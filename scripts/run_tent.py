@@ -7,7 +7,7 @@ python scripts/run_tent.py --config cfgs/dynamic_duo_config.yaml --mode small --
 from src.utils.model import get_model, _preprocess_batch
 from src.utils.data import load_config, load_imagenetC
 from src.utils.metrics import get_metrics_dict
-from src.calibrators.fixed_TS import JointFixedTS
+from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.tta.tent import (setup_tent, copy_model_and_optimizer,
                           load_model_and_optimizer, forward_and_adapt, softmax_entropy)
 import torch

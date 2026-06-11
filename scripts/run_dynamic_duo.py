@@ -1,7 +1,7 @@
 from src.tta.dynamic_duo import setup_duo, evaluate_dynamic_duo
 from src.utils.model import get_model
 from src.utils.data import load_config
-from src.calibrators.fixed_TS import JointFixedTS
+from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_duo_entropy import JointDuoEntropy
 from src.calibrators.joint_batch_nll_oracle import JointBatchNLLOracle
@@ -40,6 +40,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility (when using fraction < 1.0)")  
     parser.add_argument("--calibration_mode", type=str, default="fixed", help="Calibrator mode for combining the duo logits.")
     parser.add_argument("--norm_logits", action="store_true", help="Whether to apply logit normalization (p-norm) before feeding into the calibrator.")
+    parser.add_argument("--fixed_ts_config", type=str, default=None, help="Path to a directory containing config.json with pre-tuned temperatures (required when --calibration_mode is fixed_ts).")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -51,9 +52,11 @@ if __name__ == "__main__":
     small_model, small_preprocess = get_model(config["SMALL"]["NAME"])
     large_model = large_model.to(device)
     small_model = small_model.to(device)
-    
-    if args.calibration_mode == "fixed_ts": 
-        calibrator = JointFixedTS(Tl=config["CALIBRATOR"]["TL"], Ts=config["CALIBRATOR"]["TS"])
+
+    if args.calibration_mode == "fixed_ts":
+        if args.fixed_ts_config is None:
+            parser.error("--fixed_ts_config is required when --calibration_mode is fixed_ts")
+        calibrator = JointFixedTS.load(args.fixed_ts_config)
     elif args.calibration_mode == "coca":
         calibrator = JointCoca(num_steps=5, lr=5e-2)
     elif args.calibration_mode == "duo_entropy":

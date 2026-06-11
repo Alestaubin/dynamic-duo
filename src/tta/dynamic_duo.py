@@ -38,8 +38,7 @@ class DynamicDuo(nn.Module):
 
     Wraps a large model and a small model (each already configured for TENT:
     BN affine params require grad, batch stats forced) and drives adaptation
-    according to the selected mode. This module is the sole owner of the
-    backward/step calls — the inner models should NOT be Tent-wrapped.
+    according to the selected mode.
 
     Calibrators
     -----------
@@ -63,8 +62,6 @@ class DynamicDuo(nn.Module):
                             sample per batch — the tightest per-instance oracle.
                             Both oracle variants use set_labels() injected by
                             DynamicDuo.forward().
-
-    There is no test-time-trainable (model-owned) calibrator regime anymore.
     """
     def __init__(
         self,
@@ -104,7 +101,6 @@ class DynamicDuo(nn.Module):
         )
         self._reset_diagnostics()
 
-        # Keep the calibrator on the models' device for a consistent graph.
         device = next(self.large.parameters()).device
         self.joint_calibrator.to(device)
 
@@ -119,8 +115,6 @@ class DynamicDuo(nn.Module):
                 copy_model_and_optimizer(self.small, self.small_optimizer)
 
         if calibration_mode == "fixed_ts":
-            # Fixed calibrator (pre-tuned): freeze so test-time grads cannot move
-            # its temperatures. Grad still flows to the model logits.
             n_frozen = 0
             for p in self.joint_calibrator.parameters():
                 p.requires_grad_(False)
@@ -388,8 +382,9 @@ def collect_logits(large, large_preprocess, small, small_preprocess, data_loader
 
 def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None):
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
+    calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
     run_name = (
-        f"{duo.mode} | {duo.calibration_mode} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
+        f"{duo.mode} | {calibration_name} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
     )
     wandb_run = wandb.init(
         project=wandb_project,
@@ -410,8 +405,8 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             "small/lr": cfg["SMALL"]["OPTIM"]["LR"],
             "small/optim": cfg["SMALL"]["OPTIM"]["METHOD"],
             **({
-                "calibrator/Tl": cfg["CALIBRATOR"]["TL"],
-                "calibrator/Ts": cfg["CALIBRATOR"]["TS"],
+                "calibrator/Tl": duo.joint_calibrator.Tl.item(),
+                "calibrator/Ts": duo.joint_calibrator.Ts.item(),
             } if duo.calibration_mode == "fixed_ts" else {}),
             "eval/corruptions": cfg["EVAL"]["CORRUPTIONS"],
             "eval/severities": cfg["EVAL"]["SEVERITIES"],

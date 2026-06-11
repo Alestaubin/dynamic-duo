@@ -1,8 +1,9 @@
 import logging
 
+from src.utils.logit_transforms import combine_logits
 import torch
 
-from src.calibrators.duo_entropy_temperature import DuoEntropyTemperature
+from src.calibrators.temp.duo_entropy_temperature import DuoEntropyTemperature
 from src.calibrators.base import _NoOpModule, BaseJointCalibrator
 
 logger = logging.getLogger(__name__)
@@ -12,11 +13,8 @@ class JointDuoEntropy(BaseJointCalibrator):
     """Per-batch entropy-minimizing calibrator with two temperatures.
 
     Each batch it fits T_l (large model) and T_s (small model) to minimize
-    the mean Shannon entropy of softmax((z_l/T_l + z_s/T_s)/2) via K gradient
-    steps on the two scalar log-temperatures (DuoEntropyTemperature).
+    the mean Shannon entropy of duo logits. Calls DuoEntropyTemperature, which does the actual optimization.
 
-    Convention: the FIRST logits argument is the LARGE (anchor) model,
-    matching DynamicDuo's calibrate(z_large, z_small).
     """
 
     def __init__(
@@ -63,20 +61,15 @@ class JointDuoEntropy(BaseJointCalibrator):
         self.last_entropy = self.ent.last_loss
         return self.last_tau_l, self.last_tau_s
 
-    def _aggregate(
-        self, z_l: torch.Tensor, z_s: torch.Tensor, tau_l: float, tau_s: float
-    ) -> torch.Tensor:
-        return (z_l / tau_l + z_s / tau_s) / 2.0
-
     # --- BaseJointCalibrator interface -------------------------------- #
     def calibrate_with_grad(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
         tau_l, tau_s = self._fit(logits_l, logits_s)
-        return self._aggregate(logits_l, logits_s, tau_l, tau_s)
+        return combine_logits(z_l=logits_l, z_s=logits_s, tau_l=tau_l, tau_s=tau_s)
 
     def calibrate(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
         tau_l, tau_s = self._fit(logits_l, logits_s)
         with torch.no_grad():
-            return self._aggregate(logits_l, logits_s, tau_l, tau_s)
+            return combine_logits(z_l=logits_l, z_s=logits_s, tau_l=tau_l, tau_s=tau_s)
 
     def forward(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
         return self.calibrate_with_grad(logits_l, logits_s)

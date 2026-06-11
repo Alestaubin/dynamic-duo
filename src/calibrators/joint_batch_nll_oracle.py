@@ -1,10 +1,11 @@
 import logging
 
+from src.utils.logit_transforms import combine_logits
 import torch
 
-from src.calibrators.batch_nll_temperature import BatchNLLTemperature
+from src.calibrators.temp.batch_nll_temperature import BatchNLLTemperature
 from src.calibrators.base import _NoOpModule, BaseJointCalibrator
-
+from src.utils.logit_transforms import combine_logits
 logger = logging.getLogger(__name__)
 
 
@@ -80,20 +81,15 @@ class JointBatchNLLOracle(BaseJointCalibrator):
         self.last_nll = self.kernel.last_loss
         return self.last_tau_l, self.last_tau_s
 
-    def _aggregate(
-        self, z_l: torch.Tensor, z_s: torch.Tensor, tau_l: float, tau_s: float
-    ) -> torch.Tensor:
-        return (z_l / tau_l + z_s / tau_s) / 2.0
-
     # --- BaseJointCalibrator interface -------------------------------- #
     def calibrate_with_grad(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
         tau_l, tau_s = self._fit(logits_l, logits_s)
-        return self._aggregate(logits_l, logits_s, tau_l, tau_s)
+        return combine_logits(z_l=logits_l, z_s=logits_s, tau_l=tau_l, tau_s=tau_s)
 
     def calibrate(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
         tau_l, tau_s = self._fit(logits_l, logits_s)
         with torch.no_grad():
-            return self._aggregate(logits_l, logits_s, tau_l, tau_s)
+            return combine_logits(z_l=logits_l, z_s=logits_s, tau_l=tau_l, tau_s=tau_s)
 
     def forward(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
         return self.calibrate_with_grad(logits_l, logits_s)

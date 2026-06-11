@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 from typing import List, Tuple, Type
+from src.utils.logit_transforms import combine_logits
 
 import torch
 
@@ -116,7 +117,7 @@ class DuoEntropyTemperature:
     # ------------------------------------------------------------------ #
     @torch.enable_grad()
     def adapt(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> Tuple[float, float]:
-        """Run K steps minimising ensemble entropy for one batch.
+        """Run K steps minimizing ensemble entropy for one batch.
 
         Parameters
         ----------
@@ -148,7 +149,7 @@ class DuoEntropyTemperature:
             self.optimizer.zero_grad(set_to_none=True)
             tau_l = self.rho_l.exp()
             tau_s = self.rho_s.exp()
-            z_ens = (z_l / tau_l + z_s / tau_s) / 2.0
+            z_ens = combine_logits(z_l, z_s, tau_l, tau_s)
             p = torch.softmax(z_ens, dim=-1)
             H = -(p * torch.log(p + self.eps)).sum(dim=-1).mean()
             H.backward()
@@ -163,37 +164,41 @@ class DuoEntropyTemperature:
         return self.temperature_l, self.temperature_s
 
 
-# ====================================================================== #
-# Self-contained sanity check.
-#
-# Setup: construct a pair whose per-sample optimal ensemble T* is known
-# by symmetry (identical logit scales -> T_l* = T_s* = T_true).  We check
-# that (a) both temperatures converge to roughly T_true, (b) entropy drops.
-# ====================================================================== #
-if __name__ == "__main__":
-    torch.manual_seed(42)
+class LBFGSDuoEntropyTemperature():
+    """Same as DuoEntropyTemperature but with L-BFGS optimizer and line search.
+    """
+    def __init__(
+        self,
+        max_iter: int = 50,
+        lr: float = 0.01,
+        init_temp_l: float = 1.0,
+        init_temp_s: float = 1.0,
+        reset_each_batch: bool = True,
+        t_min: float = 0.05,
+        t_max: float = 10.0,
+        eps: float = 1e-8,
+        device=None,
+        dtype: torch.dtype = torch.float32,
+    ) -> None:
+        self.init_temp_l = init_temp_l
+        self.init_temp_s = init_temp_s
 
-    B, C = 64, 1000
-    T_true = 2.0
+        self.prev_temp_l = init_temp_l
+        self.prev_temp_s = init_temp_s
 
-    # Both models have the same scale -> optimal is T_l = T_s = T_true.
-    z_base = torch.randn(B, C)
-    z_l = T_true * z_base
-    z_s = T_true * z_base
+        self.max_iter = max_iter
+        self.lr = lr
 
-    ent = DuoEntropyTemperature(num_steps=200, lr=5e-2, t_min=0.1, t_max=20.0)
-    tau_l, tau_s = ent.adapt(z_l, z_s)
+    def adapt(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> Tuple[float, float]:
+        """Run L-BFGS with line search to minimize ensemble entropy for one batch."""
+        Tl = torch.tensor(self.prev_temp_l, requires_grad=True, device=logits_l.device)
+        Ts = torch.tensor(self.prev_temp_s, requires_grad=True, device=logits_s.device)
+        optimizer = torch.optim.LBFGS([Tl, Ts], lr=self.lr, max_iter=self.max_iter)
 
-    print(f"true T          : {T_true:.4f}")
-    print(f"recovered T_l   : {tau_l:.4f}")
-    print(f"recovered T_s   : {tau_s:.4f}")
-    print(f"H[0] -> H[-1]   : {ent.loss_history[0]:.4e} -> {ent.loss_history[-1]:.4e}")
-    assert ent.loss_history[-1] < ent.loss_history[0], "entropy did not decrease"
+        def closure():
+            optimizer.zero_grad()
+            z_ens = combine_logits(logits_l, logits_s, Tl, Ts)
+            p = torch.softmax(z_ens, dim=-1)
+            loss.backward()
+            return loss
 
-    # Unrelated logit pair: should still find some finite temperatures.
-    z_l2 = torch.randn(B, C)
-    z_s2 = torch.randn(B, C)
-    tau_l2, tau_s2 = ent.adapt(z_l2, z_s2)
-    print(f"unrelated pair  : T_l={tau_l2:.4f}  T_s={tau_s2:.4f}  "
-          f"(final H={ent.loss_history[-1]:.4e})")
-    print("OK")

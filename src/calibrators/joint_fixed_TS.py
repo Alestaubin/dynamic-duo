@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from src.calibrators.base import BaseJointCalibrator, _NoOpModule
-
+from src.utils.logit_transforms import combine_logits
 
 class JointFixedTS(BaseJointCalibrator):
     """
@@ -35,9 +35,8 @@ class JointFixedTS(BaseJointCalibrator):
         t_range = torch.arange(0.05, 5.05, 0.2, device=self.device)
 
         for tl in t_range:
-            scaled_l = gl_g / tl
             for ts in t_range:
-                nll = F.cross_entropy((scaled_l + gs_g / ts) / 2, y_g).item()
+                nll = F.cross_entropy(combine_logits(gl_g, gs_g, tl, ts), y_g).item()
                 if nll < best_nll:
                     best_nll, best_Tl_g, best_Ts_g = nll, tl.item(), ts.item()
 
@@ -48,7 +47,7 @@ class JointFixedTS(BaseJointCalibrator):
         optimizer = optim.LBFGS([self.Tl, self.Ts], lr=0.01, max_iter=50)
         def closure():
             optimizer.zero_grad()
-            loss = F.cross_entropy((logits_l / self.Tl + logits_s / self.Ts) / 2, labels)
+            loss = F.cross_entropy(combine_logits(logits_l, logits_s, self.Tl, self.Ts), labels)
             loss.backward()
             return loss
         optimizer.step(closure)
@@ -57,7 +56,7 @@ class JointFixedTS(BaseJointCalibrator):
     def calibrate(self, logits_l, logits_s):
         self.to(self.device)
         logits_l, logits_s = logits_l.to(self.device), logits_s.to(self.device)
-        calibrated_logits = (logits_l / self.Tl + logits_s / self.Ts) / 2
+        calibrated_logits = combine_logits(z_l=logits_l, z_s=logits_s, tau_l=self.Tl.item(), tau_s=self.Ts.item())
         return calibrated_logits
 
     def calibrate_with_grad(self, logits_l, logits_s):

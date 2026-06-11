@@ -17,7 +17,7 @@ import torch
 
 from src.utils.data import load_config
 from src.utils.logits import get_model_logits
-from src.calibrators.fixed_TS import JointFixedTS
+from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.utils.logit_transforms import logit_pnorm
 
 def main():

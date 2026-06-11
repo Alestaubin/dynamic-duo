@@ -2,7 +2,7 @@ import logging
 
 import torch
 
-from src.calibrators.coca_temperature import CocaTemperature
+from src.calibrators.temp.coca_temperature import CocaTemperature
 from src.calibrators.base import _NoOpModule, BaseJointCalibrator
 logger = logging.getLogger(__name__)
 
