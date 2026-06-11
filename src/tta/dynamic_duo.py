@@ -30,7 +30,7 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts"}
+_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -53,11 +53,15 @@ class DynamicDuo(nn.Module):
       * "coca"       -> JointCoca: self-adapting per batch (owns its optimizer).
       * "duo_entropy"-> JointDuoEntropy: like coca but minimises ensemble
                         entropy with two temperatures.
-      * "oracle_ts"  -> JointFixedTS fitted per-corruption on the test data
-                        itself (uses test labels — cheating oracle baseline).
-                        evaluate_dynamic_duo handles the tuning; the calibrator
-                        starts unfrozen and is frozen after each per-corruption
-                        fit. Not valid outside evaluate_dynamic_duo.
+      * "oracle_ts"      -> JointFixedTS fitted per-corruption on test data
+                           (uses test labels — cheating). evaluate_dynamic_duo
+                           handles the tuning loop.
+      * "batch_oracle_ts" -> JointBatchNLLOracle: two shared scalars per batch,
+                            minimises NLL against batch labels (cheating).
+      * "sample_oracle_ts"-> JointSampleNLLOracle: one (T_l, T_s) pair per
+                            sample per batch — the tightest per-instance oracle.
+                            Both oracle variants use set_labels() injected by
+                            DynamicDuo.forward().
 
     There is no test-time-trainable (model-owned) calibrator regime anymore.
     """
@@ -129,8 +133,16 @@ class DynamicDuo(nn.Module):
             # Oracle: temperatures fitted per-corruption by evaluate_dynamic_duo.
             # Left unfrozen here; evaluate_dynamic_duo freezes after each fit.
             logger.info("Calibrator ORACLE (oracle_ts) | will be fitted per-corruption on test data")
+        elif calibration_mode == "batch_oracle_ts":
+            # Per-batch oracle: uses test labels injected via set_labels() each forward.
+            logger.info("Calibrator ORACLE (batch_oracle_ts) | fits T_l, T_s per batch using test labels")
+        elif calibration_mode == "sample_oracle_ts":
+            # Per-sample oracle: one (T_l, T_s) per sample, injected via set_labels().
+            logger.info("Calibrator ORACLE (sample_oracle_ts) | fits per-sample T_l, T_s using test labels")
 
     def forward(self, x, labels=None):
+        if self.calibration_mode in {"batch_oracle_ts", "sample_oracle_ts"} and labels is not None:
+            self.joint_calibrator.set_labels(labels)
         for _ in range(self.steps):
             outputs, z_large, z_small = forward_and_adapt(
                 x,
@@ -208,7 +220,7 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
         # only to the un-detached model logits. coca: fits its tau internally on
         # detached logits (separate optimizer/loss), returns aggregated logits
         # that are differentiable w.r.t. the model logits.
-        z_bar = joint_calibrator.calibrate_with_grad(zl, zs)
+        z_bar = joint_calibrator.calibrate_with_grad(logits_l=zl, logits_s=zs)
         loss = softmax_entropy(z_bar).mean(0)
         logger.debug(f"duo loss={loss.item():.4f}")
 
@@ -242,7 +254,7 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
     with torch.no_grad():
         # Inference path: calibrate() (no-grad combination). For coca this reuses
         # the tau already fit on this batch by calibrate_with_grad (same logits).
-        return joint_calibrator.calibrate(z_large, z_small), z_large, z_small
+        return joint_calibrator.calibrate(logits_l=z_large, logits_s=z_small), z_large, z_small
 
 def _configure_model_frozen(model, norm_type):
     """Put a non-adapting model in train mode with batch statistics but no grad.

@@ -4,6 +4,8 @@ from src.utils.data import load_config
 from src.calibrators.fixed_TS import JointFixedTS
 from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_duo_entropy import JointDuoEntropy
+from src.calibrators.joint_batch_nll_oracle import JointBatchNLLOracle
+from src.calibrators.joint_sample_nll_oracle import JointSampleNLLOracle
 import argparse
 import torch
 
@@ -15,6 +17,10 @@ python scripts/run_dynamic_duo.py \
     --num_samples 1000 \
     --seed 0 \
     --calibration_mode coca
+
+python scripts/run_dynamic_duo.py --config cfgs/dynamic_duo_config.yaml \
+    --mode no_adapt --steps 1 --calibration_mode oracle_ts
+
 """
 
 if __name__ == "__main__":
@@ -44,6 +50,10 @@ if __name__ == "__main__":
         calibrator = JointDuoEntropy(num_steps=10, lr=5e-2)
     elif args.calibration_mode == "oracle_ts":
         calibrator = JointFixedTS()  # temperatures fitted per-corruption by evaluate_dynamic_duo
+    elif args.calibration_mode == "batch_oracle_ts":
+        calibrator = JointBatchNLLOracle(num_steps=20, lr=5e-2)
+    elif args.calibration_mode == "sample_oracle_ts":
+        calibrator = JointSampleNLLOracle(num_steps=20, lr=5e-2)
     else:
         raise ValueError(f"Invalid calibration mode: {args.calibration_mode}")
 
