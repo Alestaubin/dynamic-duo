@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 from tqdm import tqdm
 
-from src.utils.data import load_imagenetC, _pil_collate_fn
+from src.utils.data import _pil_collate_fn
 from src.utils.model import get_model, _preprocess_batch
 
 
@@ -42,18 +42,18 @@ def get_model_logits(
     model = model.to(device).eval()
 
     if corruption is None:
-        loader = DataLoader(
-            datasets.ImageFolder(val_dir),
-            batch_size=batch_size, shuffle=False,
-            num_workers=num_workers, pin_memory=(device.type == "cuda"),
-            collate_fn=_pil_collate_fn,
-        )
+        ds = datasets.ImageFolder(val_dir)
     else:
-        loader = load_imagenetC(
-            data_dir=test_dir, severities=[severity],
-            corruption_types=[corruption], device=device,
-            batch_size=batch_size, num_workers=num_workers,
-        )
+        ds = datasets.ImageFolder(os.path.join(test_dir, corruption, str(severity)))
+
+    # shuffle=False is required: logits are cached per-model and later aligned by
+    # index across models, so every model must iterate the data in the same order.
+    loader = DataLoader(
+        ds,
+        batch_size=batch_size, shuffle=False,
+        num_workers=num_workers, pin_memory=(device.type == "cuda"),
+        collate_fn=_pil_collate_fn,
+    )
 
     all_logits, all_labels = [], []
     with torch.no_grad():

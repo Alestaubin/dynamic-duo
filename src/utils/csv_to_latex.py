@@ -67,7 +67,7 @@ def format_row(label, prefix, data):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--csv_path", help="Path to the W&B export CSV")
+    parser.add_argument("csv_path", help="Path to the W&B export CSV")
     parser.add_argument("--severity", default="5", help="Severity to extract (default: 5)")
     args = parser.parse_args()
 

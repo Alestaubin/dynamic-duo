@@ -1,5 +1,7 @@
 import os
 import json
+import math
+import warnings
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,12 +19,13 @@ class JointFixedTS(BaseJointCalibrator):
         self.Ts = nn.Parameter(torch.ones(1)) if Ts is None else nn.Parameter(torch.tensor([Ts]))
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def tune(self, logits_l, logits_s, labels, grid_n: int = 50_000):
+    def tune(self, logits_l, logits_s, labels, grid_n: int = 50_000,
+             t_min: float = 0.05, t_max: float = 50.0, grid_steps: int = 25):
         self.to(self.device)
         logits_l, logits_s = logits_l.to(self.device), logits_s.to(self.device)
         labels = labels.to(self.device).long()
 
-        # 1. Grid Search on a random subset — L-BFGS refines on full data.
+        # 1. Grid search on a random subset to initialize L-BFGS.
         N = len(labels)
         if N > grid_n:
             idx = torch.randperm(N, device=self.device)[:grid_n]
@@ -32,26 +35,45 @@ class JointFixedTS(BaseJointCalibrator):
 
         best_nll = float("inf")
         best_Tl_g, best_Ts_g = 1.0, 1.0
-        t_range = torch.arange(0.05, 5.05, 0.2, device=self.device)
+        t_range = torch.logspace(math.log10(t_min), math.log10(t_max),
+                                 grid_steps, device=self.device)
 
         for tl in t_range:
             for ts in t_range:
-                nll = F.cross_entropy(combine_logits(gl_g, gs_g, tl, ts), y_g).item()
+                nll = F.cross_entropy(combine_logits(z_l=gl_g, z_s=gs_g, tau_l=tl, tau_s=ts), y_g).item()
                 if nll < best_nll:
                     best_nll, best_Tl_g, best_Ts_g = nll, tl.item(), ts.item()
 
-        self.Tl.data = torch.tensor([best_Tl_g], device=self.device)
-        self.Ts.data = torch.tensor([best_Ts_g], device=self.device)
+        # Warn if the grid optimum is pinned to a boundary
+        for name, val in (("Tl", best_Tl_g), ("Ts", best_Ts_g)):
+            if val <= t_min * 1.001 or val >= t_max * 0.999:
+                warnings.warn(
+                    f"{name} grid optimum ({val:.3f}) sits at the search "
+                    f"boundary [{t_min}, {t_max}]; consider widening the range "
+                    f"— the duo may want to (de)emphasise one model more strongly."
+                )
 
-        # 2. L-BFGS Refinement on full data
-        optimizer = optim.LBFGS([self.Tl, self.Ts], lr=0.01, max_iter=50)
+        print(f"Best temperatures found with grid search: Ts={best_Ts_g:.4f}, Tl={best_Tl_g:.4f}")
+
+        # 2. L-BFGS refinement on full data, in log-temperature space
+        log_Tl = torch.tensor([math.log(best_Tl_g)], device=self.device, requires_grad=True)
+        log_Ts = torch.tensor([math.log(best_Ts_g)], device=self.device, requires_grad=True)
+        optimizer = optim.LBFGS([log_Tl, log_Ts], lr=1.0, max_iter=100,
+                                line_search_fn="strong_wolfe")
         def closure():
             optimizer.zero_grad()
-            loss = F.cross_entropy(combine_logits(logits_l, logits_s, self.Tl, self.Ts), labels)
+            loss = F.cross_entropy(
+                combine_logits(z_l=logits_l, z_s=logits_s,
+                               tau_l=log_Tl.exp(), tau_s=log_Ts.exp()),
+                labels,
+            )
             loss.backward()
             return loss
         optimizer.step(closure)
-        print(f"Joint Naive Optimized: Tl={self.Tl.item():.4f}, Ts={self.Ts.item():.4f}")
+
+        self.Tl.data = log_Tl.detach().exp()
+        self.Ts.data = log_Ts.detach().exp()
+        print(f"Joint Naive Optimized: Ts={self.Ts.item():.4f}, Tl={self.Tl.item():.4f}")
 
     def calibrate(self, logits_l, logits_s):
         self.to(self.device)

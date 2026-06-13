@@ -24,7 +24,7 @@ from __future__ import annotations
 import math
 from typing import List, Tuple, Type
 from src.utils.logit_transforms import combine_logits
-
+from src.tta.tent import softmax_entropy
 import torch
 
 
@@ -161,6 +161,7 @@ class DuoEntropyTemperature:
             self.last_loss = float(H.detach())
             self.loss_history.append(self.last_loss)
 
+        print(f"Fitted temperatures: Tl={self.temperature_l:.4f}, Ts={self.temperature_s:.4f}, loss={self.last_loss:.4f}")
         return self.temperature_l, self.temperature_s
 
 
@@ -176,29 +177,50 @@ class LBFGSDuoEntropyTemperature():
         reset_each_batch: bool = True,
         t_min: float = 0.05,
         t_max: float = 10.0,
-        eps: float = 1e-8,
         device=None,
-        dtype: torch.dtype = torch.float32,
     ) -> None:
+        self.reset_each_batch = reset_each_batch
         self.init_temp_l = init_temp_l
         self.init_temp_s = init_temp_s
-
-        self.prev_temp_l = init_temp_l
-        self.prev_temp_s = init_temp_s
+        self.rho_l = init_temp_l
+        self.rho_s = init_temp_s
+        self._log_t_min = math.log(t_min)
+        self._log_t_max = math.log(t_max)
 
         self.max_iter = max_iter
         self.lr = lr
+        self.device = torch.device(device) if device is not None else None
+        self.last_loss: float = float("nan")
+    
+    def _reset(self): 
+        self.rho_l = self.init_temp_l
+        self.rho_s = self.init_temp_s
 
     def adapt(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> Tuple[float, float]:
         """Run L-BFGS with line search to minimize ensemble entropy for one batch."""
-        Tl = torch.tensor(self.prev_temp_l, requires_grad=True, device=logits_l.device)
-        Ts = torch.tensor(self.prev_temp_s, requires_grad=True, device=logits_s.device)
-        optimizer = torch.optim.LBFGS([Tl, Ts], lr=self.lr, max_iter=self.max_iter)
+        if self.reset_each_batch:
+            self._reset()
+            # print(f"Reset temperatures to init values: Tl={self.rho_l:.4f}, Ts={self.rho_s:.4f}")
+        device = logits_l.device
+        log_Tl = torch.tensor([math.log(float(self.rho_l))], device=device, requires_grad=True)
+        log_Ts = torch.tensor([math.log(float(self.rho_s))], device=device, requires_grad=True)
+
+        optimizer = torch.optim.LBFGS([log_Tl, log_Ts], lr=1.0, max_iter=100,
+                                line_search_fn="strong_wolfe")
 
         def closure():
             optimizer.zero_grad()
-            z_ens = combine_logits(logits_l, logits_s, Tl, Ts)
-            p = torch.softmax(z_ens, dim=-1)
+            z_ens = combine_logits(z_l=logits_l, z_s=logits_s, tau_l=log_Tl.exp(), tau_s=log_Ts.exp())
+            loss = softmax_entropy(z_ens).mean()
             loss.backward()
             return loss
 
+        loss = optimizer.step(closure)
+        self.last_loss = float(loss.detach()) if loss is not None else float("nan")
+        with torch.no_grad():
+            log_Tl.clamp_(self._log_t_min, self._log_t_max)
+            log_Ts.clamp_(self._log_t_min, self._log_t_max)
+        self.rho_l = log_Tl.detach().exp()
+        self.rho_s = log_Ts.detach().exp()
+        # print(f"Fitted temperatures: Tl={float(self.rho_l):.4f}, Ts={float(self.rho_s):.4f}, loss={self.last_loss:.4f}")
+        return self.rho_l, self.rho_s

@@ -472,9 +472,16 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
 
     if results_rows:
         cols = list(results_rows[0].keys())
+        numeric_cols = [c for c in cols if isinstance(results_rows[0][c], (int, float)) and c != "severity"]
+        avg_row = {c: results_rows[0][c] for c in cols}
+        avg_row["corruption"] = "average"
+        avg_row["severity"] = 0
+        for c in numeric_cols:
+            avg_row[c] = sum(r[c] for r in results_rows) / len(results_rows)
         table = wandb.Table(columns=cols)
         for row in results_rows:
             table.add_data(*[row[c] for c in cols])
+        table.add_data(*[avg_row[c] for c in cols])
         wandb_run.log({"summary/results": table})
 
     wandb_run.finish()
