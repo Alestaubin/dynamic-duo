@@ -38,7 +38,7 @@ SMALL:
   OPTIM:
     METHOD: "Adam"
     STEPS: 1       # Tune this per model
-    LR: 0.005     # Tune this per model
+    LR: 0.001     # Tune this per model
     BETA: 0.9
     WD: 0.0
     # METHOD: "SGD"
@@ -57,21 +57,21 @@ EVAL:
     # - 'saturate'
     # - 'spatter'
     # - 'speckle_noise'
-    # - 'brightness'
+    - 'brightness'
     - 'contrast'
     - 'defocus_blur'
-    # - 'elastic_transform'
-    # - 'fog'
-    # - 'frost'
-    # - 'gaussian_noise'
-    # - 'glass_blur'
+    - 'elastic_transform'
+    - 'fog'
+    - 'frost'
+    - 'gaussian_noise'
+    - 'glass_blur'
     - 'impulse_noise'
-    # - 'jpeg_compression'
-    # - 'motion_blur'
-    # - 'pixelate'
-    # - 'shot_noise'
+    - 'jpeg_compression'
+    - 'motion_blur'
+    - 'pixelate'
+    - 'shot_noise'
     - 'snow'
-    # - 'zoom_blur'
+    - 'zoom_blur'
   SEVERITIES:
     # - 1
     # - 2

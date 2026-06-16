@@ -31,7 +31,7 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts"}
+_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -138,7 +138,8 @@ class DynamicDuo(nn.Module):
             logger.info("Calibrator ORACLE (sample_oracle_ts) | fits per-sample T_l, T_s using test labels")
 
     def forward(self, x, labels=None):
-        if self.calibration_mode in {"batch_oracle_ts", "sample_oracle_ts"} and labels is not None:
+        if self.calibration_mode in {""
+        "", "sample_oracle_ts"} and labels is not None:
             self.joint_calibrator.set_labels(labels)
         for _ in range(self.steps):
             outputs, z_large, z_small = forward_and_adapt(

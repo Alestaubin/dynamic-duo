@@ -1,4 +1,5 @@
 import logging
+from typing import Literal
 
 import torch
 
@@ -33,6 +34,7 @@ class JointCoca(BaseJointCalibrator):
         lr: float = 5e-2,
         init_temp: float = 1.0,
         reset_each_batch: bool = True,
+        loss: Literal["l1", "entropy"] = "l1",
         t_min: float = 0.1,
         t_max: float = 10.0,
         eps: float = 1e-4,
@@ -44,6 +46,7 @@ class JointCoca(BaseJointCalibrator):
             lr=lr,
             init_temp=init_temp,
             reset_each_batch=reset_each_batch,
+            loss=loss,
             device=device,
         )
         self.t_min = t_min

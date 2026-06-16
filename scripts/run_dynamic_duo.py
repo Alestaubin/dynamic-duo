@@ -6,6 +6,8 @@ from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_duo_entropy import JointDuoEntropy
 from src.calibrators.joint_batch_nll_oracle import JointBatchNLLOracle
 from src.calibrators.joint_sample_nll_oracle import JointSampleNLLOracle
+from src.calibrators.joint_relative_entropy import JointRelativeEntropy
+
 import argparse
 import torch
 
@@ -25,9 +27,8 @@ CUDA_VISIBLE_DEVICES=0
 python scripts/run_dynamic_duo.py \
     --config cfgs/dynamic_duo_config.yaml \
     --mode no_adapt \
-    --steps 1 \
     --seed 0 \
-    --calibration_mode fixed_ts
+    --calibration_mode coca 
 
 """
 
@@ -57,6 +58,8 @@ if __name__ == "__main__":
         if args.fixed_ts_config is None:
             parser.error("--fixed_ts_config is required when --calibration_mode is fixed_ts")
         calibrator = JointFixedTS.load(args.fixed_ts_config)
+    elif args.calibration_mode == "coca_entropy":
+        calibrator = JointCoca(num_steps=5, lr=5e-2, loss="entropy")
     elif args.calibration_mode == "coca":
         calibrator = JointCoca(num_steps=5, lr=5e-2)
     elif args.calibration_mode == "duo_entropy":
@@ -67,6 +70,9 @@ if __name__ == "__main__":
         calibrator = JointBatchNLLOracle(num_steps=20, lr=5e-2)
     elif args.calibration_mode == "sample_oracle_ts":
         calibrator = JointSampleNLLOracle(num_steps=20, lr=5e-2)
+    elif args.calibration_mode == "relative_entropy":
+        calibrator = JointRelativeEntropy(init_w=0.0, t_max=10.0)
+
     else:
         raise ValueError(f"Invalid calibration mode: {args.calibration_mode}")
 

@@ -35,9 +35,10 @@ Conventions (matching the paper)
 
 from __future__ import annotations
 
-from typing import List, Type
+from typing import List, Literal, Type
 
 import torch
+from src.tta.tent import softmax_entropy
 
 
 class CocaTemperature:
@@ -69,14 +70,18 @@ class CocaTemperature:
         lr: float = 1e-2,
         init_temp: float = 1.0,
         reset_each_batch: bool = True,
+        loss: Literal["l1", "entropy"] = "l1",
         optimizer_cls: Type[torch.optim.Optimizer] = torch.optim.Adam,
         device=None,
         dtype: torch.dtype = torch.float32,
     ) -> None:
         if init_temp <= 0:
             raise ValueError("init_temp must be positive.")
+        if loss not in ("l1", "entropy"):
+            raise ValueError(f"loss must be 'l1' or 'entropy', got {loss!r}.")
         self.num_steps = num_steps
         self.lr = lr
+        self.loss = loss
         self.init_log_temp = float(torch.log(torch.tensor(init_temp)))
         self.reset_each_batch = reset_each_batch
         self.optimizer_cls = optimizer_cls
@@ -131,14 +136,24 @@ class CocaTemperature:
         if self.device is not None:
             p_a, p_s = p_a.to(self.device), p_s.to(self.device)
 
-        exp_pa = p_a.exp()  # fixed target in exponential space; constant in the loop
+        if self.loss == "l1":
+            # Subtract per-sample max of p_a before exp to prevent overflow on
+            # large ImageNet logits (can be 10-50+). The shift c is a positive
+            # constant wrt tau, so it doesn't change the argmin:
+            #   ||exp(p_a) - exp(p_s/tau)||_1 ∝ ||exp(p_a-c) - exp(p_s/tau-c)||_1
+            c = p_a.amax(dim=-1, keepdim=True)  # (B, 1), no grad
+            exp_pa = (p_a - c).exp()             # fixed target; values in (0, 1]
 
         self.loss_history = []
         for _ in range(self.num_steps):
             self.optimizer.zero_grad(set_to_none=True)
-            tau = self.rho.exp()                              # scalar > 0
-            exp_ps = (p_s / tau).exp()                        # exp(p_s / tau)
-            loss = (exp_pa - exp_ps).abs().sum(dim=-1).mean() # Eqn. 2 + Eqn. 1
+            tau = self.rho.exp()
+            if self.loss == "l1":
+                exp_ps = (p_s / tau - c).exp()
+                loss = (exp_pa - exp_ps).abs().sum(dim=-1).mean()
+            else:  # entropy
+                z_ens = (p_a + p_s / tau) / 2.0
+                loss = softmax_entropy(z_ens).mean()
             loss.backward()
             self.optimizer.step()
             self.last_loss = float(loss.detach())
