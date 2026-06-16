@@ -448,10 +448,6 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                 logger.info(
                     f"Oracle TS fitted | Tl={cal.Tl.item():.4f}  Ts={cal.Ts.item():.4f}"
                 )
-                wandb_run.log({
-                    f"{prefix}oracle/Tl": cal.Tl.item(),
-                    f"{prefix}oracle/Ts": cal.Ts.item(),
-                })
 
             loader = load_imagenetC(cfg["TEST_DIR"], **loader_kwargs)
             probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
@@ -462,6 +458,9 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             for model_name, metrics in metrics_by_model.items():
                 wandb_log.update({f"{prefix}{model_name}/{k}": v for k, v in metrics.items()})
             wandb_log.update({f"{prefix}intersection/{k}": v for k, v in intersection_metrics.items()})
+            if duo.calibration_mode == "oracle_ts":
+                wandb_log[f"{prefix}oracle/Tl"] = cal.Tl.item()
+                wandb_log[f"{prefix}oracle/Ts"] = cal.Ts.item()
             wandb_run.log(wandb_log)
 
             logger.info(f"Results for {corruption_type} severity {severity}: {metrics_by_model['duo']}")
