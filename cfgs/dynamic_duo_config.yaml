@@ -4,9 +4,9 @@ BS: 128
 WORKERS: 8
 CALIBRATOR:
   CORRUPTIONS:
-    - 'gaussian_blur'
-    - 'saturate'
-    - 'spatter'
+    # - 'gaussian_blur'
+    # - 'saturate'
+    # - 'spatter' 
     - 'speckle_noise'
   SEVERITIES: 
     # - 1
@@ -57,21 +57,21 @@ EVAL:
     # - 'saturate'
     # - 'spatter'
     # - 'speckle_noise'
-    - 'brightness'
-    - 'contrast'
-    - 'defocus_blur'
-    - 'elastic_transform'
-    - 'fog'
-    - 'frost'
-    - 'gaussian_noise'
-    - 'glass_blur'
-    - 'impulse_noise'
-    - 'jpeg_compression'
+    # - 'brightness'
+    # - 'contrast'
+    # - 'defocus_blur'
+    # - 'elastic_transform'
+    # - 'fog'
+    # - 'frost'
+    # - 'gaussian_noise'
+    # - 'glass_blur'
+    # - 'impulse_noise'
+    # - 'jpeg_compression'
     - 'motion_blur'
-    - 'pixelate'
-    - 'shot_noise'
-    - 'snow'
-    - 'zoom_blur'
+    # - 'pixelate'
+    # - 'shot_noise'
+    # - 'snow'
+    # - 'zoom_blur'
   SEVERITIES:
     # - 1
     # - 2

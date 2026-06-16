@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, softmax_entropy, collect_params
+from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, softmax_entropy, collect_params, configure_model_frozen
 from src.utils.data import load_imagenetC
 from src.utils.metrics import get_metrics_dict, get_intersection_metrics
 from src.utils.model import _preprocess_batch
@@ -10,7 +10,7 @@ import logging
 import torch.nn.functional as F
 from tqdm import tqdm
 import wandb
-
+from src.utils.logits import get_model_logits
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -259,17 +259,6 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
         # the tau already fit on this batch by calibrate_with_grad (same logits).
         return joint_calibrator.calibrate(logits_l=z_large, logits_s=z_small), z_large, z_small
 
-def _configure_model_frozen(model, norm_type):
-    """Put a non-adapting model in train mode with batch statistics but no grad.
-
-    This gives better-calibrated logits on corrupted data (batch stats replace
-    stale running stats) without allowing any parameter adaptation.
-    """
-    model = configure_model(model, norm_type)
-    model.requires_grad_(False)
-    return model
-
-
 def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, calibration_mode, mode, cfg, steps, norm_logits=False):
     """
     Configure a DynamicDuo for TENT adaptation.
@@ -293,9 +282,9 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         logger.info(f"model for adaptation: %s", large_model)
         logger.info(f"params for adaptation: %s", param_names)
         logger.info(f"optimizer for adaptation: %s", large_optimizer)
-    else: #if signal == "duo":
+    else: 
         logger.info(f"Configuring large model (frozen, batch stats) with norm={cfg['LARGE']['NORM']}")
-        _configure_model_frozen(large, cfg["LARGE"]["NORM"])
+        configure_model_frozen(large, cfg["LARGE"]["NORM"])
 
     if adapt_small:
         logger.info(f"Configuring small model with norm={cfg['SMALL']['NORM']}")
@@ -309,9 +298,9 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         logger.info(f"model for adaptation: %s", small_model)
         logger.info(f"params for adaptation: %s", param_names)
         logger.info(f"optimizer for adaptation: %s", small_optimizer)
-    else: #if signal == "duo":
+    else: 
         logger.info(f"Configuring small model (frozen, batch stats) with norm={cfg['SMALL']['NORM']}")
-        _configure_model_frozen(small, cfg["SMALL"]["NORM"])
+        configure_model_frozen(small, cfg["SMALL"]["NORM"])
 
 
     dynamic_duo = DynamicDuo(
@@ -433,16 +422,27 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             )
 
             if duo.calibration_mode == "oracle_ts":
-                # Collect unadapted logits with test labels — the oracle cheat.
-                z_l, z_s, labels_all = collect_logits(
-                    duo.large, duo.large_preprocess,
-                    duo.small, duo.small_preprocess,
-                    load_imagenetC(cfg["TEST_DIR"], **loader_kwargs),
+                # use_batch_stats=True so BN layers compute per-batch statistics,
+                # matching the logit space produced during run_duo (TENT mode).
+                z_l, labels_l = get_model_logits(
+                    model_name=cfg["LARGE"]["NAME"], val_dir=cfg["VAL_DIR"],
+                    test_dir=cfg["TEST_DIR"], cache_dir="cache/logits",
+                    batch_size=cfg["BS"], num_workers=cfg["WORKERS"],
+                    corruption=corruption_type, severity=severity, device=device,
+                    tent_mode=True, norm_type=cfg["LARGE"]["NORM"],
                 )
+                z_s, labels_s = get_model_logits(
+                    model_name=cfg["SMALL"]["NAME"], val_dir=cfg["VAL_DIR"],
+                    test_dir=cfg["TEST_DIR"], cache_dir="cache/logits",
+                    batch_size=cfg["BS"], num_workers=cfg["WORKERS"],
+                    corruption=corruption_type, severity=severity, device=device,
+                    tent_mode=True, norm_type=cfg["SMALL"]["NORM"],
+                )
+                assert torch.equal(labels_l, labels_s), "Logit collection mismatch: large and small labels differ"
                 cal = duo.joint_calibrator
                 for p in cal.parameters():
                     p.requires_grad_(True)
-                cal.tune(z_l, z_s, labels_all)
+                cal.tune(z_l, z_s, labels_l)
                 for p in cal.parameters():
                     p.requires_grad_(False)
                 logger.info(

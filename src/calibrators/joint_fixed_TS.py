@@ -13,14 +13,15 @@ class JointFixedTS(BaseJointCalibrator):
     """
     Double model naive calibrator as seen in the Asymmetric Duos paper. Finds the two temperatures T_s, T_l that minimize the NLL on the validation set. 
     """
-    def __init__(self, Tl=None, Ts=None):
+    def __init__(self, Tl=None, Ts=None, verbose=True):
         super().__init__()
         self.Tl = nn.Parameter(torch.ones(1)) if Tl is None else nn.Parameter(torch.tensor([Tl]))
         self.Ts = nn.Parameter(torch.ones(1)) if Ts is None else nn.Parameter(torch.tensor([Ts]))
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.verbose = verbose
 
     def tune(self, logits_l, logits_s, labels, grid_n: int = 50_000,
-             t_min: float = 0.05, t_max: float = 50.0, grid_steps: int = 25):
+             t_min: float = 0.05, t_max: float = 50.0, grid_steps: int = 25,):
         self.to(self.device)
         logits_l, logits_s = logits_l.to(self.device), logits_s.to(self.device)
         labels = labels.to(self.device).long()
@@ -52,8 +53,8 @@ class JointFixedTS(BaseJointCalibrator):
                     f"boundary [{t_min}, {t_max}]; consider widening the range "
                     f"— the duo may want to (de)emphasise one model more strongly."
                 )
-
-        print(f"Best temperatures found with grid search: Ts={best_Ts_g:.4f}, Tl={best_Tl_g:.4f}")
+        if self.verbose:
+            print(f"Best temperatures found with grid search: Ts={best_Ts_g:.4f}, Tl={best_Tl_g:.4f}")
 
         # 2. L-BFGS refinement on full data, in log-temperature space
         log_Tl = torch.tensor([math.log(best_Tl_g)], device=self.device, requires_grad=True)
@@ -73,7 +74,8 @@ class JointFixedTS(BaseJointCalibrator):
 
         self.Tl.data = log_Tl.detach().exp()
         self.Ts.data = log_Ts.detach().exp()
-        print(f"Joint Naive Optimized: Ts={self.Ts.item():.4f}, Tl={self.Tl.item():.4f}")
+        if self.verbose:
+            print(f"Joint Naive Optimized: Ts={self.Ts.item():.4f}, Tl={self.Tl.item():.4f}")
 
     def calibrate(self, logits_l, logits_s):
         self.to(self.device)
@@ -111,8 +113,9 @@ class JointFixedTS(BaseJointCalibrator):
         with open(os.path.join(folder, "config.json"), "w") as f:
             json.dump(config, f, indent=2)
 
-        print(f"Saved JointFixedTS to {folder}/  "
-              f"(T_l={self.Tl.item():.4f}, T_s={self.Ts.item():.4f})")
+        if self.verbose:
+            print(f"Saved JointFixedTS to {folder}/  "
+                  f"(T_l={self.Tl.item():.4f}, T_s={self.Ts.item():.4f})")
 
     @classmethod
     def load(cls, folder: str) -> "JointFixedTS":
@@ -141,10 +144,12 @@ class JointFixedTS(BaseJointCalibrator):
         calibrator.Ts = nn.Parameter(torch.tensor(config["T_s"]))
         calibrator.trained_on = config.get("trained_on", {})
 
-        print(f"Loaded JointFixedTS from {folder}/  "
-              f"(T_l={calibrator.Tl.item():.4f}, T_s={calibrator.Ts.item():.4f})")
+        if calibrator.verbose:
+            print(f"Loaded JointFixedTS from {folder}/  "
+                  f"(T_l={calibrator.Tl.item():.4f}, T_s={calibrator.Ts.item():.4f})")
         if calibrator.trained_on:
-            print(f"  trained on: {calibrator.trained_on}")
+            if calibrator.verbose:
+                print(f"  trained on: {calibrator.trained_on}")
 
         return calibrator
 

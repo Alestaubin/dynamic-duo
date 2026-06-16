@@ -86,6 +86,16 @@ def configure_model(model, norm_type):
             m.running_var = None
     return model
 
+def configure_model_frozen(model, norm_type):
+    """Put a non-adapting model in train mode with batch statistics but no grad.
+
+    This gives better-calibrated logits on corrupted data (batch stats replace
+    stale running stats) without allowing any parameter adaptation.
+    """
+    model = configure_model(model, norm_type)
+    model.requires_grad_(False)
+    return model
+
 def collect_params(model, norm_type):
     """Collect the affine scale + shift parameters from norms.
 

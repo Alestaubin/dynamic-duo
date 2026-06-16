@@ -1,12 +1,13 @@
 import os
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision import datasets
 from tqdm import tqdm
 
 from src.utils.data import _pil_collate_fn
 from src.utils.model import get_model, _preprocess_batch
-
+from src.tta.tent import configure_model_frozen 
 
 def get_model_logits(
     model_name: str,
@@ -18,6 +19,9 @@ def get_model_logits(
     corruption: str | None = None,
     severity: int | None = None,
     device: torch.device | None = None,
+    verbose: bool = True,
+    tent_mode: bool = False,
+    norm_type: str = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Return (logits, labels) for the given model and data split.
@@ -26,20 +30,30 @@ def get_model_logits(
     given corruption type and severity level.  Results are saved under
     cache_dir/<model_name>/<split_key>.pt so subsequent calls are instant.
     """
+    if tent_mode and norm_type is None:
+        raise ValueError("norm_type must be specified when tent_mode is True")
+    
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     split_key = "val" if corruption is None else f"{corruption}_{severity}"
+    if tent_mode:
+        split_key += "_tent_mode"
     cache_path = os.path.join(cache_dir, model_name, f"{split_key}.pt")
 
     if os.path.exists(cache_path):
-        print(f"[logit cache] hit  {model_name}/{split_key}")
+        if verbose:
+            print(f"[logit cache] hit  {model_name}/{split_key}")
         saved = torch.load(cache_path, map_location="cpu", weights_only=True)
         return saved["logits"], saved["labels"]
 
-    print(f"[logit cache] miss {model_name}/{split_key} — running inference...")
+    if verbose:
+        print(f"[logit cache] miss {model_name}/{split_key} — running inference...")
     model, preprocess = get_model(model_name, freeze=True)
     model = model.to(device).eval()
+
+    if tent_mode:
+        model = configure_model_frozen(model, norm_type=norm_type)
 
     if corruption is None:
         ds = datasets.ImageFolder(val_dir)
@@ -67,6 +81,7 @@ def get_model_logits(
 
     os.makedirs(os.path.join(cache_dir, model_name), exist_ok=True)
     torch.save({"logits": logits, "labels": labels}, cache_path)
-    print(f"[logit cache] saved {cache_path}")
+    if verbose:
+        print(f"[logit cache] saved {cache_path}")
 
     return logits, labels

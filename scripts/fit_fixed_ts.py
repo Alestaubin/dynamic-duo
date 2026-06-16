@@ -8,7 +8,7 @@ python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml \
     --out checkpoints/fixed_ts/default
 
 # Val only
-python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml --out checkpoints/fixed_ts/clean --clean_only
+python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml --out checkpoints/fixed_ts/test
 """
 
 import argparse
