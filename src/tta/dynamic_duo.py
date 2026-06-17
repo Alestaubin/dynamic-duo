@@ -422,8 +422,6 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             )
 
             if duo.calibration_mode == "oracle_ts":
-                # use_batch_stats=True so BN layers compute per-batch statistics,
-                # matching the logit space produced during run_duo (TENT mode).
                 z_l, labels_l = get_model_logits(
                     model_name=cfg["LARGE"]["NAME"], val_dir=cfg["VAL_DIR"],
                     test_dir=cfg["TEST_DIR"], cache_dir="cache/logits",

@@ -62,6 +62,8 @@ def main():
             cache_dir=args.cache_dir, batch_size=batch_size,
             num_workers=num_workers, corruption=corruption,
             severity=severity, device=device,
+            tent_mode=True,
+            norm_type=cfg["LARGE"]["NORM"] if model_name == large_name else cfg["SMALL"]["NORM"],
         )
 
     large_l, small_l, labels_l = [], [], []
@@ -135,8 +137,8 @@ def main():
             return m, la, sa
 
         print(f"\nTesting Tl={cal.Tl.item():.4f}, Ts={cal.Ts.item():.4f} on EVAL corruptions...")
-        header = (f"{'corruption':<18}{'sev':>4}{'duo_acc':>10}{'large_acc':>11}"
-                  f"{'small_acc':>11}{'duo_ece':>10}{'duo_nll':>10}")
+        header = (f"{'corruption':<18}{'sev':>4}{'large_acc':>11}"
+                  f"{'small_acc':>11}{'duo_acc':>10}{'duo_ece':>10}{'duo_nll':>10}")
         print(header)
         print("-" * len(header))
 
@@ -149,15 +151,15 @@ def main():
                     zl = logit_pnorm(zl, p=2.0, tau=1.0)
                     zs = logit_pnorm(zs, p=2.0, tau=1.0)
                 m, la, sa = duo_acc(zl, zs, y)
-                print(f"{corruption:<18}{sev:>4}{m['accuracy']:>10.4f}{la:>11.4f}"
-                      f"{sa:>11.4f}{m['ece']:>10.4f}{m['nll']:>10.4f}")
+                print(f"{corruption:<18}{sev:>4}{la:>11.4f}"
+                      f"{sa:>11.4f}{m['accuracy']:>10.4f}{m['ece']:>10.4f}{m['nll']:>10.4f}")
                 all_l.append(zl); all_s.append(zs); all_y.append(y)
 
         if len(all_y) > 1:
             m, la, sa = duo_acc(torch.cat(all_l), torch.cat(all_s), torch.cat(all_y))
             print("-" * len(header))
-            print(f"{'OVERALL':<18}{'':>4}{m['accuracy']:>10.4f}{la:>11.4f}"
-                  f"{sa:>11.4f}{m['ece']:>10.4f}{m['nll']:>10.4f}")
+            print(f"{'OVERALL':<18}{'':>4}{la:>11.4f}"
+                  f"{sa:>11.4f}{m['accuracy']:>10.4f}{m['ece']:>10.4f}{m['nll']:>10.4f}")
 
 
 if __name__ == "__main__":
