@@ -3,8 +3,6 @@ from src.utils.model import get_model
 from src.utils.data import load_config
 from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.calibrators.joint_coca import JointCoca
-from src.calibrators.joint_duo_entropy import JointDuoEntropy
-from src.calibrators.joint_batch_nll_oracle import JointBatchNLLOracle
 from src.calibrators.joint_sample_nll_oracle import JointSampleNLLOracle
 from src.calibrators.joint_relative_entropy import JointRelativeEntropy
 from src.calibrators.joint_lambda_entropy import JointLambdaEntropy
@@ -63,12 +61,8 @@ if __name__ == "__main__":
         calibrator = JointCoca(num_steps=5, lr=5e-2, loss="entropy")
     elif args.calibration_mode == "coca":
         calibrator = JointCoca(num_steps=5, lr=5e-2)
-    elif args.calibration_mode == "duo_entropy":
-        calibrator = JointDuoEntropy(num_steps=10, lr=5e-2)
     elif args.calibration_mode == "oracle_ts":
         calibrator = JointFixedTS()  # temperatures fitted per-corruption by evaluate_dynamic_duo
-    elif args.calibration_mode == "batch_oracle_ts":
-        calibrator = JointBatchNLLOracle(num_steps=20, lr=5e-2)
     elif args.calibration_mode == "sample_oracle_ts":
         calibrator = JointSampleNLLOracle(num_steps=20, lr=5e-2)
     elif args.calibration_mode == "relative_entropy":

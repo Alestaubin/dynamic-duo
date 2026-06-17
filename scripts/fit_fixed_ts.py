@@ -75,11 +75,12 @@ def main():
     if use_val:
         print("Loading val logits...")
         zl, y = get_logits(large_name)
-        zs, _ = get_logits(small_name)
+        zs, y_s = get_logits(small_name)
         if args.norm_logits:
             print("Normalizing val logits")
             zl = normalize(zl, p=2.0, centralize=True)
             zs = normalize(zs, p=2.0, centralize=True)
+        assert torch.equal(y, y_s), "Logit collection mismatch: large and small labels differ"
         large_l.append(zl); small_l.append(zs); labels_l.append(y)
 
     # Calibrator corruptions
