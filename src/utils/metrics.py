@@ -5,6 +5,46 @@ import calibration as cal
 from sklearn.metrics import f1_score, accuracy_score, brier_score_loss, log_loss, roc_auc_score
 import torch
 
+
+def _compute_rc_metrics(probs: np.ndarray, labels: np.ndarray):
+    """AURC, E-AURC, AUGRC for selective prediction via max-confidence abstention.
+
+    All three are lower-is-better and lie in [0, 1].
+
+    AURC  — area under the risk-coverage curve (risk = error rate of selected).
+    E-AURC — AURC minus the oracle lower bound (excess above optimal).
+    AUGRC — area under the *generalized* risk-coverage curve (risk normalized by
+             total n, not by selected k), equivalent to a weighted AUC where
+             high-confidence wrong predictions are penalized more.
+    """
+    n = len(labels)
+    preds = np.argmax(probs, axis=1)
+    mistakes = (preds != labels).astype(float)
+    m = int(mistakes.sum())
+
+    # sort by max-prob confidence descending
+    confidence = probs.max(axis=1)
+    order = np.argsort(confidence)[::-1]
+    sm = mistakes[order]  # sorted mistakes
+
+    # AURC: (1/n) * sum_k  [cumulative_errors_k / k]
+    risks = np.cumsum(sm) / np.arange(1, n + 1)
+    aurc = float(risks.mean())
+
+    # ideal AURC: oracle places all m wrong samples last
+    ideal_risks = np.concatenate([
+        np.zeros(n - m),
+        np.arange(1, m + 1) / np.arange(n - m + 1, n + 1),
+    ]) if m > 0 else np.zeros(n)
+    e_aurc = aurc - float(ideal_risks.mean())
+
+    # AUGRC: (1/n^2) * sum_i  sorted_mistakes[i] * (n - i)
+    weights = np.arange(n, 0, -1)
+    augrc = float(np.dot(sm, weights) / (n ** 2))
+
+    return aurc, e_aurc, augrc
+
+
 def get_metrics_dict(probs, labels) -> dict:
 
     if torch.is_tensor(probs):
@@ -34,6 +74,9 @@ def get_metrics_dict(probs, labels) -> dict:
     
     ece = cal.get_ece(probs, labels, num_bins=15)
 
+    aurc, e_aurc, augrc = _compute_rc_metrics(probs, labels)
+    auroc = roc_auc_score(labels, probs, multi_class='ovr', average='macro')
+
     return {
         'ece': ece,
         'nll': nll,
@@ -41,7 +84,11 @@ def get_metrics_dict(probs, labels) -> dict:
         'acc3': acc3,
         'acc5': acc5,
         'f1': f1,
-        'brier': brier
+        'brier': brier,
+        'aurc': aurc,
+        'e_aurc': e_aurc,
+        'augrc': augrc,
+        'auroc': auroc,
     }
 
 

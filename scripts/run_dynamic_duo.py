@@ -7,6 +7,7 @@ from src.calibrators.joint_duo_entropy import JointDuoEntropy
 from src.calibrators.joint_batch_nll_oracle import JointBatchNLLOracle
 from src.calibrators.joint_sample_nll_oracle import JointSampleNLLOracle
 from src.calibrators.joint_relative_entropy import JointRelativeEntropy
+from src.calibrators.joint_lambda_entropy import JointLambdaEntropy
 
 import argparse
 import torch
@@ -72,7 +73,8 @@ if __name__ == "__main__":
         calibrator = JointSampleNLLOracle(num_steps=20, lr=5e-2)
     elif args.calibration_mode == "relative_entropy":
         calibrator = JointRelativeEntropy(init_w=0.0, t_max=10.0)
-
+    elif args.calibration_mode == "lambda_entropy":
+        calibrator = JointLambdaEntropy(init_lambda=0.5)
     else:
         raise ValueError(f"Invalid calibration mode: {args.calibration_mode}")
 

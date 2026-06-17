@@ -15,22 +15,6 @@ and the per-batch update loop:
         for i = 1 to K:
             update tau via Eqn. 1
 
-This module implements ONLY that kernel (one scalar temperature, two models),
-in isolation from the marginal-entropy / cross-model distillation losses that
-COCA layers on top. It is meant as the unit to validate before generalising.
-
-Conventions (matching the paper)
----------------------------------
-* p_a = logits of the ANCHOR model (the larger / stronger model). Treated as a
-  fixed target: it is detached and never scaled. This is the "unidirectional"
-  part -- only p_s / tau moves toward p_a.
-* p_s = logits of the SCALED model (the smaller model). Divided by tau.
-* The discrepancy is the L1 norm over the class dimension of the difference of
-  raw exponentiated logits (Eqn. 2), averaged over the batch.
-* tau is a single positive scalar. It is reparameterised internally as
-  tau = exp(rho), rho the free scalar, purely to keep tau > 0 under gradient
-  steps (otherwise a step can drive tau negative and exp(p_s/tau) blows up).
-  This does not change the objective in Eqn. 1 -- it is still one parameter.
 """
 
 from __future__ import annotations
@@ -136,20 +120,21 @@ class CocaTemperature:
         if self.device is not None:
             p_a, p_s = p_a.to(self.device), p_s.to(self.device)
 
-        if self.loss == "l1":
-            # Subtract per-sample max of p_a before exp to prevent overflow on
-            # large ImageNet logits (can be 10-50+). The shift c is a positive
-            # constant wrt tau, so it doesn't change the argmin:
-            #   ||exp(p_a) - exp(p_s/tau)||_1 ∝ ||exp(p_a-c) - exp(p_s/tau-c)||_1
-            c = p_a.amax(dim=-1, keepdim=True)  # (B, 1), no grad
-            exp_pa = (p_a - c).exp()             # fixed target; values in (0, 1]
-
+        # if self.loss == "l1":
+        #     # Subtract per-sample max of p_a before exp to prevent overflow on
+        #     # large ImageNet logits (can be 10-50+). The shift c is a positive
+        #     # constant wrt tau, so it doesn't change the argmin:
+        #     #   ||exp(p_a) - exp(p_s/tau)||_1 ∝ ||exp(p_a-c) - exp(p_s/tau-c)||_1
+        #     c = p_a.amax(dim=-1, keepdim=True)  # (B, 1), no grad
+        #     exp_pa = (p_a - c).exp()             # fixed target; values in (0, 1]
+        
+        exp_pa = p_a.exp()
         self.loss_history = []
         for _ in range(self.num_steps):
             self.optimizer.zero_grad(set_to_none=True)
             tau = self.rho.exp()
             if self.loss == "l1":
-                exp_ps = (p_s / tau - c).exp()
+                exp_ps = (p_s / tau).exp()
                 loss = (exp_pa - exp_ps).abs().sum(dim=-1).mean()
             else:  # entropy
                 z_ens = (p_a + p_s / tau) / 2.0
@@ -173,42 +158,3 @@ class CocaTemperature:
         return torch.softmax(self.apply(scaled_logits), dim=-1)
 
 
-# ====================================================================== #
-# Self-contained sanity check.
-#
-# Controlled setup: build a "scaled model" whose logits are a known multiple
-# T_true of the anchor's logits (p_s = T_true * p_a). Then the alignment in
-# Eqn. 1 is solved exactly by tau = T_true (giving p_s / tau = p_a, loss -> 0),
-# so we can verify the kernel recovers the right temperature and the loss
-# decreases monotonically. Real model pairs are not exact multiples, so on real
-# data the loss floors above zero -- that is expected.
-# ====================================================================== #
-if __name__ == "__main__":
-    torch.manual_seed(0)
-
-    B, C = 64, 10
-    T_true = 2.0
-
-    # Modest logit scale (std ~1) keeps raw exp() well-conditioned. With large
-    # logits the raw-exp objective is dominated by the top class and converges
-    # slowly -- see the note in the module docstring.
-    p_a = torch.randn(B, C)                # anchor (larger model) logits
-    p_s = T_true * p_a                     # scaled model = exact T_true multiple
-
-    coca = CocaTemperature(num_steps=500, lr=5e-2, init_temp=1.0)
-    tau = coca.adapt(anchor_logits=p_a, scaled_logits=p_s)
-
-    print(f"true temperature      : {T_true:.4f}")
-    print(f"recovered temperature : {tau:.4f}")
-    print(f"loss[0] -> loss[-1]   : {coca.loss_history[0]:.4e} -> {coca.loss_history[-1]:.4e}")
-
-    assert abs(tau - T_true) < 0.05, "tau did not converge to the known optimum"
-    assert coca.loss_history[-1] < coca.loss_history[0], "loss did not decrease"
-
-    # Sanity on real-ish pairs: two unrelated logit sets -> loss floors above 0.
-    p_a2 = torch.randn(B, C)
-    p_s2 = torch.randn(B, C)
-    coca.adapt(p_a2, p_s2)
-    print(f"unrelated-pair tau    : {coca.temperature:.4f} "
-          f"(final loss {coca.loss_history[-1]:.4e})")
-    print("OK")

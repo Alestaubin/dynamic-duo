@@ -80,8 +80,7 @@ class JointCoca(BaseJointCalibrator):
             ens_max = p_e.max(dim=1).values                    # (B,)
             T = ens_max / anchor_max.clamp_min(self.eps)
             # Fall back to no rescale where the anchor's top logit is ~0 or
-            # negative (degenerate / very flat predictions, e.g. heavy blur),
-            # which would otherwise produce a meaningless or sign-flipped T.
+            # negative, which would otherwise produce a meaningless or sign-flipped T.
             T = torch.where(
                 torch.isfinite(T) & (anchor_max > self.eps),
                 T, torch.ones_like(T),

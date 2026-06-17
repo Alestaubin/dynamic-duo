@@ -5,7 +5,7 @@ from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_a
 from src.utils.data import load_imagenetC
 from src.utils.metrics import get_metrics_dict, get_intersection_metrics
 from src.utils.model import _preprocess_batch
-from src.utils.logit_transforms import logit_pnorm
+from src.utils.logit_transforms import logit_pnorm, normalize
 import logging
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -31,7 +31,7 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy"}
+_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy", "lambda_entropy"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -213,8 +213,8 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
     z_small = small(x_small)
 
     if norm_logits:
-        z_large = logit_pnorm(z_large, p=2.0, tau=1.0)
-        z_small = logit_pnorm(z_small, p=2.0, tau=1.0)
+        z_large = normalize(logits=z_large, p=2.0, centralize=True)
+        z_small = normalize(logits=z_small, p=2.0, centralize=True)
 
     if signal == "duo":
         zl = z_large if adapt_large else z_large.detach()
@@ -374,7 +374,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
     run_name = (
-        f"{duo.mode} | {calibration_name} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
+        f"{duo.mode} | {calibration_name} {"normalized" if duo.norm_logits else ""} | {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
     )
     wandb_run = wandb.init(
         project=wandb_project,

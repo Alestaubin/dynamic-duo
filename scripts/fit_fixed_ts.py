@@ -18,7 +18,7 @@ import torch
 from src.utils.data import load_config
 from src.utils.logits import get_model_logits
 from src.calibrators.joint_fixed_TS import JointFixedTS
-from src.utils.logit_transforms import logit_pnorm
+from src.utils.logit_transforms import logit_pnorm, normalize
 from src.utils.metrics import get_metrics_dict
 
 def main():
@@ -65,7 +65,7 @@ def main():
             severity=severity, device=device,
             tent_mode=True,
             norm_type=cfg["LARGE"]["NORM"] if model_name == large_name else cfg["SMALL"]["NORM"],
-            seed=args.seed
+            seed=args.seed, 
         )
 
     large_l, small_l, labels_l = [], [], []
@@ -78,8 +78,8 @@ def main():
         zs, _ = get_logits(small_name)
         if args.norm_logits:
             print("Normalizing val logits")
-            zl = logit_pnorm(zl, p=2.0, tau=1.0)
-            zs = logit_pnorm(zs, p=2.0, tau=1.0)
+            zl = normalize(zl, p=2.0, centralize=True)
+            zs = normalize(zs, p=2.0, centralize=True)
         large_l.append(zl); small_l.append(zs); labels_l.append(y)
 
     # Calibrator corruptions
@@ -96,8 +96,8 @@ def main():
                 y = y_l
                 if args.norm_logits:
                     print(f"Normalizing {corruption} logits")
-                    zl = logit_pnorm(zl, p=2.0, tau=1.0)
-                    zs = logit_pnorm(zs, p=2.0, tau=1.0)
+                    zl = normalize(zl, p=2.0, centralize=True)
+                    zs = normalize(zs, p=2.0, centralize=True)
                 large_l.append(zl); small_l.append(zs); labels_l.append(y)
 
 
@@ -123,7 +123,6 @@ def main():
         "severities": cfg["CALIBRATOR"].get("SEVERITIES", []),
     }
     cal.save(args.out, trained_on=trained_on)
-
     # Evaluate the fitted temperatures on the EVAL corruptions.
     if args.test:
         eval_corruptions = cfg.get("EVAL", {}).get("CORRUPTIONS", [])
@@ -152,8 +151,8 @@ def main():
                 zl, y = get_logits(large_name, corruption, sev)
                 zs, _ = get_logits(small_name, corruption, sev)
                 if args.norm_logits:
-                    zl = logit_pnorm(zl, p=2.0, tau=1.0)
-                    zs = logit_pnorm(zs, p=2.0, tau=1.0)
+                    zl = normalize(zl, p=2.0, centralize=True)
+                    zs = normalize(zs, p=2.0, centralize=True)
                 m, la, sa = duo_acc(zl, zs, y)
                 print(f"{corruption:<18}{sev:>4}{la:>11.4f}"
                       f"{sa:>11.4f}{m['accuracy']:>10.4f}{m['ece']:>10.4f}{m['nll']:>10.4f}")
