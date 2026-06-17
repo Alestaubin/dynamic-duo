@@ -8,7 +8,7 @@ python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml \
     --out checkpoints/fixed_ts/default
 
 # Val only
-python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml --out checkpoints/fixed_ts/test
+python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml --out checkpoints/fixed_ts/clean --clean_only
 """
 
 import argparse
@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--test", action="store_true",
                         help="After fitting, evaluate the temperatures on the EVAL "
                              "corruptions from the config and report accuracy.")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
     args = parser.parse_args()
 
     if args.clean_only and args.corruptions_only:
@@ -64,6 +65,7 @@ def main():
             severity=severity, device=device,
             tent_mode=True,
             norm_type=cfg["LARGE"]["NORM"] if model_name == large_name else cfg["SMALL"]["NORM"],
+            seed=args.seed
         )
 
     large_l, small_l, labels_l = [], [], []
@@ -88,8 +90,10 @@ def main():
         for corruption in cal_corruptions:
             for sev in severities:
                 print(f"  + calibrator: {corruption} sev={sev}")
-                zl, y = get_logits(large_name, corruption, sev)
-                zs, _ = get_logits(small_name, corruption, sev)
+                zl, y_l = get_logits(large_name, corruption, sev)
+                zs, y_s = get_logits(small_name, corruption, sev)
+                assert torch.equal(y_l, y_s), "Logit collection mismatch: large and small labels differ"
+                y = y_l
                 if args.norm_logits:
                     print(f"Normalizing {corruption} logits")
                     zl = logit_pnorm(zl, p=2.0, tau=1.0)

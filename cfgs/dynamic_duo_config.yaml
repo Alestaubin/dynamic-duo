@@ -5,9 +5,9 @@ WORKERS: 8
 CALIBRATOR:
   CORRUPTIONS:
     - 'gaussian_blur'
-    # - 'saturate'
-    # - 'spatter' 
-    # - 'speckle_noise'
+    - 'saturate'
+    - 'spatter' 
+    - 'speckle_noise'
   SEVERITIES: 
     # - 1
     # - 2

@@ -22,6 +22,7 @@ def get_model_logits(
     verbose: bool = True,
     tent_mode: bool = False,
     norm_type: str = None,
+    seed: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Return (logits, labels) for the given model and data split.
@@ -55,12 +56,11 @@ def get_model_logits(
     if tent_mode:
         model = configure_model_frozen(model, norm_type=norm_type)
 
-    _TENT_SEED = 42
     if tent_mode and corruption is not None:
         loader = load_imagenetC(
             test_dir, severities=severity, corruption_types=[corruption],
             device=device, batch_size=batch_size, num_workers=num_workers,
-            seed=_TENT_SEED,
+            seed=seed,
         )
     else:
         ds = datasets.ImageFolder(val_dir if corruption is None
