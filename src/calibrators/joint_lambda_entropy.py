@@ -6,13 +6,14 @@ from src.calibrators.temp.lambda_entropy_temperature import LambdaEntropyTempera
 from src.calibrators.base import BaseJointCalibrator, _NoOpModule
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 
 class JointLambdaEntropy(BaseJointCalibrator):
     """Per-batch entropy-minimizing linear mixture calibrator.
 
     Combines large and small model logits as:
-        z = λ · z_l + (1 − λ) · z_s,   λ ∈ [lambda_min, lambda_max]
+        z = λ · z_l + (1 - λ) · z_s,   λ ∈ [lambda_min, lambda_max]
 
     λ is a single scalar fitted per batch by minimizing mean Shannon entropy
     of softmax(z). Delegates optimization to LambdaEntropyTemperature.

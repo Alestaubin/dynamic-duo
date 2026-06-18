@@ -38,6 +38,7 @@ class JointCoca(BaseJointCalibrator):
         t_min: float = 0.1,
         t_max: float = 10.0,
         eps: float = 1e-4,
+        chunk_size: int | None = None,
         device=None,
     ):
         super().__init__()
@@ -52,6 +53,7 @@ class JointCoca(BaseJointCalibrator):
         self.t_min = t_min
         self.t_max = t_max
         self.eps = eps
+        self.chunk_size = chunk_size
 
         self.last_tau: float = float("nan")
         self.last_disc_loss: float = float("nan")
@@ -89,12 +91,25 @@ class JointCoca(BaseJointCalibrator):
 
         return p_e / T
 
+    def _calibrate_chunks(self, z_l: torch.Tensor, z_s: torch.Tensor) -> torch.Tensor:
+        """Fit a separate tau per chunk of chunk_size rows, then aggregate."""
+        return torch.cat(
+            [self._aggregate(cl, cs, self._fit(cl, cs))
+             for cl, cs in zip(z_l.split(self.chunk_size), z_s.split(self.chunk_size))],
+            dim=0,
+        )
+
     # --- BaseJointCalibrator interface -------------------------------- #
     def calibrate_with_grad(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
+        if self.chunk_size is not None and logits_l.shape[0] > self.chunk_size:
+            return self._calibrate_chunks(logits_l, logits_s)
         tau = self._fit(logits_l, logits_s)
         return self._aggregate(logits_l, logits_s, tau)
 
     def calibrate(self, logits_l: torch.Tensor, logits_s: torch.Tensor) -> torch.Tensor:
+        if self.chunk_size is not None and logits_l.shape[0] > self.chunk_size:
+            with torch.no_grad():
+                return self._calibrate_chunks(logits_l, logits_s)
         tau = self._fit(logits_l, logits_s)
         with torch.no_grad():
             return self._aggregate(logits_l, logits_s, tau)

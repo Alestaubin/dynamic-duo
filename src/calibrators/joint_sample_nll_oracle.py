@@ -15,20 +15,6 @@ class JointSampleNLLOracle(BaseJointCalibrator):
     Fits temperatures that minimise NLL on each individual sample — the
     tightest possible per-instance fixed-temperature baseline.  Uses batch
     labels: this is a cheating oracle, not a valid test-time method.
-
-    Compared to JointBatchNLLOracle (two shared scalars per batch), this
-    oracle has B * 2 free parameters per batch.  It is strictly stronger:
-    any solution of the batch oracle is feasible here (uniform T across
-    samples), but the per-sample optimum can be better.
-
-    Usage with DynamicDuo
-    ---------------------
-    Requires labels before each forward pass via set_labels(labels).
-    DynamicDuo.forward() does this automatically for calibration_mode
-    "sample_oracle_ts".
-
-    Convention: FIRST argument is LARGE (anchor), matching
-    DynamicDuo's calibrate(z_large, z_small).
     """
 
     def __init__(

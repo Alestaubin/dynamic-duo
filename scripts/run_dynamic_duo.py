@@ -40,6 +40,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility (when using fraction < 1.0)")  
     parser.add_argument("--calibration_mode", type=str, default="fixed", help="Calibrator mode for combining the duo logits.")
     parser.add_argument("--norm_logits", action="store_true", help="Whether to apply logit normalization (p-norm) before feeding into the calibrator.")
+    parser.add_argument("--coca_bs", type=int, default=None, help="Sub-batch size for COCA temperature fitting (default: same as the TENT batch, i.e. one tau per batch).")
     parser.add_argument("--fixed_ts_config", type=str, default=None, help="Path to a directory containing config.json with pre-tuned temperatures (required when --calibration_mode is fixed_ts).")
     args = parser.parse_args()
 
@@ -58,9 +59,9 @@ if __name__ == "__main__":
             parser.error("--fixed_ts_config is required when --calibration_mode is fixed_ts")
         calibrator = JointFixedTS.load(args.fixed_ts_config)
     elif args.calibration_mode == "coca_entropy":
-        calibrator = JointCoca(num_steps=5, lr=5e-2, loss="entropy")
+        calibrator = JointCoca(num_steps=5, lr=5e-2, loss="entropy", chunk_size=args.coca_bs)
     elif args.calibration_mode == "coca":
-        calibrator = JointCoca(num_steps=5, lr=5e-2)
+        calibrator = JointCoca(num_steps=5, lr=5e-2, chunk_size=args.coca_bs)
     elif args.calibration_mode == "oracle_ts":
         calibrator = JointFixedTS()  # temperatures fitted per-corruption by evaluate_dynamic_duo
     elif args.calibration_mode == "sample_oracle_ts":

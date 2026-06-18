@@ -213,8 +213,8 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
     z_small = small(x_small)
 
     if norm_logits:
-        z_large = normalize(logits=z_large, p=2.0, centralize=True)
-        z_small = normalize(logits=z_small, p=2.0, centralize=True)
+        z_large = normalize(logits=z_large, p=2.0, centralize_logits=True)
+        z_small = normalize(logits=z_small, p=2.0, centralize_logits=True)
 
     if signal == "duo":
         zl = z_large if adapt_large else z_large.detach()

@@ -91,12 +91,15 @@ class LambdaEntropyTemperature:
             [rho], lr=1.0, max_iter=self.max_iter, line_search_fn="strong_wolfe"
         )
 
+        history: list[tuple[float, float]] = []
+
         def closure():
             optimizer.zero_grad()
             lam = torch.sigmoid(rho)
             z = lam * logits_l + (1.0 - lam) * logits_s
             loss = softmax_entropy(z).mean()
             loss.backward()
+            history.append((float(lam.detach()), float(loss.detach())))
             return loss
 
         loss = optimizer.step(closure)
@@ -109,4 +112,9 @@ class LambdaEntropyTemperature:
         self._rho = float(rho.detach())
         self.last_lambda = float(torch.sigmoid(rho).detach())
         self.last_loss = float(loss.detach()) if loss is not None else float("nan")
+
+        lam_str  = " → ".join(f"{lam:.4f}" for lam, _ in history)
+        loss_str = " → ".join(f"{h:.4f}"   for _, h   in history)
+        print(f"  λ: {lam_str}\n  H: {loss_str}")
+
         return self.last_lambda

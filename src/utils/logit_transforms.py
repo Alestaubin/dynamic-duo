@@ -20,6 +20,7 @@ def logit_pnorm(z: torch.Tensor, p: float, tau: float, eps: float = 1e-8) -> tor
 def combine_logits(z_l: torch.Tensor, z_s: torch.Tensor, tau_l: float, tau_s: float) -> torch.Tensor:
     """Combine two sets of logits with per-model temperatures."""
     return (z_l / tau_l + z_s / tau_s) / 2.0
+    # return z_l * tau_l + z_s * tau_s
 
 def centralize(logits:torch.tensor):
     return logits-(logits.mean(-1).view(-1,1))

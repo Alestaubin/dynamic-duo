@@ -78,8 +78,8 @@ def main():
         zs, y_s = get_logits(small_name)
         if args.norm_logits:
             print("Normalizing val logits")
-            zl = normalize(zl, p=2.0, centralize=True)
-            zs = normalize(zs, p=2.0, centralize=True)
+            zl = normalize(zl, p=2.0, centralize_logits=True)
+            zs = normalize(zs, p=2.0, centralize_logits=True)
         assert torch.equal(y, y_s), "Logit collection mismatch: large and small labels differ"
         large_l.append(zl); small_l.append(zs); labels_l.append(y)
 
@@ -97,8 +97,8 @@ def main():
                 y = y_l
                 if args.norm_logits:
                     print(f"Normalizing {corruption} logits")
-                    zl = normalize(zl, p=2.0, centralize=True)
-                    zs = normalize(zs, p=2.0, centralize=True)
+                    zl = normalize(zl, p=2.0, centralize_logits=True)
+                    zs = normalize(zs, p=2.0, centralize_logits=True)
                 large_l.append(zl); small_l.append(zs); labels_l.append(y)
 
 
@@ -152,8 +152,8 @@ def main():
                 zl, y = get_logits(large_name, corruption, sev)
                 zs, _ = get_logits(small_name, corruption, sev)
                 if args.norm_logits:
-                    zl = normalize(zl, p=2.0, centralize=True)
-                    zs = normalize(zs, p=2.0, centralize=True)
+                    zl = normalize(zl, p=2.0, centralize_logits=True)
+                    zs = normalize(zs, p=2.0, centralize_logits=True)
                 m, la, sa = duo_acc(zl, zs, y)
                 print(f"{corruption:<18}{sev:>4}{la:>11.4f}"
                       f"{sa:>11.4f}{m['accuracy']:>10.4f}{m['ece']:>10.4f}{m['nll']:>10.4f}")
