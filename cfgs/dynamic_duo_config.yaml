@@ -1,5 +1,5 @@
 TEST_DIR: ./data/ImageNet-C
-VAL_DIR: ./data/imagenet/val
+VAL_DIR: ./data/imagenet-val
 BS: 128
 WORKERS: 8
 CALIBRATOR:

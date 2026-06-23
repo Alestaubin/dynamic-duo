@@ -1,7 +1,7 @@
 # from https://github.com/tochris/pts-uncertainty/blob/main/metrics.py
 
 import numpy as np
-import calibration as cal
+import calibration as cal #pip install uncertainty-calibration
 from sklearn.metrics import f1_score, accuracy_score, brier_score_loss, log_loss, roc_auc_score
 import torch
 

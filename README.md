@@ -1,26 +1,31 @@
-## Setting Up Your Environment
 
+## Getting started
+
+### Setting Up Your Environment
+First, create a new python environment:
 ```bash
-python -m venv dynamicduos
-source dynamicduos/bin/activate
+module load python/3.11 cuda/12.2
+
+# create venv
+python -m venv ~/dduos
+source ~/dduos/bin/activate
+
 pip install -r requirements.txt
+pip install --no-index torch
 ```
 
+Create a new folder `data/` and add ImageNet-C and ImageNet.
+
+slurm:
 ```bash
-export PYTHONPATH=$PYTHONPATH:~/dynamic-duo
-```
+salloc --account=aip-evanesce --gpus=1 --cpus-per-task=4 --mem=32G --time=03:00:00
+source ~/dduos/bin/activate
+export PYTHONPATH=$PYTHONPATH:/project/aip-evanesce/alxstaub/dynamic-duo
 
-```bash
-# See what's already running on the GPU(s) before you start
-nvidia-smi
-
-tmux new -s duo
-
-source /scratch0/alxstaub/ddenv/bin/activate
-# inside the session, run your python command
-# detach with Ctrl-b then d; reattach later with: tmux attach -t duo
-export PYTHONPATH=$PYTHONPATH:~/dynamic-duo
-
-# Pin your job to a specific GPU if there are several
-CUDA_VISIBLE_DEVICES=0 python scripts/fit_fixed_ts.py --config cfgs/dynamic_duo_config.yaml --out checkpoints/fixed_ts/clean_norm --clean_only
+python scripts/run_dynamic_duo.py \
+    --config cfgs/dynamic_duo_config.yaml \
+    --mode no_adapt \
+    --steps 1 \
+    --seed 0 \
+    --calibration_mode coca_entropy
 ```
