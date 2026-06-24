@@ -43,6 +43,20 @@ _PROXY_KINDS = {"nuclear_norm", "atc", "prototype"}
 _SOFTPLUS_INV_1 = math.log(math.exp(1.0) - 1.0)  # softplus^{-1}(1) ≈ 0.5413
 
 
+def _pearson_r2(xs: list[float], ys: list[float]) -> float:
+    """Squared Pearson correlation = R² of regressing ys on xs."""
+    if len(xs) < 3:
+        return float("nan")
+    x = torch.tensor(xs, dtype=torch.float32)
+    y = torch.tensor(ys, dtype=torch.float32)
+    if x.std() < 1e-8 or y.std() < 1e-8:
+        return float("nan")
+    xc = x - x.mean()
+    yc = y - y.mean()
+    r = (xc * yc).sum() / (xc.norm() * yc.norm())
+    return float(r.item() ** 2)
+
+
 class JointSoftAnchor(BaseJointCalibrator):
     """Soft-anchor calibrator for an asymmetric duo.
 
@@ -59,6 +73,7 @@ class JointSoftAnchor(BaseJointCalibrator):
     num_steps : gradient steps per batch for T_l, T_s fitting.
     lr : learning rate for the per-batch temperature optimizer.
     reset_each_batch : if True, reset T_l=T_s=1 before each batch's fitting.
+    log_every : log a running-average summary line every N batches (INFO level).
     """
 
     def __init__(
@@ -70,6 +85,7 @@ class JointSoftAnchor(BaseJointCalibrator):
         num_steps: int = 5,
         lr: float = 5e-2,
         reset_each_batch: bool = True,
+        log_every: int = 10,
     ):
         super().__init__()
         assert proxy_kind in _PROXY_KINDS, \
@@ -81,6 +97,7 @@ class JointSoftAnchor(BaseJointCalibrator):
         self.num_steps = num_steps
         self.lr = lr
         self.reset_each_batch = reset_each_batch
+        self.log_every = log_every
 
         self.raw_T_l = nn.Parameter(torch.tensor(_SOFTPLUS_INV_1))
         self.raw_T_s = nn.Parameter(torch.tensor(_SOFTPLUS_INV_1))
@@ -90,11 +107,134 @@ class JointSoftAnchor(BaseJointCalibrator):
         self._ext_l: FeatureExtractor | None = None
         self._ext_s: FeatureExtractor | None = None
 
+        # Labels injected by DynamicDuo.forward (optional; enables accuracy diag)
+        self._labels: torch.Tensor | None = None
+        # True once calibrate_with_grad has logged diagnostics for this batch;
+        # prevents calibrate() from double-logging in adapt modes.
+        self._diag_done: bool = False
+
+        # Per-corruption accumulator for R² reporting (cleared by
+        # report_and_reset_corruption_r2 after each corruption).
+        self._corr_r_l:   list[float] = []
+        self._corr_r_s:   list[float] = []
+        self._corr_acc_l: list[float] = []
+        self._corr_acc_s: list[float] = []
+
+        self._reset_diagnostics()
+
         logger.info(
             "JointSoftAnchor | proxy=%s tau_gate=%.2f num_steps=%d lr=%.4f "
-            "reset_each_batch=%s",
-            proxy_kind, tau_gate, num_steps, lr, reset_each_batch,
+            "reset_each_batch=%s log_every=%d",
+            proxy_kind, tau_gate, num_steps, lr, reset_each_batch, log_every,
         )
+
+    # ── Diagnostics ───────────────────────────────────────────────────────── #
+
+    def _reset_diagnostics(self) -> None:
+        self.diag: dict = {
+            "n": 0,
+            # running sums (divided by n to get averages)
+            "r_l": 0.0, "r_s": 0.0,
+            "a": 0.0,
+            "T_l": 0.0, "T_s": 0.0,
+            # accuracy diagnostics (only when labels are provided)
+            "acc_l": 0.0, "acc_s": 0.0,
+            "proxy_correct": 0,    # proxy ordering matched true accuracy ordering
+            "proxy_total": 0,      # batches where the two models had different accuracy
+            # last-batch values (for debug logging)
+            "_last": {},
+        }
+
+    def set_labels(self, labels: torch.Tensor) -> None:
+        """Inject ground-truth labels for the current batch (enables accuracy diag)."""
+        self._labels = labels
+        self._diag_done = False  # reset per-batch so calibrate() logs if needed
+
+    def _update_diagnostics(
+        self,
+        r_l: float, r_s: float,
+        a: float,
+        T_l: float, T_s: float,
+        z_l: torch.Tensor, z_s: torch.Tensor,
+    ) -> None:
+        d = self.diag
+        d["n"] += 1
+        d["r_l"] += r_l; d["r_s"] += r_s
+        d["a"]   += a
+        d["T_l"] += T_l; d["T_s"] += T_s
+
+        last: dict = {
+            "r_l": r_l, "r_s": r_s, "a": a, "T_l": T_l, "T_s": T_s,
+        }
+
+        if self._labels is not None:
+            labels = self._labels.to(z_l.device)
+            acc_l = float((z_l.detach().argmax(1) == labels).float().mean())
+            acc_s = float((z_s.detach().argmax(1) == labels).float().mean())
+            d["acc_l"] += acc_l; d["acc_s"] += acc_s
+            last["acc_l"] = acc_l; last["acc_s"] = acc_s
+
+            # accumulate for per-corruption R² (cleared by report_and_reset_corruption_r2)
+            self._corr_r_l.append(r_l);   self._corr_acc_l.append(acc_l)
+            self._corr_r_s.append(r_s);   self._corr_acc_s.append(acc_s)
+
+            # proxy correctness: does sign(r_l - r_s) match sign(acc_l - acc_s)?
+            true_gap = acc_l - acc_s
+            pred_gap = r_l - r_s
+            if abs(true_gap) > 1e-6:   # non-tie batch
+                d["proxy_total"] += 1
+                if (pred_gap > 0) == (true_gap > 0):
+                    d["proxy_correct"] += 1
+                last["proxy_correct"] = (pred_gap > 0) == (true_gap > 0)
+                last["true_better"] = "large" if true_gap > 0 else "small"
+                last["pred_better"] = "large" if pred_gap > 0 else "small"
+            self._labels = None  # consume
+
+        d["_last"] = last
+        n = d["n"]
+
+        sel_str = ""
+        if "proxy_correct" in last:
+            sel_str = (f"  proxy={'✓' if last['proxy_correct'] else '✗'} "
+                       f"pred={last['pred_better']} true={last['true_better']}"
+                       f"  acc_l={last['acc_l']:.3f} acc_s={last['acc_s']:.3f}")
+        print(f"[SoftAnchor batch {n:4d}] "
+              f"r_l={r_l:.3f} r_s={r_s:.3f}  a={a:.3f}  "
+              f"T_l={T_l:.3f} T_s={T_s:.3f}{sel_str}")
+
+        if self.log_every > 0 and n % self.log_every == 0:
+            avg_r_l = d["r_l"] / n; avg_r_s = d["r_s"] / n
+            avg_a   = d["a"]   / n
+            avg_T_l = d["T_l"] / n; avg_T_s = d["T_s"] / n
+            acc_str = ""
+            sel_str = ""
+            if d["proxy_total"] > 0:
+                avg_acc_l = d["acc_l"] / n; avg_acc_s = d["acc_s"] / n
+                proxy_acc = d["proxy_correct"] / d["proxy_total"]
+                acc_str = f"  avg_acc_l={avg_acc_l:.3f} avg_acc_s={avg_acc_s:.3f}"
+                sel_str = f"  proxy_sel_acc={proxy_acc:.3f} ({d['proxy_correct']}/{d['proxy_total']})"
+            print(f"[SoftAnchor {self.proxy_kind} n={n}] "
+                  f"avg r_l={avg_r_l:.3f} r_s={avg_r_s:.3f}  "
+                  f"avg a={avg_a:.3f}  avg T_l={avg_T_l:.3f} T_s={avg_T_s:.3f}"
+                  f"{acc_str}{sel_str}")
+
+    def report_and_reset_corruption_r2(self, label: str) -> dict:
+        """Compute R²(proxy, true_acc) over all batches since the last call.
+
+        Prints a one-line summary and returns {"r2_l", "r2_s", "n"} for the
+        caller to forward to wandb. Clears the per-corruption accumulators so
+        the next corruption starts fresh.
+        """
+        r2_l = _pearson_r2(self._corr_r_l, self._corr_acc_l)
+        r2_s = _pearson_r2(self._corr_r_s, self._corr_acc_s)
+        n = len(self._corr_r_l)
+        if n > 0:
+            print(f"[SoftAnchor {self.proxy_kind} {label}] "
+                  f"R²(proxy→acc): large={r2_l:.3f}  small={r2_s:.3f}  "
+                  f"(n={n} batches with labels)")
+        self._corr_r_l.clear();   self._corr_acc_l.clear()
+        self._corr_r_s.clear();   self._corr_acc_s.clear()
+        return {"r2_l": r2_l, "r2_s": r2_s, "n": n}
 
     # ── Hook management ───────────────────────────────────────────────────── #
 
@@ -207,16 +347,37 @@ class JointSoftAnchor(BaseJointCalibrator):
     ) -> torch.Tensor:
         self._align_device(logits_l.device)
         r_l, r_s = self._proxy_scores(logits_l, logits_s)
-        self._fit_temps(logits_l, logits_s, r_l, r_s)  # fits T_l, T_s internally
-        return self._mix(logits_l, logits_s, r_l, r_s)  # log(p_duo) for outer entropy
+        self._fit_temps(logits_l, logits_s, r_l, r_s)
+
+        T_l = float(F.softplus(self.raw_T_l).item()) + 1e-4
+        T_s = float(F.softplus(self.raw_T_s).item()) + 1e-4
+        a   = float(torch.sigmoid((r_l - r_s) / self.tau_gate).item())
+        self._update_diagnostics(r_l.item(), r_s.item(), a, T_l, T_s,
+                                 logits_l, logits_s)
+        self._diag_done = True
+
+        return self._mix(logits_l, logits_s, r_l, r_s)
 
     def calibrate(
         self, logits_l: torch.Tensor, logits_s: torch.Tensor
     ) -> torch.Tensor:
-        # T_l, T_s already fitted this batch by calibrate_with_grad
         self._align_device(logits_l.device)
         with torch.no_grad():
             r_l, r_s = self._proxy_scores(logits_l, logits_s)
+
+        if not self._diag_done:
+            # no_adapt mode: calibrate_with_grad was never called this batch,
+            # so we fit temps here and log diagnostics.
+            with torch.enable_grad():
+                self._fit_temps(logits_l, logits_s, r_l, r_s)
+            T_l = float(F.softplus(self.raw_T_l).item()) + 1e-4
+            T_s = float(F.softplus(self.raw_T_s).item()) + 1e-4
+            a   = float(torch.sigmoid((r_l - r_s) / self.tau_gate).item())
+            self._update_diagnostics(r_l.item(), r_s.item(), a, T_l, T_s,
+                                     logits_l, logits_s)
+            self._diag_done = True
+
+        with torch.no_grad():
             return self._mix(logits_l, logits_s, r_l, r_s)
 
     def forward(

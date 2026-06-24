@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -29,14 +30,13 @@ from tqdm import tqdm
 @torch.no_grad()
 def nuclear_norm_score(logits: torch.Tensor) -> float:
     """Confidence + dispersity via the nuclear norm of the softmax matrix.
-
-    Normalised by sqrt(N * min(N, C)) to keep values in [0, 1] and reduce
-    batch-size dependence. Penalises TENT collapse (low rank) by construction.
+    https://github.com/cuishuhao/BNM/blob/2d23c61f864af489d84fe5f8b66bc0a5ca51cda9/UODR/train_loader.py#L197
     """
     p = torch.softmax(logits, dim=1)
     n, c = p.shape
     nuc = torch.linalg.matrix_norm(p, ord="nuc")
-    return float(nuc / math.sqrt(n * min(n, c)))
+    # return float(nuc / math.sqrt(n * min(n, c)))
+    return float(nuc / n)
 
 
 @torch.no_grad()
@@ -181,6 +181,49 @@ def _source_pass(ext_l, preprocess_l, ext_s, preprocess_s, loader, device):
             torch.cat(z_s), torch.cat(f_s),
             torch.cat(labs))
 
+def save_proxy_configs(
+    cfg_l: ModelProxyConfig,
+    cfg_s: ModelProxyConfig,
+    path: str | Path,
+) -> None:
+    """Save (cfg_l, cfg_s) to a .pt file, including any fitted calib maps."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({
+        "large_name":      cfg_l.name,
+        "small_name":      cfg_s.name,
+        "num_classes":     cfg_l.num_classes,
+        "atc_threshold_l": cfg_l.atc_threshold,
+        "atc_threshold_s": cfg_s.atc_threshold,
+        "prototypes_l":    cfg_l.prototypes,
+        "prototypes_s":    cfg_s.prototypes,
+        "calib_l":         cfg_l.calib,
+        "calib_s":         cfg_s.calib,
+    }, path)
+    calib_note = f", calib={sorted(cfg_l.calib)}" if cfg_l.calib else ""
+    print(f"[proxy cache] saved → {path}{calib_note}")
+
+
+def load_proxy_configs(path: str | Path) -> tuple[ModelProxyConfig, ModelProxyConfig]:
+    """Load (cfg_l, cfg_s) previously saved by save_proxy_configs."""
+    data = torch.load(path, map_location="cpu", weights_only=False)
+    cfg_l = ModelProxyConfig(
+        name=data["large_name"],
+        num_classes=data["num_classes"],
+        atc_threshold=data["atc_threshold_l"],
+        prototypes=data["prototypes_l"],
+        calib=data.get("calib_l", {}),
+    )
+    cfg_s = ModelProxyConfig(
+        name=data["small_name"],
+        num_classes=data["num_classes"],
+        atc_threshold=data["atc_threshold_s"],
+        prototypes=data["prototypes_s"],
+        calib=data.get("calib_s", {}),
+    )
+    calib_note = f", calib={sorted(cfg_l.calib)}" if cfg_l.calib else ""
+    print(f"[proxy cache] loaded ← {path}{calib_note}")
+    return cfg_l, cfg_s
 
 def build_proxy_configs(
     large_model: nn.Module,
@@ -192,16 +235,24 @@ def build_proxy_configs(
     source_loader,
     device: torch.device,
     num_classes: int = 1000,
+    cache_path: str | Path | None = None,
 ) -> tuple[ModelProxyConfig, ModelProxyConfig]:
     """Build ModelProxyConfigs for both models from clean source data.
+
+    If cache_path is given and the file exists, loads from cache (skips the
+    source pass entirely). Otherwise runs the source pass and, if cache_path
+    is given, saves the result for future runs.
 
     Registers and removes feature hooks internally; the models are left unchanged.
     Returns (cfg_large, cfg_small) with fitted ATC thresholds and prototypes.
     """
+    if cache_path is not None and Path(cache_path).exists():
+        return load_proxy_configs(cache_path)
+
     ext_l = FeatureExtractor(large_model, large_name)
     ext_s = FeatureExtractor(small_model, small_name)
     try:
-        zl, fl, zs, fs, labs = _source_pass(
+        zl, fl, zs, fs, labels = _source_pass(
             ext_l, large_preprocess, ext_s, small_preprocess, source_loader, device
         )
     finally:
@@ -210,12 +261,16 @@ def build_proxy_configs(
 
     cfg_l = ModelProxyConfig(
         name=large_name, num_classes=num_classes,
-        atc_threshold=fit_atc_threshold(zl, labs),
-        prototypes=build_prototypes(fl, labs, num_classes),
+        atc_threshold=fit_atc_threshold(zl, labels),
+        prototypes=build_prototypes(fl, labels, num_classes),
     )
     cfg_s = ModelProxyConfig(
         name=small_name, num_classes=num_classes,
-        atc_threshold=fit_atc_threshold(zs, labs),
-        prototypes=build_prototypes(fs, labs, num_classes),
+        atc_threshold=fit_atc_threshold(zs, labels),
+        prototypes=build_prototypes(fs, labels, num_classes),
     )
+
+    if cache_path is not None:
+        save_proxy_configs(cfg_l, cfg_s, cache_path)
+
     return cfg_l, cfg_s

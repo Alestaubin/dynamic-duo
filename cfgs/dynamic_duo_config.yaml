@@ -67,11 +67,11 @@ EVAL:
     - 'glass_blur'
     - 'impulse_noise'
     - 'jpeg_compression'
-    - 'motion_blur'
-    - 'pixelate'
-    - 'shot_noise'
-    - 'snow'
-    - 'zoom_blur'
+    # - 'motion_blur'
+    # - 'pixelate'
+    # - 'shot_noise'
+    # - 'snow'
+    # - 'zoom_blur'
   SEVERITIES:
     # - 1
     # - 2

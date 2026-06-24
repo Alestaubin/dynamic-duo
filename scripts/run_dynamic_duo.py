@@ -49,6 +49,13 @@ if __name__ == "__main__":
                         help="Proxy for JointSoftAnchor (default: prototype).")
     parser.add_argument("--tau_gate", type=float, default=1.0,
                         help="Gate sharpness for soft anchor sigmoid (default: 1.0).")
+    parser.add_argument("--proxy_cache", type=str, default=None,
+                        help="Path to a .pt file for caching source-pass proxy configs "
+                             "(ATC thresholds + prototypes). Created on first run, "
+                             "loaded on subsequent runs. Ignored for nuclear_norm.")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Log results to Weights & Biases (default: off).")
+
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -79,6 +86,7 @@ if __name__ == "__main__":
                 large_model, large_preprocess, config["LARGE"]["NAME"],
                 small_model, small_preprocess, config["SMALL"]["NAME"],
                 src_loader, device,
+                cache_path=args.proxy_cache,
             )
         else:
             # nuclear_norm: no source data needed.
@@ -125,4 +133,4 @@ if __name__ == "__main__":
         norm_logits=args.norm_logits
     )
     # Evaluate Dynamic Duo on ImageNet-C
-    evaluate_dynamic_duo(duo, config, num_samples=args.num_samples, seed=args.seed)
+    evaluate_dynamic_duo(duo, config, num_samples=args.num_samples, seed=args.seed, use_wandb=args.wandb)

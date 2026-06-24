@@ -27,13 +27,16 @@ Evaluation reports, per corruption and pooled:
 
 Usage:
   python src/proxies/proxy_benchmark.py \
-      --config cfgs/dynamic_duo_config.yaml [--num_samples 1000] [--seed 0]
+      --config cfgs/dynamic_duo_config.yaml --num_samples 1000 --seed 0
   python src/proxies/proxy_benchmark.py --test   # synthetic self-test
 """
 
 from __future__ import annotations
 
+import csv
+import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -135,15 +138,50 @@ def _selection_risk_coverage(pred_gap: np.ndarray, true_gap: np.ndarray):
     return coverages, risks, float(_trapz(risks, coverages))
 
 
+def _safe_spearman(a: np.ndarray, b: np.ndarray) -> float:
+    if len(a) < 3 or np.std(a) == 0 or np.std(b) == 0:
+        return float("nan")
+    return float(spearmanr(a, b).statistic)
+
+
+def _nan_to_neg(x):
+    return -1.0 if (x != x) else x
+
+
+def _metrics_from_arrays(
+    raw_l: np.ndarray, raw_s: np.ndarray,
+    acc_l: np.ndarray, acc_s: np.ndarray,
+    pred_l: np.ndarray, pred_s: np.ndarray,
+) -> dict:
+    """Compute all selection metrics from pre-built arrays."""
+    pred_gap = pred_l - pred_s
+    true_gap = acc_l - acc_s
+    nontie = true_gap != 0
+    sel_acc = (float((np.sign(pred_gap[nontie]) == np.sign(true_gap[nontie])).mean())
+               if nontie.any() else float("nan"))
+    _, _, aurc = _selection_risk_coverage(pred_gap, true_gap)
+    return {
+        "n_batches":  int(len(raw_l)),
+        "sel_acc":    sel_acc,
+        "gap_rho":    _safe_spearman(pred_gap, true_gap),
+        "sel_aurc":   aurc,
+        "sig_l":      _safe_spearman(raw_l, acc_l),
+        "sig_s":      _safe_spearman(raw_s, acc_s),
+    }
+
+
 def evaluate_proxy(eval_records: list[BatchRecord], proxy: str, cfg_l, cfg_s) -> dict:
-    """Full ranking diagnostics for one proxy over the eval records."""
+    """Full ranking diagnostics for one proxy over the eval records.
+
+    Returns a dict with overall metrics and a per_corruption breakdown.
+    """
     raw_l, raw_s, acc_l, acc_s, corrs = [], [], [], [], []
     pred_l, pred_s = [], []
     for r in eval_records:
         if proxy not in r.raw_l or proxy not in r.raw_s:
             continue
         raw_l.append(r.raw_l[proxy]); raw_s.append(r.raw_s[proxy])
-        acc_l.append(r.acc_l); acc_s.append(r.acc_s)
+        acc_l.append(r.acc_l);        acc_s.append(r.acc_s)
         pred_l.append(cfg_l.predicted_acc(proxy, r.raw_l[proxy]))
         pred_s.append(cfg_s.predicted_acc(proxy, r.raw_s[proxy]))
         corrs.append(r.corruption)
@@ -151,42 +189,32 @@ def evaluate_proxy(eval_records: list[BatchRecord], proxy: str, cfg_l, cfg_s) ->
     raw_l  = np.array(raw_l);  raw_s  = np.array(raw_s)
     acc_l  = np.array(acc_l);  acc_s  = np.array(acc_s)
     pred_l = np.array(pred_l); pred_s = np.array(pred_s)
-    pred_gap = pred_l - pred_s
-    true_gap = acc_l - acc_s
-
-    sig_l = _safe_spearman(raw_l, acc_l)
-    sig_s = _safe_spearman(raw_s, acc_s)
-
-    nontie = true_gap != 0
-    sel_acc = (float((np.sign(pred_gap[nontie]) == np.sign(true_gap[nontie])).mean())
-               if nontie.any() else float("nan"))
-    gap_corr = _safe_spearman(pred_gap, true_gap)
-    cov, risk, aurc = _selection_risk_coverage(pred_gap, true_gap)
-
     corrs_arr = np.array(corrs)
-    per_corr = {
-        c: float((np.sign(pred_gap[m]) == np.sign(true_gap[m])).mean())
-        for c in sorted(set(corrs))
-        if (m := (corrs_arr == c) & nontie).any()
-    }
+
+    overall = _metrics_from_arrays(raw_l, raw_s, acc_l, acc_s, pred_l, pred_s)
+    cov, risk, _ = _selection_risk_coverage(pred_l - pred_s, acc_l - acc_s)
+
+    per_corruption: dict[str, dict] = {}
+    for c in sorted(set(corrs)):
+        mask = corrs_arr == c
+        if mask.sum() >= 2:
+            per_corruption[c] = _metrics_from_arrays(
+                raw_l[mask], raw_s[mask],
+                acc_l[mask], acc_s[mask],
+                pred_l[mask], pred_s[mask],
+            )
 
     return {
-        "proxy": proxy,
-        "n_batches": int(len(raw_l)),
-        "signal_spearman_l": sig_l,
-        "signal_spearman_s": sig_s,
-        "selection_accuracy": sel_acc,
-        "gap_spearman": gap_corr,
-        "selection_aurc": aurc,
-        "per_corruption_selection_acc": per_corr,
-        "_rc_curve": (cov, risk),
+        "proxy":              proxy,
+        "n_batches":          overall["n_batches"],
+        "selection_accuracy": overall["sel_acc"],
+        "gap_spearman":       overall["gap_rho"],
+        "selection_aurc":     overall["sel_aurc"],
+        "signal_spearman_l":  overall["sig_l"],
+        "signal_spearman_s":  overall["sig_s"],
+        "per_corruption":     per_corruption,
+        "_rc_curve":          (cov, risk),
     }
-
-
-def _safe_spearman(a: np.ndarray, b: np.ndarray) -> float:
-    if len(a) < 3 or np.std(a) == 0 or np.std(b) == 0:
-        return float("nan")
-    return float(spearmanr(a, b).statistic)
 
 
 # ─── Reporting ────────────────────────────────────────────────────────────────
@@ -209,8 +237,8 @@ def log_to_wandb(results: list[dict], run=None) -> None:
             res["gap_spearman"], res["selection_aurc"],
             res["signal_spearman_l"], res["signal_spearman_s"],
         )
-        logger.log({f"sel_acc/{res['proxy']}/{c}": v
-                    for c, v in res["per_corruption_selection_acc"].items()})
+        logger.log({f"sel_acc/{res['proxy']}/{c}": m["sel_acc"]
+                    for c, m in res["per_corruption"].items()})
     logger.log({"proxy_benchmark/summary": table})
 
 
@@ -227,8 +255,149 @@ def print_report(results: list[dict]) -> None:
     print("sel_acc = P(picked the truly-better model on non-tie batches).\n")
 
 
-def _nan_to_neg(x):
-    return -1.0 if (x != x) else x
+# Metrics included in the CSV (short name → result-dict key within per_corruption)
+_CSV_METRICS = [
+    ("sel_acc",  "sel_acc"),
+    ("gap_rho",  "gap_rho"),
+    ("sel_aurc", "sel_aurc"),
+    ("sig_l",    "sig_l"),
+    ("sig_s",    "sig_s"),
+]
+
+
+def save_results_csv(results: list[dict], path: str | Path) -> None:
+    """Save per-corruption metrics for all proxies to a CSV file.
+
+    Rows: one per corruption + a final "ALL" overall row.
+    Columns: corruption, n_batches, {proxy}_{metric} for all proxy×metric combos.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    proxies = [r["proxy"] for r in results]
+    # collect all corruptions seen across any proxy
+    all_corruptions: list[str] = sorted(
+        {c for r in results for c in r["per_corruption"]}
+    )
+
+    fieldnames = ["corruption", "n_batches"] + [
+        f"{p}_{m}" for p in proxies for m, _ in _CSV_METRICS
+    ]
+
+    def _row(label: str, n: int, metrics_by_proxy: dict[str, dict]) -> dict:
+        row: dict = {"corruption": label, "n_batches": n}
+        for p in proxies:
+            m = metrics_by_proxy.get(p, {})
+            for col, key in _CSV_METRICS:
+                v = m.get(key, float("nan"))
+                row[f"{p}_{col}"] = f"{v:.4f}" if not math.isnan(v) else "nan"
+        return row
+
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for c in all_corruptions:
+            n = next(
+                (r["per_corruption"][c]["n_batches"]
+                 for r in results if c in r["per_corruption"]),
+                0,
+            )
+            writer.writerow(_row(
+                c, n,
+                {r["proxy"]: r["per_corruption"].get(c, {}) for r in results},
+            ))
+        # overall row
+        writer.writerow(_row(
+            "ALL", results[0]["n_batches"] if results else 0,
+            {r["proxy"]: {
+                "sel_acc":  r["selection_accuracy"],
+                "gap_rho":  r["gap_spearman"],
+                "sel_aurc": r["selection_aurc"],
+                "sig_l":    r["signal_spearman_l"],
+                "sig_s":    r["signal_spearman_s"],
+            } for r in results},
+        ))
+
+    print(f"[proxy benchmark] results saved → {path}")
+
+
+def print_latex_table(results: list[dict]) -> None:
+    """Print a LaTeX table: rows=corruptions, columns=proxy×{sel_acc, sel_aurc}.
+
+    Best sel_acc per row is bolded.
+    """
+    proxies = [r["proxy"] for r in results]
+    all_corruptions: list[str] = sorted(
+        {c for r in results for c in r["per_corruption"]}
+    )
+    # map proxy → metrics dict per corruption
+    by_proxy: dict[str, dict] = {r["proxy"]: r for r in results}
+
+    n_metrics = 2  # sel_acc, sel_aurc
+    n_cols = 1 + len(proxies) * n_metrics  # corruption + proxy cols
+
+    col_spec = "l" + "".join("rr" for _ in proxies)
+    proxy_headers = " & ".join(
+        f"\\multicolumn{{2}}{{c}}{{{p}}}" for p in proxies
+    )
+    sub_headers = " & ".join(
+        "sel\\_acc & sel\\_AURC" for _ in proxies
+    )
+
+    lines = [
+        "\\begin{table}[h]",
+        "  \\centering",
+        f"  \\begin{{tabular}}{{{col_spec}}}",
+        "    \\toprule",
+        f"    Corruption & {proxy_headers} \\\\",
+        "    \\cmidrule(lr){" + "2-" + str(n_cols) + "}",
+        f"    & {sub_headers} \\\\",
+        "    \\midrule",
+    ]
+
+    def _fmt(v: float, bold: bool) -> str:
+        if math.isnan(v):
+            return "--"
+        s = f"{v:.3f}"
+        return f"\\textbf{{{s}}}" if bold else s
+
+    for c in all_corruptions:
+        sel_accs = [
+            by_proxy[p]["per_corruption"].get(c, {}).get("sel_acc", float("nan"))
+            for p in proxies
+        ]
+        best_sel = max((v for v in sel_accs if not math.isnan(v)), default=float("nan"))
+        cells = []
+        for p in proxies:
+            m = by_proxy[p]["per_corruption"].get(c, {})
+            sa   = m.get("sel_acc",  float("nan"))
+            aurc = m.get("sel_aurc", float("nan"))
+            cells.append(_fmt(sa, not math.isnan(sa) and sa == best_sel))
+            cells.append(_fmt(aurc, False))
+        lines.append(f"    {c} & {' & '.join(cells)} \\\\")
+
+    # overall row
+    lines.append("    \\midrule")
+    sel_accs_all = [
+        by_proxy[p]["selection_accuracy"] for p in proxies
+    ]
+    best_all = max((v for v in sel_accs_all if not math.isnan(v)), default=float("nan"))
+    cells = []
+    for p in proxies:
+        sa   = by_proxy[p]["selection_accuracy"]
+        aurc = by_proxy[p]["selection_aurc"]
+        cells.append(_fmt(sa, not math.isnan(sa) and sa == best_all))
+        cells.append(_fmt(aurc, False))
+    lines.append(f"    ALL & {' & '.join(cells)} \\\\")
+
+    lines += [
+        "    \\bottomrule",
+        "  \\end{tabular}",
+        "  \\caption{Proxy selection accuracy and AURC per corruption.}",
+        "  \\label{tab:proxy_benchmark}",
+        "\\end{table}",
+    ]
+    print("\n" + "\n".join(lines) + "\n")
 
 
 # ============================================================================
@@ -258,8 +427,23 @@ def _collect_records(
     return records
 
 
-def run_proxy_benchmark(cfg, device, num_samples=None, seed=None, wandb_project=None):
-    """Full proxy benchmark pipeline for the duo (large=vit_b_16, small=resnet50)."""
+def run_proxy_benchmark(
+    cfg,
+    device,
+    num_samples=None,
+    seed=None,
+    wandb_project=None,
+    cache_path=None,
+    csv_path=None,
+):
+    """Full proxy benchmark pipeline for the duo (large=vit_b_16, small=resnet50).
+
+    Parameters
+    ----------
+    cache_path : path to a .pt file for caching ATC thresholds + prototypes from
+                 the source pass. Created on first run, loaded on subsequent runs.
+    csv_path   : if given, per-corruption metrics for all proxies are written here.
+    """
     import torch.utils.data
     from torch.utils.data import DataLoader
     from torchvision import datasets
@@ -274,6 +458,7 @@ def run_proxy_benchmark(cfg, device, num_samples=None, seed=None, wandb_project=
     small_model = small_model.to(device).eval()
 
     # Source pass: clean ImageNet val → ATC thresholds + prototypes
+    # (skipped if cache_path points to an existing file)
     gen = torch.Generator().manual_seed(seed) if seed is not None else None
     src_ds = datasets.ImageFolder(cfg["VAL_DIR"])
     if num_samples is not None:
@@ -290,32 +475,43 @@ def run_proxy_benchmark(cfg, device, num_samples=None, seed=None, wandb_project=
         large_model, large_pre, cfg["LARGE"]["NAME"],
         small_model, small_pre, cfg["SMALL"]["NAME"],
         src_loader, device, NUM_CLASSES,
+        cache_path=cache_path,
     )
+
+    proxies = ["nuclear_norm", "atc", "prototype"]
 
     # Dev + eval passes need persistent feature extractors
     ext_l = FeatureExtractor(large_model, cfg["LARGE"]["NAME"])
     ext_s = FeatureExtractor(small_model, cfg["SMALL"]["NAME"])
     try:
-        # Dev pass: calibrator corruptions → fit isotonic calibration maps
-        dev_records = []
-        for severity in cfg["CALIBRATOR"]["SEVERITIES"]:
-            for corruption in cfg["CALIBRATOR"]["CORRUPTIONS"]:
-                loader = load_imagenetC(
-                    cfg["TEST_DIR"], severities=severity,
-                    corruption_types=[corruption], device=device,
-                    batch_size=cfg["BS"], num_workers=cfg["WORKERS"],
-                    num_samples=num_samples, seed=seed,
-                )
-                dev_records.extend(_collect_records(
-                    cfg_l, cfg_s, ext_l, large_pre, ext_s, small_pre,
-                    loader, device, corruption, severity,
-                ))
+        # Dev pass: calibrator corruptions → fit isotonic calibration maps.
+        # Skipped when all calib maps are already present in the loaded cache.
+        if cfg_l.calib:
+            print(f"\n[proxy cache] calibration maps already loaded "
+                  f"({sorted(cfg_l.calib)}), skipping dev pass.")
+        else:
+            dev_records = []
+            for severity in cfg["CALIBRATOR"]["SEVERITIES"]:
+                for corruption in cfg["CALIBRATOR"]["CORRUPTIONS"]:
+                    loader = load_imagenetC(
+                        cfg["TEST_DIR"], severities=severity,
+                        corruption_types=[corruption], device=device,
+                        batch_size=cfg["BS"], num_workers=cfg["WORKERS"],
+                        num_samples=num_samples, seed=seed,
+                    )
+                    dev_records.extend(_collect_records(
+                        cfg_l, cfg_s, ext_l, large_pre, ext_s, small_pre,
+                        loader, device, corruption, severity,
+                    ))
 
-        proxies = ["nuclear_norm", "atc", "prototype"]
-        fit_calibration(cfg_l, cfg_s, dev_records, proxies)
-        print(f"\nCalibration fitted on {len(dev_records)} dev batches "
-              f"({len(cfg['CALIBRATOR']['CORRUPTIONS'])} corruptions × "
-              f"{len(cfg['CALIBRATOR']['SEVERITIES'])} severities).")
+            fit_calibration(cfg_l, cfg_s, dev_records, proxies)
+            print(f"\nCalibration fitted on {len(dev_records)} dev batches "
+                  f"({len(cfg['CALIBRATOR']['CORRUPTIONS'])} corruptions × "
+                  f"{len(cfg['CALIBRATOR']['SEVERITIES'])} severities).")
+
+            if cache_path is not None:
+                from src.proxies.proxies import save_proxy_configs
+                save_proxy_configs(cfg_l, cfg_s, cache_path)
 
         # Eval pass
         eval_records = []
@@ -334,6 +530,10 @@ def run_proxy_benchmark(cfg, device, num_samples=None, seed=None, wandb_project=
 
         results = [evaluate_proxy(eval_records, p, cfg_l, cfg_s) for p in proxies]
         print_report(results)
+        print_latex_table(results)
+
+        if csv_path is not None:
+            save_results_csv(results, csv_path)
 
         if wandb_project is not None:
             import wandb
@@ -361,6 +561,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--wandb_project", type=str, default=None)
+    parser.add_argument("--proxy_cache", type=str, default=None,
+                        help="Path to .pt cache for ATC thresholds + prototypes.")
+    parser.add_argument("--csv", type=str, default=None, dest="csv_path",
+                        help="Save per-corruption results table to this CSV path.")
     parser.add_argument("--test", action="store_true",
                         help="Run synthetic self-test instead of real models.")
     args = parser.parse_args()
@@ -373,4 +577,5 @@ if __name__ == "__main__":
         print(f"Using device: {device}")
         cfg = load_config(args.config)
         run_proxy_benchmark(cfg, device, num_samples=args.num_samples,
-                            seed=args.seed, wandb_project=args.wandb_project)
+                            seed=args.seed, wandb_project=args.wandb_project,
+                            cache_path=args.proxy_cache, csv_path=args.csv_path)
