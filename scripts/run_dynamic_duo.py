@@ -6,6 +6,8 @@ from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_sample_nll_oracle import JointSampleNLLOracle
 from src.calibrators.joint_relative_entropy import JointRelativeEntropy
 from src.calibrators.joint_lambda_entropy import JointLambdaEntropy
+from src.calibrators.joint_soft_anchor import JointSoftAnchor
+from src.proxies.proxies import build_proxy_configs
 
 import argparse
 import torch
@@ -42,6 +44,11 @@ if __name__ == "__main__":
     parser.add_argument("--norm_logits", action="store_true", help="Whether to apply logit normalization (p-norm) before feeding into the calibrator.")
     parser.add_argument("--coca_bs", type=int, default=None, help="Sub-batch size for COCA temperature fitting (default: same as the TENT batch, i.e. one tau per batch).")
     parser.add_argument("--fixed_ts_config", type=str, default=None, help="Path to a directory containing config.json with pre-tuned temperatures (required when --calibration_mode is fixed_ts).")
+    parser.add_argument("--proxy_kind", type=str, default="prototype",
+                        choices=["nuclear_norm", "atc", "prototype"],
+                        help="Proxy for JointSoftAnchor (default: prototype).")
+    parser.add_argument("--tau_gate", type=float, default=1.0,
+                        help="Gate sharpness for soft anchor sigmoid (default: 1.0).")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -54,7 +61,37 @@ if __name__ == "__main__":
     large_model = large_model.to(device)
     small_model = small_model.to(device)
 
-    if args.calibration_mode == "fixed_ts":
+    if args.calibration_mode == "soft_anchor":
+        if args.proxy_kind in {"atc", "prototype"}:
+            # Source pass needed to fit ATC thresholds and/or build prototypes.
+            import torch.utils.data
+            from torch.utils.data import DataLoader
+            from torchvision import datasets
+            from src.utils.data import _pil_collate_fn
+            print(f"Building proxy configs (proxy={args.proxy_kind}) from source data...")
+            src_ds = datasets.ImageFolder(config["VAL_DIR"])
+            src_loader = DataLoader(
+                src_ds, batch_size=config["BS"], shuffle=False,
+                num_workers=config["WORKERS"], pin_memory=(device.type == "cuda"),
+                collate_fn=_pil_collate_fn,
+            )
+            cfg_l, cfg_s = build_proxy_configs(
+                large_model, large_preprocess, config["LARGE"]["NAME"],
+                small_model, small_preprocess, config["SMALL"]["NAME"],
+                src_loader, device,
+            )
+        else:
+            # nuclear_norm: no source data needed.
+            from src.proxies.proxies import ModelProxyConfig
+            cfg_l = ModelProxyConfig(name=config["LARGE"]["NAME"], num_classes=1000)
+            cfg_s = ModelProxyConfig(name=config["SMALL"]["NAME"], num_classes=1000)
+        calibrator = JointSoftAnchor(
+            proxy_kind=args.proxy_kind,
+            cfg_l=cfg_l,
+            cfg_s=cfg_s,
+            tau_gate=args.tau_gate,
+        )
+    elif args.calibration_mode == "fixed_ts":
         if args.fixed_ts_config is None:
             parser.error("--fixed_ts_config is required when --calibration_mode is fixed_ts")
         calibrator = JointFixedTS.load(args.fixed_ts_config)

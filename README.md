@@ -25,7 +25,8 @@ export PYTHONPATH=$PYTHONPATH:/project/aip-evanesce/alxstaub/dynamic-duo
 python scripts/run_dynamic_duo.py \
     --config cfgs/dynamic_duo_config.yaml \
     --mode no_adapt \
+    --proxy_kind nuclear_norm \
     --steps 1 \
     --seed 0 \
-    --calibration_mode coca_entropy
+    --calibration_mode soft_anchor
 ```

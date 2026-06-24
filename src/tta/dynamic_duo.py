@@ -31,7 +31,7 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy", "lambda_entropy"}
+_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy", "lambda_entropy", "soft_anchor"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -136,6 +136,13 @@ class DynamicDuo(nn.Module):
         elif calibration_mode == "sample_oracle_ts":
             # Per-sample oracle: one (T_l, T_s) per sample, injected via set_labels().
             logger.info("Calibrator ORACLE (sample_oracle_ts) | fits per-sample T_l, T_s using test labels")
+        elif calibration_mode == "soft_anchor":
+            proxy_kind = getattr(joint_calibrator, "proxy_kind", "unknown")
+            logger.info(
+                "Calibrator SOFT-ANCHOR (soft_anchor) | proxy=%s | "
+                "self-adapting T_l, T_s per batch via KL to proxy-weighted anchor",
+                proxy_kind,
+            )
 
     def forward(self, x, labels=None):
         if self.calibration_mode in {""
@@ -303,6 +310,12 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         configure_model_frozen(small, cfg["SMALL"]["NORM"])
 
 
+    # For soft_anchor with prototype proxy: register feature hooks on the
+    # (now TENT-configured) models so the calibrator can read features each forward.
+    if calibration_mode == "soft_anchor" and getattr(joint_calibrator, "proxy_kind", None) == "prototype":
+        joint_calibrator.register_hooks(large, small)
+        logger.info("setup_duo: registered prototype feature hooks on large and small models")
+
     dynamic_duo = DynamicDuo(
         large=large,
         large_preprocess=large_preprocess,
@@ -313,7 +326,7 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         joint_calibrator=joint_calibrator,
         calibration_mode=calibration_mode,
         mode=mode,
-        steps=steps, 
+        steps=steps,
         norm_logits=norm_logits,
     )
     return dynamic_duo
