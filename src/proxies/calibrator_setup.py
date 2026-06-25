@@ -26,13 +26,18 @@ def _build_proxy_stats(
     small_model, small_preprocess,
     device: torch.device,
     cache_path: str | None,
+    proto_metric: str = "cosine",
 ) -> tuple[ProxyStats, ProxyStats]:
-    """Return (cfg_l, cfg_s). atc/prototype run a source pass; nuclear_norm is free."""
+    """Return (cfg_l, cfg_s). atc/prototype run a source pass; nuclear_norm is free.
+
+    proto_metric ("cosine" | "mahalanobis") selects the prototype-proxy distance.
+    """
     if proxy_kind in {"atc", "prototype"}:
         from torch.utils.data import DataLoader
         from torchvision import datasets
         from src.utils.data import _pil_collate_fn
-        print(f"Building proxy stats (proxy={proxy_kind}) from source data...")
+        print(f"Building proxy stats (proxy={proxy_kind}, metric={proto_metric}) "
+              f"from source data...")
         src_ds = datasets.ImageFolder(config["VAL_DIR"])
         src_loader = DataLoader(
             src_ds, batch_size=config["BS"], shuffle=False,
@@ -43,6 +48,7 @@ def _build_proxy_stats(
             large_model, large_preprocess, config["LARGE"]["NAME"],
             small_model, small_preprocess, config["SMALL"]["NAME"],
             src_loader, device,
+            proto_metric=proto_metric,
             cache_path=cache_path,
         )
     return (
@@ -124,6 +130,7 @@ def build_proxy_calibrator(
     device: torch.device,
     num_samples: int | None = None,
     seed: int | None = None,
+    proto_metric: str = "cosine",
 ):
     """Build a proxy-based calibrator (proxy_anchor_coca or soft_anchor).
 
@@ -135,7 +142,7 @@ def build_proxy_calibrator(
     cfg_l, cfg_s = _build_proxy_stats(
         proxy_kind, config,
         large_model, large_preprocess, small_model, small_preprocess,
-        device, cache_path=proxy_cache,
+        device, cache_path=proxy_cache, proto_metric=proto_metric,
     )
 
     if calib_map is not None:

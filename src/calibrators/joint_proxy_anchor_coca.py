@@ -34,7 +34,6 @@ from src.proxies.proxies import (
     FeatureExtractor,
     nuclear_norm_score,
     atc_score,
-    prototype_score,
 )
 
 _PROXY_KINDS = {"nuclear_norm", "atc", "prototype"}
@@ -199,12 +198,11 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
                 "atc proxy requires cfg_l.atc_threshold (build with build_proxy_stats)"
             return (float(atc_score(z_l, self.cfg_l.atc_threshold, self.cfg_l.atc_kind)),
                     float(atc_score(z_s, self.cfg_s.atc_threshold, self.cfg_s.atc_kind)))
-        else:  # prototype
-            assert self._ext_l is not None and self.cfg_l.prototypes is not None, \
+        else:  # prototype (cosine or mahalanobis, per cfg.proto_metric)
+            assert self._ext_l is not None and self._ext_s is not None, \
                 "prototype proxy requires register_hooks() and build_proxy_stats()"
-            device = z_l.device
-            return (float(prototype_score(self._ext_l._feats, self.cfg_l.prototypes.to(device))),
-                    float(prototype_score(self._ext_s._feats, self.cfg_s.prototypes.to(device))))
+            return (self.cfg_l.prototype_proxy(self._ext_l._feats),
+                    self.cfg_s.prototype_proxy(self._ext_s._feats))
 
     def _aggregate(self, z_anchor: torch.Tensor, z_source: torch.Tensor, tau: float) -> torch.Tensor:
         """Anchor-guided aggregation identical to JointCoca._aggregate."""

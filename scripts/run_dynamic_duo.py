@@ -47,6 +47,12 @@ if __name__ == "__main__":
     parser.add_argument("--fixed_ts_config", type=str, default=None)
     parser.add_argument("--proxy_kind", type=str, default="prototype",
                         choices=["nuclear_norm", "atc", "prototype"])
+    parser.add_argument("--proto_metric", type=str, default="cosine",
+                        choices=["cosine", "mahalanobis"],
+                        help="Distance for the prototype proxy: cosine similarity to "
+                             "L2-normalised class means (default), or tied-covariance "
+                             "Mahalanobis to raw class means. Only used when "
+                             "--proxy_kind prototype.")
     parser.add_argument("--proxy_cache", type=str, default=None)
     parser.add_argument("--calib_map", type=str, default=None)
     parser.add_argument("--calibrated_selection", action="store_true")
@@ -82,6 +88,7 @@ if __name__ == "__main__":
                 device=device,
                 num_samples=args.num_samples,
                 seed=args.seed,
+                proto_metric=args.proto_metric,
             )
         except ValueError as e:
             parser.error(str(e))
