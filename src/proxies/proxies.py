@@ -13,8 +13,6 @@ Persistence: stats live in their own directory (DEFAULT_PROXY_DIR) and
 nothing else does — one file per (large, small) pair. The calib maps that turn
 a raw proxy into predicted accuracy are NOT stored here; they are a separate
 artifact owned by calibration.py and attached at runtime onto .calib.
-
-Used by JointProxyAnchorCoca (calibrator) and proxy_benchmark (eval harness).
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ from tqdm import tqdm
 
 # Dedicated, stats-only directory + distinctive suffix so the folder is
 # unambiguous: every file in it is a proxy-stats pair.
-DEFAULT_PROXY_DIR = Path("proxy_stats")
+DEFAULT_PROXY_DIR = Path("data/proxy_stats")
 PROXY_STATS_SUFFIX = ".proxystats.pt"
 
 
@@ -110,7 +108,6 @@ class ProxyStats:
     """Source-fitted state for computing reliability proxies on ONE model.
 
     Built offline from clean source data (ATC threshold, class prototypes);
-    used by JointProxyAnchorCoca and the benchmark.
     """
     name: str
     num_classes: int
@@ -281,7 +278,7 @@ def build_proxy_stats(
     cache_path: str | Path | None = None,
     cache_dir: str | Path = DEFAULT_PROXY_DIR,
 ) -> tuple[ProxyStats, ProxyStats]:
-    """Build ProxyStatss for both models from clean source data.
+    """Build ProxyStats for both models from clean source data.
 
     `cache_path` may be a bare name (resolved into `cache_dir`) or a full path.
     If it resolves to an existing file, loads from cache and skips the source

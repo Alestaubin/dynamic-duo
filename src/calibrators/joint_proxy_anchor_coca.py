@@ -5,7 +5,8 @@ COCA TS calibrator with per-batch proxy-driven anchor selection.
 
 Each batch:
   1. Compute proxy scores r_l, r_s (nuclear_norm / atc / prototype).
-  2. Select anchor = the model with the higher proxy score.
+  2. Select anchor = the model with the higher selection score: the raw proxy,
+     or the calibrated predicted accuracy when calibrated_selection=True.
   3. Fit COCA temperature tau aligning the source to the anchor.
   4. Return aggregated ensemble logits (z_anchor + z_source/tau) / 2.
 
@@ -64,6 +65,12 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
     ----------
     proxy_kind : "nuclear_norm" | "atc" | "prototype"
     cfg_l, cfg_s : ProxyStats for large and small model.
+    calibrated_selection : if True, pick the anchor by comparing each model's
+        calibrated predicted accuracy (cfg.predicted_acc(proxy_kind, raw))
+        instead of the raw proxy scores. Requires a CalibrationMaps attached to
+        both cfg_l and cfg_s for this proxy_kind (asserted at first batch). The
+        raw r_l/r_s are still logged and correlated unchanged, so the per-
+        corruption proxy diagnostics stay comparable across this flag.
     num_steps : COCA gradient steps per batch.
     lr : COCA learning rate.
     loss : COCA alignment loss ("l1" or "entropy").
@@ -94,6 +101,7 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         eps: float = 1e-4,
         log_every: int = 10,
         csv_path: str | None = None,
+        calibrated_selection: bool = False,
     ):
         super().__init__()
         assert proxy_kind in _PROXY_KINDS, \
@@ -101,6 +109,8 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         self.proxy_kind = proxy_kind
         self.cfg_l = cfg_l
         self.cfg_s = cfg_s
+        self.calibrated_selection = calibrated_selection
+        self._calib_checked = False
         self.t_min = t_min
         self.t_max = t_max
         self.eps = eps
@@ -116,10 +126,13 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         # Per-batch state
         self._labels: torch.Tensor | None = None
         self._diag_done: bool = False
+        self._sel_scores: tuple[float, float] | None = None
 
         # Per-corruption accumulators (cleared by report_and_reset_corruption_stats)
         self._corr_r_l:     list[float] = []
         self._corr_r_s:     list[float] = []
+        self._corr_pred_l:  list[float] = []
+        self._corr_pred_s:  list[float] = []
         self._corr_acc_l:   list[float] = []
         self._corr_acc_s:   list[float] = []
         self._corr_duo_acc: list[float] = []
@@ -161,6 +174,22 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
             self._coca.device = device
             self._coca._build_optimizer()
 
+    def _check_calib(self) -> None:
+        """Once: assert both models have a calib map for this proxy. Without it
+        predicted_acc silently returns the raw value, so calibrated_selection
+        would be a no-op — fail loudly instead."""
+        if self._calib_checked:
+            return
+        missing = [
+            tag for cfg, tag in ((self.cfg_l, "cfg_l"), (self.cfg_s, "cfg_s"))
+            if self.proxy_kind not in cfg.calib
+        ]
+        assert not missing, (
+            f"calibrated_selection=True but {missing} has no calib map for proxy "
+            f"'{self.proxy_kind}'; attach a CalibrationMaps before inference."
+        )
+        self._calib_checked = True
+
     @torch.no_grad()
     def _proxy_scores(self, z_l: torch.Tensor, z_s: torch.Tensor) -> tuple[float, float]:
         if self.proxy_kind == "nuclear_norm":
@@ -201,7 +230,16 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         self._align_device(z_l.device)
         r_l, r_s = self._proxy_scores(z_l, z_s)
 
-        if r_l >= r_s:
+        # Selection score: calibrated predicted-accuracy or the raw proxy.
+        if self.calibrated_selection:
+            self._check_calib()
+            s_l = self.cfg_l.predicted_acc(self.proxy_kind, r_l)
+            s_s = self.cfg_s.predicted_acc(self.proxy_kind, r_s)
+        else:
+            s_l, s_s = r_l, r_s
+        self._sel_scores = (s_l, s_s)
+
+        if s_l >= s_s:
             z_anchor, z_source, anchor_name = z_l, z_s, "large"
         else:
             z_anchor, z_source, anchor_name = z_s, z_l, "small"
@@ -229,6 +267,9 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
             f"anchor={anchor}",
             f"tau={tau:.3f}",
         ]
+        if self.calibrated_selection and self._sel_scores is not None:
+            s_l, s_s = self._sel_scores
+            parts.insert(2, f"acc_hat_l={s_l:.3f} acc_hat_s={s_s:.3f}")
 
         if self._labels is not None:
             labels = self._labels.to(z_l.device)
@@ -239,6 +280,11 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
             self._corr_r_l.append(r_l);    self._corr_acc_l.append(acc_l)
             self._corr_r_s.append(r_s);    self._corr_acc_s.append(acc_s)
             self._corr_duo_acc.append(duo_acc)
+
+            pred_l = self.cfg_l.predicted_acc(self.proxy_kind, r_l)
+            pred_s = self.cfg_s.predicted_acc(self.proxy_kind, r_s)
+            self._corr_pred_l.append(pred_l)
+            self._corr_pred_s.append(pred_s)
 
             # Selection accuracy: does proxy pick the truly-better model?
             if abs(acc_l - acc_s) > 1e-6:  # skip ties
@@ -281,8 +327,10 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
 
     def report_and_reset_corruption_stats(self, label: str) -> dict:
         """Compute stats for this corruption, print, write CSV rows, and clear."""
-        stats_l = _corr_stats(self._corr_r_l, self._corr_acc_l)
-        stats_s = _corr_stats(self._corr_r_s, self._corr_acc_s)
+        stats_l      = _corr_stats(self._corr_r_l,    self._corr_acc_l)
+        stats_s      = _corr_stats(self._corr_r_s,    self._corr_acc_s)
+        stats_pred_l = _corr_stats(self._corr_pred_l, self._corr_acc_l)
+        stats_pred_s = _corr_stats(self._corr_pred_s, self._corr_acc_s)
         n = stats_l["n"]
 
         sel_acc = (self._n_sel_correct / self._n_sel_total
@@ -297,12 +345,18 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
             print(
                 f"[ProxyAnchorCoca {self.proxy_kind} {label}] "
                 f"n={n} batches with labels{sel_str}\n"
-                f"  large: R²={_fmt(stats_l['r2'])}  "
+                f"  large  (proxy): R²={_fmt(stats_l['r2'])}  "
                 f"r={_fmt(stats_l['pearson_r'])}  "
                 f"ρ={_fmt(stats_l['spearman_rho'])}\n"
-                f"  small: R²={_fmt(stats_s['r2'])}  "
+                f"  large  (pred):  R²={_fmt(stats_pred_l['r2'])}  "
+                f"r={_fmt(stats_pred_l['pearson_r'])}  "
+                f"ρ={_fmt(stats_pred_l['spearman_rho'])}\n"
+                f"  small  (proxy): R²={_fmt(stats_s['r2'])}  "
                 f"r={_fmt(stats_s['pearson_r'])}  "
-                f"ρ={_fmt(stats_s['spearman_rho'])}"
+                f"ρ={_fmt(stats_s['spearman_rho'])}\n"
+                f"  small  (pred):  R²={_fmt(stats_pred_s['r2'])}  "
+                f"r={_fmt(stats_pred_s['pearson_r'])}  "
+                f"ρ={_fmt(stats_pred_s['spearman_rho'])}"
             )
 
         # Flush buffered rows to CSV with the corruption label filled in
@@ -320,6 +374,7 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
 
         self._corr_r_l.clear();    self._corr_acc_l.clear()
         self._corr_r_s.clear();    self._corr_acc_s.clear()
+        self._corr_pred_l.clear(); self._corr_pred_s.clear()
         self._corr_duo_acc.clear()
         self._n_sel_correct = 0
         self._n_sel_total   = 0
@@ -332,9 +387,15 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
             "l_r2": stats_l["r2"],
             "l_pearson_r": stats_l["pearson_r"],
             "l_spearman_rho": stats_l["spearman_rho"],
+            "l_pred_r2": stats_pred_l["r2"],
+            "l_pred_pearson_r": stats_pred_l["pearson_r"],
+            "l_pred_spearman_rho": stats_pred_l["spearman_rho"],
             "s_r2": stats_s["r2"],
             "s_pearson_r": stats_s["pearson_r"],
             "s_spearman_rho": stats_s["spearman_rho"],
+            "s_pred_r2": stats_pred_s["r2"],
+            "s_pred_pearson_r": stats_pred_s["pearson_r"],
+            "s_pred_spearman_rho": stats_pred_s["spearman_rho"],
             "n": n,
         }
 

@@ -505,8 +505,11 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                     wandb_log[f"{prefix}proxy/r2_large"] = r2_stats["r2_l"]
                     wandb_log[f"{prefix}proxy/r2_small"] = r2_stats["r2_s"]
                 if corr_stats and corr_stats["n"] > 0:
-                    for key in ("sel_acc", "l_r2", "l_pearson_r", "l_spearman_rho",
-                                "s_r2", "s_pearson_r", "s_spearman_rho"):
+                    for key in ("sel_acc",
+                                "l_r2", "l_pearson_r", "l_spearman_rho",
+                                "l_pred_r2", "l_pred_pearson_r", "l_pred_spearman_rho",
+                                "s_r2", "s_pearson_r", "s_spearman_rho",
+                                "s_pred_r2", "s_pred_pearson_r", "s_pred_spearman_rho"):
                         v = corr_stats[key]
                         if not math.isnan(v):
                             wandb_log[f"{prefix}proxy/{key}"] = v

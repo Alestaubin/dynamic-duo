@@ -33,4 +33,17 @@ python scripts/run_dynamic_duo.py \
     --csv_path results/proxy_anchor_coca_proto.csv \
     --proxy_cache cache/vit_res_50k.pt
     --wandb
+
+# proxy-anchor COCA with calibrated anchor selection:
+python scripts/run_dynamic_duo.py \
+    --config cfgs/dynamic_duo_config.yaml \
+    --mode no_adapt \
+    --calibration_mode proxy_anchor_coca \
+    --proxy_kind prototype \
+    --proxy_cache resnet50_vitb16 \
+    --calib_map resnet50_vitb16_dev \
+    --calibrated_selection \
+    --num_samples 5000
+
+python scripts/run_dynamic_duo.py     --config cfgs/dynamic_duo_config.yaml     --mode no_adapt     --calibration_mode proxy_anchor_coca     --proxy_kind prototype     --proxy_cache resnet50_vitb16     --calib_map resnet50_vitb16_dev     --calibrated_selection     --num_samples 50000 --wandb
 ```

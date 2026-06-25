@@ -6,135 +6,85 @@ from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_sample_nll_oracle import JointSampleNLLOracle
 from src.calibrators.joint_relative_entropy import JointRelativeEntropy
 from src.calibrators.joint_lambda_entropy import JointLambdaEntropy
-from src.calibrators.joint_soft_anchor import JointSoftAnchor
-from src.calibrators.joint_proxy_anchor_coca import JointProxyAnchorCoca
-from src.proxies.proxies import build_proxy_configs
+from src.proxies.calibrator_setup import build_proxy_calibrator
 
 import argparse
 import torch
 
 """
-python scripts/run_dynamic_duo.py \
-    --config cfgs/dynamic_duo_config.yaml \
-    --mode no_adapt \
-    --steps 1 \
-    --num_samples 1000 \
-    --seed 0 \
-    --calibration_mode duo_entropy
-
 source /scratch0/alxstaub/ddenv/bin/activate
 export PYTHONPATH=$PYTHONPATH:~/dynamic-duo
 
-CUDA_VISIBLE_DEVICES=0 
+CUDA_VISIBLE_DEVICES=0
 python scripts/run_dynamic_duo.py \
     --config cfgs/dynamic_duo_config.yaml \
     --mode no_adapt \
     --seed 0 \
-    --calibration_mode coca 
+    --calibration_mode coca
 
+# proxy-anchor COCA with calibrated anchor selection:
+python scripts/run_dynamic_duo.py \
+    --config cfgs/dynamic_duo_config.yaml \
+    --mode no_adapt \
+    --calibration_mode proxy_anchor_coca \
+    --proxy_kind prototype \
+    --proxy_cache resnet50_vitb16 \
+    --calib_map resnet50_vitb16_dev \
+    --calibrated_selection
 """
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Dynamic Duo TTA on ImageNet-C")
-    parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
-    parser.add_argument("--mode", type=str, default="both_duo", help="Dynamic Duo mode to run")
-    parser.add_argument("--steps", type=int, default=1, help="Number of adaptation steps per batch")
-    parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to use from each corruption/severity subset (default: all)")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility (when using fraction < 1.0)")  
-    parser.add_argument("--calibration_mode", type=str, default="fixed", help="Calibrator mode for combining the duo logits.")
-    parser.add_argument("--norm_logits", action="store_true", help="Whether to apply logit normalization (p-norm) before feeding into the calibrator.")
-    parser.add_argument("--coca_bs", type=int, default=None, help="Sub-batch size for COCA temperature fitting (default: same as the TENT batch, i.e. one tau per batch).")
-    parser.add_argument("--fixed_ts_config", type=str, default=None, help="Path to a directory containing config.json with pre-tuned temperatures (required when --calibration_mode is fixed_ts).")
+    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--mode", type=str, default="both_duo")
+    parser.add_argument("--steps", type=int, default=1)
+    parser.add_argument("--num_samples", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--calibration_mode", type=str, default="fixed")
+    parser.add_argument("--norm_logits", action="store_true")
+    parser.add_argument("--coca_bs", type=int, default=None)
+    parser.add_argument("--fixed_ts_config", type=str, default=None)
     parser.add_argument("--proxy_kind", type=str, default="prototype",
-                        choices=["nuclear_norm", "atc", "prototype"],
-                        help="Proxy for JointSoftAnchor (default: prototype).")
-    parser.add_argument("--tau_gate", type=float, default=1.0,
-                        help="Gate sharpness for soft anchor sigmoid (default: 1.0).")
-    parser.add_argument("--proxy_cache", type=str, default=None,
-                        help="Path to a .pt file for caching source-pass proxy configs "
-                             "(ATC thresholds + prototypes). Created on first run, "
-                             "loaded on subsequent runs. Ignored for nuclear_norm.")
-    parser.add_argument("--wandb", action="store_true",
-                        help="Log results to Weights & Biases (default: off).")
-    parser.add_argument("--csv_path", type=str, default=None,
-                        help="Path to a CSV file for per-batch diagnostics "
-                             "(proxy_anchor_coca only). Created/appended on each run.")
+                        choices=["nuclear_norm", "atc", "prototype"])
+    parser.add_argument("--proxy_cache", type=str, default=None)
+    parser.add_argument("--calib_map", type=str, default=None)
+    parser.add_argument("--calibrated_selection", action="store_true")
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--csv_path", type=str, default=None)
 
     args = parser.parse_args()
+
+    if args.calibrated_selection and args.calibration_mode != "proxy_anchor_coca":
+        parser.error("--calibrated_selection only applies to --calibration_mode proxy_anchor_coca")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     config = load_config(args.config)
-    # Load models and preprocessors
     large_model, large_preprocess = get_model(config["LARGE"]["NAME"])
     small_model, small_preprocess = get_model(config["SMALL"]["NAME"])
     large_model = large_model.to(device)
     small_model = small_model.to(device)
 
-    import time 
-    csv_path = str(args.csv_path) + f"_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
-
-    if args.calibration_mode == "soft_anchor":
-        if args.proxy_kind in {"atc", "prototype"}:
-            # Source pass needed to fit ATC thresholds and/or build prototypes.
-            import torch.utils.data
-            from torch.utils.data import DataLoader
-            from torchvision import datasets
-            from src.utils.data import _pil_collate_fn
-            print(f"Building proxy configs (proxy={args.proxy_kind}) from source data...")
-            src_ds = datasets.ImageFolder(config["VAL_DIR"])
-            src_loader = DataLoader(
-                src_ds, batch_size=config["BS"], shuffle=False,
-                num_workers=config["WORKERS"], pin_memory=(device.type == "cuda"),
-                collate_fn=_pil_collate_fn,
+    if args.calibration_mode in {"soft_anchor", "proxy_anchor_coca"}:
+        try:
+            calibrator = build_proxy_calibrator(
+                calibration_mode=args.calibration_mode,
+                proxy_kind=args.proxy_kind,
+                proxy_cache=args.proxy_cache,
+                calib_map=args.calib_map,
+                calibrated_selection=args.calibrated_selection,
+                csv_path=args.csv_path,
+                config=config,
+                large_model=large_model, large_preprocess=large_preprocess,
+                small_model=small_model, small_preprocess=small_preprocess,
+                device=device,
+                num_samples=args.num_samples,
+                seed=args.seed,
             )
-            cfg_l, cfg_s = build_proxy_configs(
-                large_model, large_preprocess, config["LARGE"]["NAME"],
-                small_model, small_preprocess, config["SMALL"]["NAME"],
-                src_loader, device,
-                cache_path=args.proxy_cache,
-            )
-        else:
-            # nuclear_norm: no source data needed.
-            from src.proxies.proxies import ModelProxyConfig
-            cfg_l = ModelProxyConfig(name=config["LARGE"]["NAME"], num_classes=1000)
-            cfg_s = ModelProxyConfig(name=config["SMALL"]["NAME"], num_classes=1000)
-        calibrator = JointSoftAnchor(
-            proxy_kind=args.proxy_kind,
-            cfg_l=cfg_l,
-            cfg_s=cfg_s,
-            tau_gate=args.tau_gate,
-        )
-    elif args.calibration_mode == "proxy_anchor_coca":
-        if args.proxy_kind in {"atc", "prototype"}:
-            import torch.utils.data
-            from torch.utils.data import DataLoader
-            from torchvision import datasets
-            from src.utils.data import _pil_collate_fn
-            print(f"Building proxy configs (proxy={args.proxy_kind}) from source data...")
-            src_ds = datasets.ImageFolder(config["VAL_DIR"])
-            src_loader = DataLoader(
-                src_ds, batch_size=config["BS"], shuffle=False,
-                num_workers=config["WORKERS"], pin_memory=(device.type == "cuda"),
-                collate_fn=_pil_collate_fn,
-            )
-            cfg_l, cfg_s = build_proxy_configs(
-                large_model, large_preprocess, config["LARGE"]["NAME"],
-                small_model, small_preprocess, config["SMALL"]["NAME"],
-                src_loader, device,
-                cache_path=args.proxy_cache,
-            )
-        else:
-            from src.proxies.proxies import ModelProxyConfig
-            cfg_l = ModelProxyConfig(name=config["LARGE"]["NAME"], num_classes=1000)
-            cfg_s = ModelProxyConfig(name=config["SMALL"]["NAME"], num_classes=1000)
-        calibrator = JointProxyAnchorCoca(
-            proxy_kind=args.proxy_kind,
-            cfg_l=cfg_l,
-            cfg_s=cfg_s,
-            csv_path=args.csv_path,
-        )
+        except ValueError as e:
+            parser.error(str(e))
     elif args.calibration_mode == "fixed_ts":
         if args.fixed_ts_config is None:
             parser.error("--fixed_ts_config is required when --calibration_mode is fixed_ts")
@@ -144,7 +94,7 @@ if __name__ == "__main__":
     elif args.calibration_mode == "coca":
         calibrator = JointCoca(num_steps=5, lr=5e-2, chunk_size=args.coca_bs)
     elif args.calibration_mode == "oracle_ts":
-        calibrator = JointFixedTS()  # temperatures fitted per-corruption by evaluate_dynamic_duo
+        calibrator = JointFixedTS()
     elif args.calibration_mode == "sample_oracle_ts":
         calibrator = JointSampleNLLOracle(num_steps=20, lr=5e-2)
     elif args.calibration_mode == "relative_entropy":
@@ -154,19 +104,16 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Invalid calibration mode: {args.calibration_mode}")
 
-    # Set up Dynamic Duo
-
     duo = setup_duo(
-        large=large_model, 
+        large=large_model,
         large_preprocess=large_preprocess,
-        small=small_model, 
+        small=small_model,
         small_preprocess=small_preprocess,
         mode=args.mode,
-        joint_calibrator = calibrator,
+        joint_calibrator=calibrator,
         calibration_mode=args.calibration_mode,
-        cfg = config,
+        cfg=config,
         steps=args.steps,
-        norm_logits=args.norm_logits
+        norm_logits=args.norm_logits,
     )
-    # Evaluate Dynamic Duo on ImageNet-C
     evaluate_dynamic_duo(duo, config, num_samples=args.num_samples, seed=args.seed, use_wandb=args.wandb)

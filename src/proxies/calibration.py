@@ -56,7 +56,7 @@ __all__ = [
 
 # Dedicated, maps-only directory + distinctive suffix so the folder is
 # unambiguous: every file in it is a calibration map.
-DEFAULT_CALIB_DIR = Path("calibration_maps")
+DEFAULT_CALIB_DIR = Path("data/calibration_maps")
 CALIB_MAP_SUFFIX = ".calibmap.pt"
 
 
@@ -151,11 +151,14 @@ class CalibrationMaps:
     small_name: str
     calib_l: dict[str, IsotonicRegression] = field(default_factory=dict)
     calib_s: dict[str, IsotonicRegression] = field(default_factory=dict)
-    proxy_names: list[str] = field(default_factory=list)
+    proxy_name: str = ""
     n_fit_records: int = 0
     fit_corruptions: list[str] = field(default_factory=list)
-    holdout_corruptions: list[str] = field(default_factory=list)
     sklearn_version: str = sklearn.__version__
+
+    @property
+    def proxy_names(self) -> list[str]:
+        return [self.proxy_name] if self.proxy_name else list(self.calib_l.keys())
 
     def predict_l(self, proxy: str, raw: float) -> float:
         iso = self.calib_l.get(proxy)
@@ -180,52 +183,45 @@ class CalibrationMaps:
 
 def fit_calibration_maps(
     records: list[BatchRecord],
-    proxy_names: list[str],
+    proxy_name: str,
     large_name: str,
     small_name: str,
-    holdout_corruptions: set[str] | None = None,
     y_min: float = 0.0,
     y_max: float = 1.0,
     increasing: bool | str = True,
 ) -> CalibrationMaps:
-    """Fit per-model isotonic maps raw_proxy -> accuracy, pooled across
-    corruptions. Holdout corruptions are excluded from the FIT (not dropped
-    from `records`) so you can score held-out ranking quality separately.
+    """Fit per-model isotonic maps raw_proxy -> accuracy for a single proxy.
 
-    A proxy/model pair with fewer than 2 distinct raw values is skipped;
-    predict_* / predicted_acc then fall back to identity for it.
+    The caller is responsible for passing only the records that should be used
+    for fitting (i.e. holdout filtering happens upstream, not here).
+
+    A model with fewer than 2 distinct raw values skips fitting; predict_* /
+    predicted_acc then falls back to the identity for that model.
     """
-    holdout = holdout_corruptions or set()
-    fit_recs = [r for r in records if r.corruption not in holdout]
-
     calib_l: dict[str, IsotonicRegression] = {}
     calib_s: dict[str, IsotonicRegression] = {}
-    for proxy in proxy_names:
-        for calib, side in ((calib_l, "l"), (calib_s, "s")):
-            xs, ys = [], []
-            for r in fit_recs:
-                raw = r.raw_l if side == "l" else r.raw_s
-                acc = r.acc_l if side == "l" else r.acc_s
-                if proxy in raw:
-                    xs.append(raw[proxy])
-                    ys.append(acc)
-            if len(set(xs)) < 2:
-                continue
-            iso = IsotonicRegression(
-                out_of_bounds="clip", y_min=y_min, y_max=y_max, increasing=increasing
-            )
-            iso.fit(xs, ys)
-            calib[proxy] = iso
+    for calib, side in ((calib_l, "l"), (calib_s, "s")):
+        pairs = [
+            (getattr(r, f"raw_{side}")[proxy_name], getattr(r, f"acc_{side}"))
+            for r in records if proxy_name in getattr(r, f"raw_{side}")
+        ]
+        if len({p[0] for p in pairs}) < 2:
+            continue
+        xs, ys = zip(*pairs)
+        iso = IsotonicRegression(
+            out_of_bounds="clip", y_min=y_min, y_max=y_max, increasing=increasing
+        )
+        iso.fit(list(xs), list(ys))
+        calib[proxy_name] = iso
 
     return CalibrationMaps(
         large_name=large_name,
         small_name=small_name,
         calib_l=calib_l,
         calib_s=calib_s,
-        proxy_names=list(proxy_names),
-        n_fit_records=len(fit_recs),
-        fit_corruptions=sorted({r.corruption for r in fit_recs}),
-        holdout_corruptions=sorted(holdout),
+        proxy_name=proxy_name,
+        n_fit_records=len(records),
+        fit_corruptions=sorted({r.corruption for r in records}),
     )
 
 
@@ -233,14 +229,10 @@ def fit_calibration(
     cfg_l: ProxyStats,
     cfg_s: ProxyStats,
     dev_records: list[BatchRecord],
-    proxy_names: list[str],
-    holdout_corruptions: set[str] | None = None,
+    proxy_name: str,
 ) -> CalibrationMaps:
-    """Backward-compatible wrapper: build the maps and attach onto the stats
-    in place, returning the artifact so it can also be saved."""
-    maps = fit_calibration_maps(
-        dev_records, proxy_names, cfg_l.name, cfg_s.name, holdout_corruptions
-    )
+    """Convenience wrapper: fit maps and attach onto the stats in place."""
+    maps = fit_calibration_maps(dev_records, proxy_name, cfg_l.name, cfg_s.name)
     maps.attach(cfg_l, cfg_s)
     return maps
 
@@ -269,10 +261,9 @@ def save_calibration_maps(
             "small_name": maps.small_name,
             "calib_l": maps.calib_l,
             "calib_s": maps.calib_s,
-            "proxy_names": maps.proxy_names,
+            "proxy_name": maps.proxy_name,
             "n_fit_records": maps.n_fit_records,
             "fit_corruptions": maps.fit_corruptions,
-            "holdout_corruptions": maps.holdout_corruptions,
             "sklearn_version": maps.sklearn_version,
         },
         path,
@@ -302,10 +293,10 @@ def load_calibration_maps(
         small_name=data["small_name"],
         calib_l=data.get("calib_l", {}),
         calib_s=data.get("calib_s", {}),
-        proxy_names=data.get("proxy_names", []),
+        # backward compat: old files saved proxy_names list
+        proxy_name=data.get("proxy_name") or (data.get("proxy_names") or [""])[0],
         n_fit_records=data.get("n_fit_records", 0),
         fit_corruptions=data.get("fit_corruptions", []),
-        holdout_corruptions=data.get("holdout_corruptions", []),
         sklearn_version=saved_ver or sklearn.__version__,
     )
     print(f"[calib map] loaded ← {path}  (proxies={maps.proxy_names})")
@@ -343,12 +334,9 @@ if __name__ == "__main__":
                 acc_l=a_l, acc_s=a_s,
             ))
 
-    maps = fit_calibration_maps(
-        recs, ["nuclear_norm", "atc"], "resnet50", "vit_b_16",
-        holdout_corruptions={"fog"},
-    )
-    assert maps.holdout_corruptions == ["fog"]
-    assert "fog" not in maps.fit_corruptions
+    maps = fit_calibration_maps(recs, "nuclear_norm", "resnet50", "vit_b_16")
+    assert maps.proxy_name == "nuclear_norm"
+    assert maps.proxy_names == ["nuclear_norm"]
 
     with tempfile.TemporaryDirectory() as d:
         save_calibration_maps(maps, "selftest", directory=d)
@@ -356,7 +344,6 @@ if __name__ == "__main__":
         reloaded = load_calibration_maps("selftest", directory=d)
 
     # Round-trip predictions match.
-    for proxy in ("nuclear_norm", "atc"):
-        for raw in (0.2, 0.5, 0.8):
-            assert abs(maps.predict_l(proxy, raw) - reloaded.predict_l(proxy, raw)) < 1e-9
+    for raw in (0.2, 0.5, 0.8):
+        assert abs(maps.predict_l("nuclear_norm", raw) - reloaded.predict_l("nuclear_norm", raw)) < 1e-9
     print("calibration self-test passed")
