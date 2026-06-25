@@ -32,7 +32,7 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy", "lambda_entropy", "soft_anchor"}
+_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy", "lambda_entropy", "soft_anchor", "proxy_anchor_coca"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -144,9 +144,16 @@ class DynamicDuo(nn.Module):
                 "self-adapting T_l, T_s per batch via KL to proxy-weighted anchor",
                 proxy_kind,
             )
+        elif calibration_mode == "proxy_anchor_coca":
+            proxy_kind = getattr(joint_calibrator, "proxy_kind", "unknown")
+            logger.info(
+                "Calibrator PROXY-ANCHOR-COCA (proxy_anchor_coca) | proxy=%s | "
+                "COCA TS with per-batch proxy-driven anchor selection",
+                proxy_kind,
+            )
 
     def forward(self, x, labels=None):
-        if self.calibration_mode in {"batch_oracle_ts", "sample_oracle_ts", "soft_anchor"} and labels is not None:
+        if self.calibration_mode in {"batch_oracle_ts", "sample_oracle_ts", "soft_anchor", "proxy_anchor_coca"} and labels is not None:
             self.joint_calibrator.set_labels(labels)
         for _ in range(self.steps):
             outputs, z_large, z_small = forward_and_adapt(
@@ -310,9 +317,9 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         configure_model_frozen(small, cfg["SMALL"]["NORM"])
 
 
-    # For soft_anchor with prototype proxy: register feature hooks on the
-    # (now TENT-configured) models so the calibrator can read features each forward.
-    if calibration_mode == "soft_anchor" and getattr(joint_calibrator, "proxy_kind", None) == "prototype":
+    # Register prototype feature hooks for proxy-based calibrators.
+    if (calibration_mode in {"soft_anchor", "proxy_anchor_coca"}
+            and getattr(joint_calibrator, "proxy_kind", None) == "prototype"):
         joint_calibrator.register_hooks(large, small)
         logger.info("setup_duo: registered prototype feature hooks on large and small models")
 
@@ -474,6 +481,12 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                     f"{corruption_type}/s{severity}"
                 )
 
+            corr_stats = {}
+            if hasattr(duo.joint_calibrator, "report_and_reset_corruption_stats"):
+                corr_stats = duo.joint_calibrator.report_and_reset_corruption_stats(
+                    f"{corruption_type}/s{severity}"
+                )
+
             duo_acc = metrics_by_model["duo"]["accuracy"]
             large_acc = metrics_by_model["large"]["accuracy"]
             small_acc = metrics_by_model["small"]["accuracy"]
@@ -491,6 +504,12 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                 if r2_stats and not math.isnan(r2_stats["r2_l"]):
                     wandb_log[f"{prefix}proxy/r2_large"] = r2_stats["r2_l"]
                     wandb_log[f"{prefix}proxy/r2_small"] = r2_stats["r2_s"]
+                if corr_stats and corr_stats["n"] > 0:
+                    for key in ("sel_acc", "l_r2", "l_pearson_r", "l_spearman_rho",
+                                "s_r2", "s_pearson_r", "s_spearman_rho"):
+                        v = corr_stats[key]
+                        if not math.isnan(v):
+                            wandb_log[f"{prefix}proxy/{key}"] = v
                 wandb_run.log(wandb_log)
 
             logger.info(f"Results for {corruption_type} severity {severity}: {metrics_by_model['duo']}")

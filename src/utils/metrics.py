@@ -79,6 +79,7 @@ def get_metrics_dict(probs, labels) -> dict:
     if len(present) < num_classes:
         # subset of classes present — roc_auc_score requires cols == unique classes
         probs_auroc = probs[:, present]
+        probs_auroc = probs_auroc / probs_auroc.sum(axis=1, keepdims=True)
         labels_auroc = np.searchsorted(present, labels)  # remap to 0..len(present)-1
     else:
         probs_auroc, labels_auroc = probs, labels

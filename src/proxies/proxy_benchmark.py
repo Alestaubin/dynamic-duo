@@ -40,7 +40,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from scipy.stats import spearmanr
+from scipy.stats import spearmanr, pearsonr
 from sklearn.isotonic import IsotonicRegression
 from tqdm import tqdm
 
@@ -52,6 +52,9 @@ from src.proxies.proxies import (
     fit_atc_threshold,
     build_prototypes,
     build_proxy_configs,
+    nuclear_norm_score,
+    atc_score,
+    prototype_score,
 )
 
 
@@ -400,6 +403,95 @@ def print_latex_table(results: list[dict]) -> None:
     print("\n" + "\n".join(lines) + "\n")
 
 
+def print_latex_signal_table(results: list[dict]) -> None:
+    """LaTeX table of Spearman ρ(raw proxy, true batch accuracy) per corruption.
+
+    This measures the proxy's raw signal quality before any isotonic calibration —
+    i.e. whether higher proxy score actually tracks higher model accuracy on each batch.
+    Four columns per proxy: ρ_large, ρ_small (best ρ per row is bolded).
+    """
+    proxies = [r["proxy"] for r in results]
+    all_corruptions: list[str] = sorted(
+        {c for r in results for c in r["per_corruption"]}
+    )
+    by_proxy: dict[str, dict] = {r["proxy"]: r for r in results}
+
+    n_metrics = 2  # sig_l, sig_s
+    n_cols = 1 + len(proxies) * n_metrics
+
+    col_spec = "l" + "".join("rr" for _ in proxies)
+    proxy_headers = " & ".join(
+        f"\\multicolumn{{2}}{{c}}{{{p}}}" for p in proxies
+    )
+    sub_headers = " & ".join(
+        "$\\rho_L$ & $\\rho_S$" for _ in proxies
+    )
+
+    lines = [
+        "\\begin{table}[h]",
+        "  \\centering",
+        f"  \\begin{{tabular}}{{{col_spec}}}",
+        "    \\toprule",
+        f"    Corruption & {proxy_headers} \\\\",
+        "    \\cmidrule(lr){" + "2-" + str(n_cols) + "}",
+        f"    & {sub_headers} \\\\",
+        "    \\midrule",
+    ]
+
+    def _fmt(v: float, bold: bool) -> str:
+        if math.isnan(v):
+            return "--"
+        s = f"{v:.3f}"
+        return f"\\textbf{{{s}}}" if bold else s
+
+    all_sig_values = lambda c: [
+        v
+        for p in proxies
+        for v in (
+            by_proxy[p]["per_corruption"].get(c, {}).get("sig_l", float("nan")),
+            by_proxy[p]["per_corruption"].get(c, {}).get("sig_s", float("nan")),
+        )
+        if not math.isnan(v)
+    ]
+
+    for c in all_corruptions:
+        best = max(all_sig_values(c), default=float("nan"))
+        cells = []
+        for p in proxies:
+            m = by_proxy[p]["per_corruption"].get(c, {})
+            sl = m.get("sig_l", float("nan"))
+            ss = m.get("sig_s", float("nan"))
+            cells.append(_fmt(sl, not math.isnan(sl) and sl == best))
+            cells.append(_fmt(ss, not math.isnan(ss) and ss == best))
+        lines.append(f"    {c} & {' & '.join(cells)} \\\\")
+
+    lines.append("    \\midrule")
+    all_sig_overall = [
+        v
+        for p in proxies
+        for v in (by_proxy[p]["signal_spearman_l"], by_proxy[p]["signal_spearman_s"])
+        if not math.isnan(v)
+    ]
+    best_all = max(all_sig_overall, default=float("nan"))
+    cells = []
+    for p in proxies:
+        sl = by_proxy[p]["signal_spearman_l"]
+        ss = by_proxy[p]["signal_spearman_s"]
+        cells.append(_fmt(sl, not math.isnan(sl) and sl == best_all))
+        cells.append(_fmt(ss, not math.isnan(ss) and ss == best_all))
+    lines.append(f"    ALL & {' & '.join(cells)} \\\\")
+
+    lines += [
+        "    \\bottomrule",
+        "  \\end{tabular}",
+        "  \\caption{Spearman $\\rho$ between raw proxy score and true batch accuracy"
+        " ($\\rho_L$: large model, $\\rho_S$: small model). No isotonic calibration applied.}",
+        "  \\label{tab:proxy_signal}",
+        "\\end{table}",
+    ]
+    print("\n" + "\n".join(lines) + "\n")
+
+
 # ============================================================================
 # REAL-MODEL BENCHMARK RUNNER
 # ============================================================================
@@ -531,6 +623,7 @@ def run_proxy_benchmark(
         results = [evaluate_proxy(eval_records, p, cfg_l, cfg_s) for p in proxies]
         print_report(results)
         print_latex_table(results)
+        print_latex_signal_table(results)
 
         if csv_path is not None:
             save_results_csv(results, csv_path)
@@ -551,6 +644,195 @@ def run_proxy_benchmark(
         ext_s.remove()
 
 
+# ============================================================================
+# SPEARMAN TEST — per-corruption proxy vs. accuracy correlation
+# ============================================================================
+
+@torch.no_grad()
+def _collect_corruption_aggregate(
+    cfg_l: ModelProxyConfig,
+    cfg_s: ModelProxyConfig,
+    ext_l: FeatureExtractor, preprocess_l,
+    ext_s: FeatureExtractor, preprocess_s,
+    loader, device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run one corruption through both models; return concatenated tensors."""
+    z_l, f_l, z_s, f_s, labs = [], [], [], [], []
+    for imgs, labels in tqdm(loader, leave=False):
+        xl = torch.stack([preprocess_l(img) for img in imgs]).to(device)
+        xs = torch.stack([preprocess_s(img) for img in imgs]).to(device)
+        zl, fl = ext_l(xl)
+        zs, fs = ext_s(xs)
+        z_l.append(zl.cpu()); f_l.append(fl.cpu())
+        z_s.append(zs.cpu()); f_s.append(fs.cpu())
+        labs.append(labels.cpu())
+    return (torch.cat(z_l), torch.cat(f_l),
+            torch.cat(z_s), torch.cat(f_s),
+            torch.cat(labs))
+
+
+def _safe_pearson(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """Pearson r and two-sided p-value; returns (nan, nan) on degenerate input."""
+    if len(a) < 3 or np.std(a) == 0 or np.std(b) == 0:
+        return float("nan"), float("nan")
+    r, p = pearsonr(a, b)
+    return float(r), float(p)
+
+
+def _safe_spearman_p(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
+    """Spearman ρ and p-value; returns (nan, nan) on degenerate input."""
+    if len(a) < 3 or np.std(a) == 0 or np.std(b) == 0:
+        return float("nan"), float("nan")
+    res = spearmanr(a, b)
+    return float(res.statistic), float(res.pvalue)
+
+
+def run_spearman_test(
+    cfg,
+    device,
+    num_samples=None,
+    seed=None,
+    cache_path=None,
+    csv_path=None,
+):
+    """Per-corruption proxy signal quality: Spearman ρ and Pearson r.
+
+    For each corruption/severity, runs all samples through both models and
+    computes ONE proxy score for the full set (not per batch). Each
+    corruption/severity is then one data point. Reports Spearman ρ and
+    Pearson r between proxy scores and true accuracies across all
+    corruption/severity pairs.
+
+    Parameters
+    ----------
+    cache_path : .pt file for ATC thresholds + prototypes (created if absent).
+    csv_path   : optional path to write the per-corruption table as CSV.
+    """
+    import torch.utils.data
+    from torch.utils.data import DataLoader
+    from torchvision import datasets
+    from src.utils.model import get_model
+    from src.utils.data import load_imagenetC, _pil_collate_fn
+
+    NUM_CLASSES = 1000
+    PROXIES = ["nuclear_norm", "atc", "prototype"]
+
+    large_model, large_pre = get_model(cfg["LARGE"]["NAME"])
+    small_model, small_pre  = get_model(cfg["SMALL"]["NAME"])
+    large_model = large_model.to(device).eval()
+    small_model = small_model.to(device).eval()
+
+    # Source pass for ATC thresholds and prototypes (skipped if cache present)
+    src_ds = datasets.ImageFolder(cfg["VAL_DIR"])
+    src_loader = DataLoader(
+        src_ds, batch_size=cfg["BS"], shuffle=False,
+        num_workers=cfg["WORKERS"], pin_memory=(device.type == "cuda"),
+        collate_fn=_pil_collate_fn,
+    )
+    cfg_l, cfg_s = build_proxy_configs(
+        large_model, large_pre, cfg["LARGE"]["NAME"],
+        small_model, small_pre, cfg["SMALL"]["NAME"],
+        src_loader, device, NUM_CLASSES,
+        cache_path=cache_path,
+    )
+
+    # ── Collect one aggregate data point per corruption/severity ─────────── #
+    # Each entry: corruption, severity, proxy_l, proxy_s, acc_l, acc_s
+    rows: list[dict] = []
+
+    ext_l = FeatureExtractor(large_model, cfg["LARGE"]["NAME"])
+    ext_s = FeatureExtractor(small_model, cfg["SMALL"]["NAME"])
+    try:
+        for severity in cfg["EVAL"]["SEVERITIES"]:
+            for corruption in cfg["EVAL"]["CORRUPTIONS"]:
+                loader = load_imagenetC(
+                    cfg["TEST_DIR"], severities=severity,
+                    corruption_types=[corruption], device=device,
+                    batch_size=cfg["BS"], num_workers=cfg["WORKERS"],
+                    num_samples=num_samples, seed=seed,
+                )
+                zl, fl, zs, fs, labs = _collect_corruption_aggregate(
+                    cfg_l, cfg_s,
+                    ext_l, large_pre, ext_s, small_pre,
+                    loader, device,
+                )
+                acc_l = float((zl.argmax(1) == labs).float().mean())
+                acc_s = float((zs.argmax(1) == labs).float().mean())
+                protos_l = cfg_l.prototypes.to(zl.device) if cfg_l.prototypes is not None else None
+                protos_s = cfg_s.prototypes.to(zs.device) if cfg_s.prototypes is not None else None
+                row = {
+                    "corruption": corruption,
+                    "severity":   severity,
+                    "n_samples":  int(labs.shape[0]),
+                    "acc_l":      acc_l,
+                    "acc_s":      acc_s,
+                    "nuclear_norm_l": float(nuclear_norm_score(zl)),
+                    "nuclear_norm_s": float(nuclear_norm_score(zs)),
+                    "atc_l": (float(atc_score(zl, cfg_l.atc_threshold, cfg_l.atc_kind))
+                              if cfg_l.atc_threshold is not None else float("nan")),
+                    "atc_s": (float(atc_score(zs, cfg_s.atc_threshold, cfg_s.atc_kind))
+                              if cfg_s.atc_threshold is not None else float("nan")),
+                    "prototype_l": (float(prototype_score(fl, protos_l))
+                                    if protos_l is not None else float("nan")),
+                    "prototype_s": (float(prototype_score(fs, protos_s))
+                                    if protos_s is not None else float("nan")),
+                }
+                print(f"  {corruption}/s{severity}: n={row['n_samples']}  "
+                      f"acc_l={acc_l:.3f}  acc_s={acc_s:.3f}  "
+                      f"nn_l={row['nuclear_norm_l']:.3f}  proto_l={row['prototype_l']:.3f}")
+                rows.append(row)
+    finally:
+        ext_l.remove()
+        ext_s.remove()
+
+    n_pts = len(rows)
+    print(f"\n{n_pts} data points "
+          f"({len(cfg['EVAL']['CORRUPTIONS'])} corruptions × "
+          f"{len(cfg['EVAL']['SEVERITIES'])} severities)\n")
+
+    # ── Compute correlations ─────────────────────────────────────────────── #
+    # stats[proxy][model] = {"rho": float, "rho_p": float, "r": float, "r_p": float}
+    stats: dict[str, dict[str, dict]] = {}
+    for proxy in PROXIES:
+        stats[proxy] = {}
+        for model, side in (("large", "l"), ("small", "s")):
+            proxy_vals = np.array([r[f"{proxy}_{side}"] for r in rows])
+            acc_vals   = np.array([r[f"acc_{side}"]     for r in rows])
+            valid = ~np.isnan(proxy_vals)
+            rho, rho_p = _safe_spearman_p(proxy_vals[valid], acc_vals[valid])
+            r,   r_p   = _safe_pearson(proxy_vals[valid], acc_vals[valid])
+            stats[proxy][model] = {"rho": rho, "rho_p": rho_p, "r": r, "r_p": r_p,
+                                   "n": int(valid.sum())}
+
+    # ── Print summary table ──────────────────────────────────────────────── #
+    print(f"{'proxy':<14}  {'model':<6}  "
+          f"{'Spearman ρ':>11}  {'p':>7}  {'Pearson r':>10}  {'p':>7}  {'n':>4}")
+    print("-" * 65)
+    for proxy in PROXIES:
+        for model in ("large", "small"):
+            s = stats[proxy][model]
+            print(f"{proxy:<14}  {model:<6}  "
+                  f"{s['rho']:>11.3f}  {s['rho_p']:>7.4f}  "
+                  f"{s['r']:>10.3f}  {s['r_p']:>7.4f}  {s['n']:>4}")
+        print()
+
+    # ── Save CSV ─────────────────────────────────────────────────────────── #
+    if csv_path is not None:
+        path = Path(csv_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fieldnames = (["corruption", "severity", "n_samples", "acc_l", "acc_s"]
+                      + [f"{p}_{s}" for p in PROXIES for s in ("l", "s")])
+        with open(path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: (f"{v:.4f}" if isinstance(v, float) else v)
+                                 for k, v in row.items()})
+        print(f"[spearman test] per-corruption data saved → {path}")
+
+    return stats, rows
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(
@@ -565,6 +847,8 @@ if __name__ == "__main__":
                         help="Path to .pt cache for ATC thresholds + prototypes.")
     parser.add_argument("--csv", type=str, default=None, dest="csv_path",
                         help="Save per-corruption results table to this CSV path.")
+    parser.add_argument("--spearman", action="store_true",
+                        help="Run the lightweight Spearman ρ test (no dev/calibration pass).")
     parser.add_argument("--test", action="store_true",
                         help="Run synthetic self-test instead of real models.")
     args = parser.parse_args()
@@ -576,6 +860,11 @@ if __name__ == "__main__":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {device}")
         cfg = load_config(args.config)
-        run_proxy_benchmark(cfg, device, num_samples=args.num_samples,
-                            seed=args.seed, wandb_project=args.wandb_project,
-                            cache_path=args.proxy_cache, csv_path=args.csv_path)
+        if args.spearman:
+            run_spearman_test(cfg, device, num_samples=args.num_samples,
+                              seed=args.seed, cache_path=args.proxy_cache,
+                              csv_path=args.csv_path)
+        else:
+            run_proxy_benchmark(cfg, device, num_samples=args.num_samples,
+                                seed=args.seed, wandb_project=args.wandb_project,
+                                cache_path=args.proxy_cache, csv_path=args.csv_path)

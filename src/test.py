@@ -1,158 +1,71 @@
 
-import math
-
-from src.tta.dynamic_duo import setup_duo
-import torch
-import torch.nn.functional as F
-import logging
-import numpy as np
-from sklearn.metrics import accuracy_score
-
-from tqdm import tqdm
-from src.utils.model import get_model, _preprocess_batch
-from src.utils.data import load_imagenetC, load_config
-from src.tta.tent import setup_tent
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-from robustbench.data import load_imagenetc
-
-SEED = 0
-OPTIM = "Adam"
-LR = 0.0001
-BETA = 0.9
-WD = 0.0
-MOMENTUM = 0.9
-DAMPENING = 0.0
-NESTEROV = False
-
-def evaluate_1(corruptions, severities, bs, test_dir):
-    cfg = load_config("./cfgs/dynamic_duo_config.yaml")["SMALL"]["OPTIM"]
-    print(cfg)
-    model_name = "resnet50"
-    model, preprocess = get_model(model_name)
-    print(preprocess)
-    logger.info("test-time adaptation: TENT")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = setup_tent(model, norm_type="BN", cfg=cfg)
-    model.to(device).eval()
-    test_dir = "./data/ImageNet-C"
-    bs = 128
-    acc = 0.
-    for severity in severities:
-        for corruption_type in corruptions:
-            try:
-                model.reset()
-            except:
-                logger.warning("not resetting model")
-            loader = load_imagenetC(
-                test_dir, severity, [corruption_type],
-                device=device, batch_size=bs, num_samples=20000, seed=0
-            )
-            all_probs, all_labels = [], []
-            for imgs, labels in tqdm(loader, desc=f"{corruption_type} s{severity}"):
-                x = _preprocess_batch(imgs, preprocess, device)
-                logits = model(x)
-                all_probs.append(F.softmax(logits.detach().cpu(), dim=1))
-                all_labels.append(labels.cpu())
-                acc += (logits.cpu().max(1)[1] == labels.cpu()).float().sum()
-            acc_1 = acc.item() / len(loader.dataset)
-            print("acc_1: %.2f%%" % (acc_1 * 100))
-            all_probs = torch.cat(all_probs)
-            all_labels = torch.cat(all_labels)
-            logger.info(f"acc_2: {accuracy_score(all_labels, np.argmax(all_probs, axis=1))}")
-            acc = (all_probs.argmax(1) == all_labels).float().mean().item()
-            err = 1. - acc
-            logger.info(f"error % [{corruption_type}{severity}]: {err:.2%}")
+import torch.utils.data
+from torch.utils.data import DataLoader
+from torchvision import datasets
+from src.utils.data import _pil_collate_fn
+import argparse
+from src.tta.dynamic_duo import setup_duo, evaluate_dynamic_duo
+from src.utils.model import get_model
+from src.utils.data import load_config
+from src.calibrators.joint_fixed_TS import JointFixedTS
+from src.calibrators.joint_coca import JointCoca
+from src.calibrators.joint_sample_nll_oracle import JointSampleNLLOracle
+from src.calibrators.joint_relative_entropy import JointRelativeEntropy
+from src.calibrators.joint_lambda_entropy import JointLambdaEntropy
+from src.calibrators.joint_soft_anchor import JointSoftAnchor
+from src.calibrators.joint_proxy_anchor_coca import JointProxyAnchorCoca
+from src.proxies.proxies import build_proxy_configs
 
 
-def evaluate_2(corruptions, severities, bs, test_dir):
-    cfg = load_config("./cfgs/dynamic_duo_config.yaml")["SMALL"]["OPTIM"]
-    # configure model
-    model_name = "resnet50"
-    base_model, _ = get_model(model_name)
-    logger.info("test-time adaptation: TENT")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = setup_tent(base_model, norm_type="BN", cfg=cfg).cuda()
-    # evaluate on each severity and type of corruption in turn
-    for severity in severities:
-        for corruption_type in corruptions:
-            try:
-                model.reset()
-                logger.info("resetting model")
-            except:
-                logger.warning("not resetting model")
-            x_test, y_test = load_imagenetc(n_examples = 5000,
-                                           severity=severity, data_dir=test_dir, shuffle=False, corruptions=[corruption_type])
-            x_test, y_test = x_test.cuda(), y_test.cuda()
-            acc = 0.
-            n_batches = math.ceil(x_test.shape[0] / bs)
-            with torch.no_grad():
-                for counter in range(n_batches):
-                    x_curr = x_test[counter * bs:(counter + 1) * bs].to(device)
-                    y_curr = y_test[counter * bs:(counter + 1) * bs].to(device)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="test")
+    parser.add_argument("--config", type=str, required=True, help="Path to the configuration file")
+    parser.add_argument("--mode", type=str, default="both_duo", help="Dynamic Duo mode to run")
+    parser.add_argument("--steps", type=int, default=1, help="Number of adaptation steps per batch")
+    parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to use from each corruption/severity subset (default: all)")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility (when using fraction < 1.0)")  
+    parser.add_argument("--norm_logits", action="store_true", help="Whether to apply logit normalization (p-norm) before feeding into the calibrator.")
+    parser.add_argument("--proxy_kind", type=str, default="prototype",
+                        choices=["nuclear_norm", "atc", "prototype"],
+                        help="Proxy for JointSoftAnchor (default: prototype).")
+    parser.add_argument("--proxy_cache", type=str, default=None,
+                        help="Path to a .pt file for caching source-pass proxy configs "
+                             "(ATC thresholds + prototypes). Created on first run, "
+                             "loaded on subsequent runs. Ignored for nuclear_norm.")
+    parser.add_argument("--wandb", action="store_true",
+                        help="Log results to Weights & Biases (default: off).")
+    parser.add_argument("--csv_path", type=str, default=None,
+                        help="Path to a CSV file for per-batch diagnostics "
+                             "(proxy_anchor_coca only). Created/appended on each run.")
 
-                    output = model(x_curr)
-                    acc += (output.max(1)[1] == y_curr).float().sum()
-            acc = acc.item() / x_test.shape[0]
-            err = 1. - acc
-            logger.info(f"acc: {acc:.2%}")
-            logger.info(f"error % [{corruption_type}{severity}]: {err:.2%}")
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    # Load models and preprocessors
+    large_model, large_preprocess = get_model(config["LARGE"]["NAME"])
+    small_model, small_preprocess = get_model(config["SMALL"]["NAME"])
+    large_model = large_model.to(device)
+    small_model = small_model.to(device)
 
 
-if __name__ == '__main__':
+    print(f"Building proxy configs from source data (In-Distribution)...")
+    src_ds = datasets.ImageFolder(config["VAL_DIR"])
+    src_loader = DataLoader(
+        src_ds, batch_size=config["BS"], shuffle=False,
+        num_workers=config["WORKERS"], pin_memory=(device.type == "cuda"),
+        collate_fn=_pil_collate_fn,
+    )
     
-    corruptions = ['snow']
-    severities = [5]
-    test_dir = "./data"#/ImageNet-C"
-    bs = 128
-    model_name = "resnet50"
-    model, preprocess = get_model(model_name)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cfg_l, cfg_s = build_proxy_configs(
+        large_model, large_preprocess, config["LARGE"]["NAME"],
+        small_model, small_preprocess, config["SMALL"]["NAME"],
+        src_loader, device,
+        cache_path=args.proxy_cache,
+    )
 
-    xb, _ = load_imagenetc(n_examples=128, severity=3,
-                       data_dir=test_dir, corruptions=["gaussian_noise"])
-    print("rb   ", xb.shape, xb.min().item(), xb.max().item(),
-        xb.mean().item(), xb.std().item())
-
-    # your side
-    loader = load_imagenetC("./data/ImageNet-C", 3, ["gaussian_noise"],
-                            device=device, batch_size=128,
-                            num_samples=128, seed=SEED)
-    imgs, _ = next(iter(loader))
-    xs = _preprocess_batch(imgs, preprocess, device)
-    print("ours ", xs.shape, xs.min().item(), xs.max().item(),
-        xs.mean().item(), xs.std().item())
-
-    # evaluate_2(corruptions, severities, bs, test_dir)
-    evaluate_1(corruptions, severities, bs, test_dir)
-
-# def evaluate_3(corruptions, severities, bs, test_dir):
-#     from src.calibrators.fixed_TS import JointFixedTS
-
-#     cfg = load_config("./cfgs/dynamic_duo_config.yaml")
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-#     large_model, large_preprocess = get_model(cfg["LARGE"]["NAME"])
-#     small_model, small_preprocess = get_model(cfg["SMALL"]["NAME"])
-#     large_model, small_model = large_model.to(device), small_model.to(device)
-
-#     calibrator = JointFixedTS(cfg["CALIBRATOR"]["TL"], cfg["CALIBRATOR"]["TS"])
-
-#     duo = setup_duo(large_model, large_preprocess, small_model, small_preprocess, calibrator, "both_indep", cfg=cfg, steps=1)
-
-#     for severity in severities:
-#         for corruption_type in corruptions:
-#             duo.reset()
-#             logger.info("resetting model")
-#             loader = load_imagenetC(
-#                 test_dir, severity, [corruption_type],
-#                 device=device, batch_size=bs, num_samples=5000, shuffle=False, seed=None
-#             )
-#             all_probs, all_labels = [], []
-#             for imgs, labels in tqdm(loader, desc=f"{corruption_type} s{severity}"):
-#                 logits = duo(imgs, labels=labels)
-#                 all_probs.append(F.softmax(logits.detach().cpu(), dim=1))
-#                 all_labels.append(labels.cpu())
-#             acc = (torch.cat(all_probs).argmax(1) == torch.cat(all_labels)).float().mean().item()
-#             err = 1. - acc
-#             logger.info(f"error % [{corruption_type}{severity}]: {err:.2%}")
+    calibrator = JointProxyAnchorCoca(
+        proxy_kind=args.proxy_kind,
+        cfg_l=cfg_l,
+        cfg_s=cfg_s,
+        csv_path=args.csv_path,
+    )

@@ -25,9 +25,12 @@ export PYTHONPATH=$PYTHONPATH:/project/aip-evanesce/alxstaub/dynamic-duo
 python scripts/run_dynamic_duo.py \
     --config cfgs/dynamic_duo_config.yaml \
     --mode no_adapt \
-    --proxy_kind nuclear_norm \
+    --proxy_kind prototype \
     --steps 1 \
     --seed 0 \
-    --num_samples 1000 \
-    --calibration_mode soft_anchor
+    --num_samples 50000 \
+    --calibration_mode proxy_anchor_coca \
+    --csv_path results/proxy_anchor_coca_proto.csv \
+    --proxy_cache cache/vit_res_50k.pt
+    --wandb
 ```

@@ -7,6 +7,7 @@ from src.calibrators.joint_sample_nll_oracle import JointSampleNLLOracle
 from src.calibrators.joint_relative_entropy import JointRelativeEntropy
 from src.calibrators.joint_lambda_entropy import JointLambdaEntropy
 from src.calibrators.joint_soft_anchor import JointSoftAnchor
+from src.calibrators.joint_proxy_anchor_coca import JointProxyAnchorCoca
 from src.proxies.proxies import build_proxy_configs
 
 import argparse
@@ -55,6 +56,9 @@ if __name__ == "__main__":
                              "loaded on subsequent runs. Ignored for nuclear_norm.")
     parser.add_argument("--wandb", action="store_true",
                         help="Log results to Weights & Biases (default: off).")
+    parser.add_argument("--csv_path", type=str, default=None,
+                        help="Path to a CSV file for per-batch diagnostics "
+                             "(proxy_anchor_coca only). Created/appended on each run.")
 
     args = parser.parse_args()
 
@@ -67,6 +71,9 @@ if __name__ == "__main__":
     small_model, small_preprocess = get_model(config["SMALL"]["NAME"])
     large_model = large_model.to(device)
     small_model = small_model.to(device)
+
+    import time 
+    csv_path = str(args.csv_path) + f"_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
 
     if args.calibration_mode == "soft_anchor":
         if args.proxy_kind in {"atc", "prototype"}:
@@ -98,6 +105,35 @@ if __name__ == "__main__":
             cfg_l=cfg_l,
             cfg_s=cfg_s,
             tau_gate=args.tau_gate,
+        )
+    elif args.calibration_mode == "proxy_anchor_coca":
+        if args.proxy_kind in {"atc", "prototype"}:
+            import torch.utils.data
+            from torch.utils.data import DataLoader
+            from torchvision import datasets
+            from src.utils.data import _pil_collate_fn
+            print(f"Building proxy configs (proxy={args.proxy_kind}) from source data...")
+            src_ds = datasets.ImageFolder(config["VAL_DIR"])
+            src_loader = DataLoader(
+                src_ds, batch_size=config["BS"], shuffle=False,
+                num_workers=config["WORKERS"], pin_memory=(device.type == "cuda"),
+                collate_fn=_pil_collate_fn,
+            )
+            cfg_l, cfg_s = build_proxy_configs(
+                large_model, large_preprocess, config["LARGE"]["NAME"],
+                small_model, small_preprocess, config["SMALL"]["NAME"],
+                src_loader, device,
+                cache_path=args.proxy_cache,
+            )
+        else:
+            from src.proxies.proxies import ModelProxyConfig
+            cfg_l = ModelProxyConfig(name=config["LARGE"]["NAME"], num_classes=1000)
+            cfg_s = ModelProxyConfig(name=config["SMALL"]["NAME"], num_classes=1000)
+        calibrator = JointProxyAnchorCoca(
+            proxy_kind=args.proxy_kind,
+            cfg_l=cfg_l,
+            cfg_s=cfg_s,
+            csv_path=args.csv_path,
         )
     elif args.calibration_mode == "fixed_ts":
         if args.fixed_ts_config is None:
