@@ -143,10 +143,21 @@ def main():
         for corr in order:
             _row(corr, per_corr[corr])
 
-        # aggregate over all rows
-        agg = _compute(rows)
+        metric_keys = [k for k in next(iter(per_corr.values())) if k not in ("n", "n_nontie")]
+
+        # macro-average across corruptions (avoids Simpson's paradox from pooling)
+        macro = {"n": sum(m["n"] for m in per_corr.values()),
+                 "n_nontie": sum(m["n_nontie"] for m in per_corr.values())}
+        for k in metric_keys:
+            vals = [m[k] for m in per_corr.values() if m[k] == m[k]]  # skip nan
+            macro[k] = float(np.mean(vals)) if vals else float("nan")
+
+        # pooled across all rows (inflated by between-corruption variation)
+        pooled = _compute(rows)
+
         print("-" * 140)
-        _row("AGGREGATE", agg)
+        _row("MACRO-AVG", macro)
+        _row("POOLED", pooled)
         print()
 
 

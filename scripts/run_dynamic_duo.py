@@ -1,7 +1,6 @@
 from src.tta.dynamic_duo import setup_duo, evaluate_dynamic_duo
 from src.utils.model import get_model
 from src.utils.data import load_config
-from src.calibrators.base import BaseJointCalibrator
 from src.calibrators.joint_fixed_TS import JointFixedTS, PreScaledCalibrator
 from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_sample_nll_oracle import JointSampleNLLOracle

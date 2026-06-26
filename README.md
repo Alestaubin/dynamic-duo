@@ -61,8 +61,7 @@ python scripts/run_dynamic_duo.py \
     --config cfgs/dynamic_duo_config.yaml \
     --mode no_adapt \
     --calibration_mode proxy_anchor_coca \
-    --proxy_kind prototype \
-    --proxy_cache resnet50_vitb16 \
-    --proto_metric cosine --seed 0 --num_samples 10000 --csv_path out/temp1
+    --proxy_kind nuclear_norm \
+    --seed 0 --num_samples 5000 --csv_path out/temp1 --fixed_ts_config checkpoints/default
 
 ```

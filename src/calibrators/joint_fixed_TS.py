@@ -162,17 +162,17 @@ class PreScaledCalibrator(BaseJointCalibrator):
         self.fixed_ts = fixed_ts
         self.inner = inner
 
-    def _scale(self, z_l, z_s):
-        return z_l / self.fixed_ts.Tl, z_s / self.fixed_ts.Ts
+    def _scale(self, logits_l, logits_s):
+        return logits_l / self.fixed_ts.Tl, logits_s / self.fixed_ts.Ts
 
-    def calibrate(self, z_l, z_s):
-        return self.inner.calibrate(*self._scale(z_l, z_s))
+    def calibrate(self, logits_l, logits_s):
+        return self.inner.calibrate(*self._scale(logits_l, logits_s))
 
-    def calibrate_with_grad(self, z_l, z_s):
-        return self.inner.calibrate_with_grad(*self._scale(z_l, z_s))
+    def calibrate_with_grad(self, logits_l, logits_s):
+        return self.inner.calibrate_with_grad(*self._scale(logits_l, logits_s))
 
-    def forward(self, z_l, z_s):
-        return self.calibrate_with_grad(z_l, z_s)
+    def forward(self, logits_l, logits_s):
+        return self.calibrate_with_grad(logits_l, logits_s)
 
     def tune(self, *args, **kwargs):
         return self.inner.tune(*args, **kwargs)
