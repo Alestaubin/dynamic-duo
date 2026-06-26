@@ -40,12 +40,13 @@ PROXY_STATS_SUFFIX = ".proxystats.pt"
 def nuclear_norm_score(logits: torch.Tensor) -> float:
     """Confidence + dispersity via the nuclear norm of the softmax matrix.
     https://github.com/cuishuhao/BNM/blob/2d23c61f864af489d84fe5f8b66bc0a5ca51cda9/UODR/train_loader.py#L197
+    https://arxiv.org/pdf/2302.01094
     """
     p = torch.softmax(logits, dim=1)
     n, c = p.shape
     nuc = torch.linalg.matrix_norm(p, ord="nuc")
-    # return float(nuc / (n * min(n, c)) ** 0.5)
-    return float(nuc / n)
+    return float(nuc / (n * min(n, c)) ** 0.5)
+    # return float(nuc / n)
 
 
 @torch.no_grad()

@@ -1,4 +1,5 @@
 import math
+from src.calibrators.joint_proxy_anchor_coca import JointProxyAnchorCoca
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -394,7 +395,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
     run_name = (
-        f"{duo.mode} | {calibration_name}{' normalized' if duo.norm_logits else ' '}{' calibrated_selection' if duo.calibrated_selection else ' '}| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
+        f"{duo.mode} | {calibration_name}{' normalized' if duo.norm_logits else ' '}{'proxy_kind: ' + duo.joint_calibrator.proxy_kind if isinstance(duo.joint_calibrator, JointProxyAnchorCoca) else ''}{' calibrated_selection' if duo.joint_calibrator.calibrated_selection else ' '}| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
     )
     if use_wandb:
         wandb_run = wandb.init(
@@ -469,6 +470,9 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                 logger.info(
                     f"Oracle TS fitted | Tl={cal.Tl.item():.4f}  Ts={cal.Ts.item():.4f}"
                 )
+
+            if hasattr(duo.joint_calibrator, "set_corruption"):
+                duo.joint_calibrator.set_corruption(f"{corruption_type}/s{severity}")
 
             loader = load_imagenetC(cfg["TEST_DIR"], **loader_kwargs)
             probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)

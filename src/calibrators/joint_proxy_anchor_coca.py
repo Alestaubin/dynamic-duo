@@ -19,6 +19,7 @@ accuracies across all batches of that corruption.
 from __future__ import annotations
 
 import csv
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -82,7 +83,7 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
 
     _CSV_FIELDS = [
         "corruption", "batch_in_corruption",
-        "r_l", "r_s", "anchor", "tau",
+        "r_l", "r_s", "pred_l", "pred_s", "anchor", "tau",
         "acc_l", "acc_s", "duo_acc",
         "true_better", "anchor_correct",
     ]
@@ -114,7 +115,12 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         self.t_max = t_max
         self.eps = eps
         self.log_every = log_every
-        self._csv_path: Path | None = Path(csv_path) if csv_path else None
+        if csv_path:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            p = Path(csv_path)
+            self._csv_path: Path | None = p.parent / f"{p.name}_{ts}.csv"
+        else:
+            self._csv_path = None
 
         self._coca = CocaTemperature(num_steps=num_steps, lr=lr, loss=loss)
 
@@ -140,8 +146,8 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         self._n_sel_correct: int = 0
         self._n_sel_total:   int = 0
 
-        # CSV row buffer: flushed with corruption label at report time
-        self._csv_buffer: list[dict] = []
+        # Current corruption label (set by set_corruption before each corruption)
+        self._current_corruption: str = ""
 
         # Running counters for the per-N summary line
         self._n_batches: int = 0
@@ -159,7 +165,10 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         if self._ext_s is not None:
             self._ext_s.remove(); self._ext_s = None
 
-    # ── Label injection ───────────────────────────────────────────────────── #
+    # ── Corruption / label injection ──────────────────────────────────────── #
+
+    def set_corruption(self, label: str) -> None:
+        self._current_corruption = label
 
     def set_labels(self, labels: torch.Tensor) -> None:
         self._labels = labels
@@ -294,14 +303,22 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
                 true_better = "tie"
             anchor_correct = (anchor == true_better)
 
-            self._csv_buffer.append({
-                "batch_in_corruption": n,
-                "r_l": r_l, "r_s": r_s,
-                "anchor": anchor, "tau": tau,
-                "acc_l": acc_l, "acc_s": acc_s, "duo_acc": duo_acc,
-                "true_better": true_better,
-                "anchor_correct": anchor_correct,
-            })
+            if self._csv_path is not None:
+                need_header = not self._csv_path.exists()
+                with self._csv_path.open("a", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=self._CSV_FIELDS)
+                    if need_header:
+                        writer.writeheader()
+                    writer.writerow({
+                        "corruption": self._current_corruption,
+                        "batch_in_corruption": n,
+                        "r_l": r_l, "r_s": r_s,
+                        "pred_l": pred_l, "pred_s": pred_s,
+                        "anchor": anchor, "tau": tau,
+                        "acc_l": acc_l, "acc_s": acc_s, "duo_acc": duo_acc,
+                        "true_better": true_better,
+                        "anchor_correct": anchor_correct,
+                    })
 
             parts += [
                 f"acc_l={acc_l:.3f} acc_s={acc_s:.3f} duo={duo_acc:.3f}",
@@ -324,7 +341,7 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         self._diag_done = True
 
     def report_and_reset_corruption_stats(self, label: str) -> dict:
-        """Compute stats for this corruption, print, write CSV rows, and clear."""
+        """Compute stats for this corruption, print, and clear accumulators."""
         stats_l      = _corr_stats(self._corr_r_l,    self._corr_acc_l)
         stats_s      = _corr_stats(self._corr_r_s,    self._corr_acc_s)
         stats_pred_l = _corr_stats(self._corr_pred_l, self._corr_acc_l)
@@ -357,16 +374,6 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
                 f"ρ={_fmt(stats_pred_s['spearman_rho'])}"
             )
 
-        # Flush buffered rows to CSV with the corruption label filled in
-        if self._csv_path is not None and self._csv_buffer:
-            need_header = not self._csv_path.exists()
-            with self._csv_path.open("a", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=self._CSV_FIELDS)
-                if need_header:
-                    writer.writeheader()
-                for row in self._csv_buffer:
-                    writer.writerow({"corruption": label, **row})
-
         sel_correct = self._n_sel_correct
         sel_total   = self._n_sel_total
 
@@ -376,7 +383,6 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         self._corr_duo_acc.clear()
         self._n_sel_correct = 0
         self._n_sel_total   = 0
-        self._csv_buffer.clear()
 
         return {
             "sel_acc": sel_acc,

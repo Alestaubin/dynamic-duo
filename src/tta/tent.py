@@ -16,6 +16,15 @@ def softmax_entropy(x: torch.Tensor) -> torch.Tensor:
     """Entropy of softmax distribution from logits."""
     return -(x.softmax(1) * x.log_softmax(1)).sum(1)
 
+@torch.jit.script
+def nuclear_norm_score(logits: torch.Tensor) -> float:
+    """Confidence + dispersity via the nuclear norm of the softmax matrix."""
+    p = torch.softmax(logits, dim=1)
+    n, c = p.shape
+    nuc = torch.linalg.matrix_norm(p, ord="nuc")
+    return float(nuc / (n * min(n, c)) ** 0.5)
+
+
 class Tent(nn.Module):
     """Tent adapts a model by entropy minimization during testing.
 
