@@ -45,6 +45,7 @@ class LambdaEntropyTemperature:
         lambda_max: float = 1.0,
         max_iter: int = 50,
         reset_each_batch: bool = True,
+        loss_fn: str = "nuclear_norm",
     ) -> None:
         if not (0.0 < init_lambda < 1.0):
             raise ValueError("init_lambda must be strictly in (0, 1)")
@@ -62,6 +63,14 @@ class LambdaEntropyTemperature:
 
         self.last_lambda: float = init_lambda
         self.last_loss: float = float("nan")
+
+        if loss_fn == "softmax_entropy":
+            self.loss_fn = softmax_entropy
+        elif loss_fn == "nuclear_norm":
+            from src.proxies.proxies import nuclear_norm_score
+            self.loss_fn = nuclear_norm_score
+        else:
+            raise NotImplementedError(f"Unsupported loss_fn {loss_fn}")
 
     def _reset(self) -> None:
         self._rho = self._init_rho
@@ -97,7 +106,7 @@ class LambdaEntropyTemperature:
             optimizer.zero_grad()
             lam = torch.sigmoid(rho)
             z = lam * logits_l + (1.0 - lam) * logits_s
-            loss = softmax_entropy(z).mean()
+            loss = self.loss_fn(z).mean()
             loss.backward()
             history.append((float(lam.detach()), float(loss.detach())))
             return loss

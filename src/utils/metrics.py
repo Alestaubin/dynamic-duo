@@ -1,7 +1,7 @@
 # from https://github.com/tochris/pts-uncertainty/blob/main/metrics.py
 
 import numpy as np
-import calibration as cal
+import calibration as cal #pip install uncertainty-calibration
 from sklearn.metrics import f1_score, accuracy_score, brier_score_loss, log_loss, roc_auc_score
 import torch
 
@@ -75,7 +75,15 @@ def get_metrics_dict(probs, labels) -> dict:
     ece = cal.get_ece(probs, labels, num_bins=15)
 
     aurc, e_aurc, augrc = _compute_rc_metrics(probs, labels)
-    auroc = roc_auc_score(labels, probs, multi_class='ovr', average='macro')
+    present = np.unique(labels)
+    if len(present) < num_classes:
+        # subset of classes present — roc_auc_score requires cols == unique classes
+        probs_auroc = probs[:, present]
+        probs_auroc = probs_auroc / probs_auroc.sum(axis=1, keepdims=True)
+        labels_auroc = np.searchsorted(present, labels)  # remap to 0..len(present)-1
+    else:
+        probs_auroc, labels_auroc = probs, labels
+    auroc = roc_auc_score(labels_auroc, probs_auroc, multi_class='ovr', average='macro')
 
     return {
         'ece': ece,

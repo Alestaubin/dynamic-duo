@@ -1,3 +1,5 @@
+import math
+from src.calibrators.joint_proxy_anchor_coca import JointProxyAnchorCoca
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -31,7 +33,7 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy", "lambda_entropy"}
+_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy", "lambda_entropy", "soft_anchor", "proxy_anchor_coca"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -136,10 +138,23 @@ class DynamicDuo(nn.Module):
         elif calibration_mode == "sample_oracle_ts":
             # Per-sample oracle: one (T_l, T_s) per sample, injected via set_labels().
             logger.info("Calibrator ORACLE (sample_oracle_ts) | fits per-sample T_l, T_s using test labels")
+        elif calibration_mode == "soft_anchor":
+            proxy_kind = getattr(joint_calibrator, "proxy_kind", "unknown")
+            logger.info(
+                "Calibrator SOFT-ANCHOR (soft_anchor) | proxy=%s | "
+                "self-adapting T_l, T_s per batch via KL to proxy-weighted anchor",
+                proxy_kind,
+            )
+        elif calibration_mode == "proxy_anchor_coca":
+            proxy_kind = getattr(joint_calibrator, "proxy_kind", "unknown")
+            logger.info(
+                "Calibrator PROXY-ANCHOR-COCA (proxy_anchor_coca) | proxy=%s | "
+                "COCA TS with per-batch proxy-driven anchor selection",
+                proxy_kind,
+            )
 
     def forward(self, x, labels=None):
-        if self.calibration_mode in {""
-        "", "sample_oracle_ts"} and labels is not None:
+        if self.calibration_mode in {"batch_oracle_ts", "sample_oracle_ts", "soft_anchor", "proxy_anchor_coca"} and labels is not None:
             self.joint_calibrator.set_labels(labels)
         for _ in range(self.steps):
             outputs, z_large, z_small = forward_and_adapt(
@@ -303,6 +318,12 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         configure_model_frozen(small, cfg["SMALL"]["NORM"])
 
 
+    # Register prototype feature hooks for proxy-based calibrators.
+    if (calibration_mode in {"soft_anchor", "proxy_anchor_coca"}
+            and getattr(joint_calibrator, "proxy_kind", None) == "prototype"):
+        joint_calibrator.register_hooks(large, small)
+        logger.info("setup_duo: registered prototype feature hooks on large and small models")
+
     dynamic_duo = DynamicDuo(
         large=large,
         large_preprocess=large_preprocess,
@@ -313,7 +334,7 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
         joint_calibrator=joint_calibrator,
         calibration_mode=calibration_mode,
         mode=mode,
-        steps=steps, 
+        steps=steps,
         norm_logits=norm_logits,
     )
     return dynamic_duo
@@ -370,38 +391,41 @@ def collect_logits(large, large_preprocess, small, small_preprocess, data_loader
     return torch.cat(all_z_l), torch.cat(all_z_s), torch.cat(all_labels)
 
 
-def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None):
+def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None, use_wandb=False):
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
     run_name = (
-        f"{duo.mode} | {calibration_name}{' normalized' if duo.norm_logits else ' '}| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
+        f"{duo.mode} | {calibration_name}{' normalized' if duo.norm_logits else ' '}{'proxy_kind: ' + duo.joint_calibrator.proxy_kind if isinstance(duo.joint_calibrator, JointProxyAnchorCoca) else ''}{' calibrated_selection' if duo.joint_calibrator.calibrated_selection else ' '}| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
     )
-    wandb_run = wandb.init(
-        project=wandb_project,
-        name=run_name,
-        config={
-            "mode": duo.mode,
-            "calibration_mode": duo.calibration_mode,
-            "adapt_large": adapt_large,
-            "adapt_small": adapt_small,
-            "signal": signal,
-            "steps": duo.steps,
-            "large/name": cfg["LARGE"]["NAME"],
-            "large/norm": cfg["LARGE"]["NORM"],
-            "large/lr": cfg["LARGE"]["OPTIM"]["LR"],
-            "large/optim": cfg["LARGE"]["OPTIM"]["METHOD"],
-            "small/name": cfg["SMALL"]["NAME"],
-            "small/norm": cfg["SMALL"]["NORM"],
-            "small/lr": cfg["SMALL"]["OPTIM"]["LR"],
-            "small/optim": cfg["SMALL"]["OPTIM"]["METHOD"],
-            **({
-                "calibrator/Tl": duo.joint_calibrator.Tl.item(),
-                "calibrator/Ts": duo.joint_calibrator.Ts.item(),
-            } if duo.calibration_mode == "fixed_ts" else {}),
-            "eval/corruptions": cfg["EVAL"]["CORRUPTIONS"],
-            "eval/severities": cfg["EVAL"]["SEVERITIES"],
-        },
-    )
+    if use_wandb:
+        wandb_run = wandb.init(
+            project=wandb_project,
+            name=run_name,
+            config={
+                "mode": duo.mode,
+                "calibration_mode": duo.calibration_mode,
+                "adapt_large": adapt_large,
+                "adapt_small": adapt_small,
+                "signal": signal,
+                "steps": duo.steps,
+                "large/name": cfg["LARGE"]["NAME"],
+                "large/norm": cfg["LARGE"]["NORM"],
+                "large/lr": cfg["LARGE"]["OPTIM"]["LR"],
+                "large/optim": cfg["LARGE"]["OPTIM"]["METHOD"],
+                "small/name": cfg["SMALL"]["NAME"],
+                "small/norm": cfg["SMALL"]["NORM"],
+                "small/lr": cfg["SMALL"]["OPTIM"]["LR"],
+                "small/optim": cfg["SMALL"]["OPTIM"]["METHOD"],
+                **({
+                    "calibrator/Tl": duo.joint_calibrator.Tl.item(),
+                    "calibrator/Ts": duo.joint_calibrator.Ts.item(),
+                } if duo.calibration_mode == "fixed_ts" else {}),
+                "eval/corruptions": cfg["EVAL"]["CORRUPTIONS"],
+                "eval/severities": cfg["EVAL"]["SEVERITIES"],
+            },
+        )
+    else:
+        wandb_run = None
 
     results_rows = []
     for severity in cfg["EVAL"]["SEVERITIES"]:
@@ -447,19 +471,53 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                     f"Oracle TS fitted | Tl={cal.Tl.item():.4f}  Ts={cal.Ts.item():.4f}"
                 )
 
+            if hasattr(duo.joint_calibrator, "set_corruption"):
+                duo.joint_calibrator.set_corruption(f"{corruption_type}/s{severity}")
+
             loader = load_imagenetC(cfg["TEST_DIR"], **loader_kwargs)
             probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
             metrics_by_model = {name: get_metrics_dict(p, labels) for name, p in probs_dict.items()}
             intersection_metrics = get_intersection_metrics(probs_dict, labels)
 
-            wandb_log = {}
-            for model_name, metrics in metrics_by_model.items():
-                wandb_log.update({f"{prefix}{model_name}/{k}": v for k, v in metrics.items()})
-            wandb_log.update({f"{prefix}intersection/{k}": v for k, v in intersection_metrics.items()})
-            if duo.calibration_mode == "oracle_ts":
-                wandb_log[f"{prefix}oracle/Tl"] = cal.Tl.item()
-                wandb_log[f"{prefix}oracle/Ts"] = cal.Ts.item()
-            wandb_run.log(wandb_log)
+            r2_stats = {}
+            if hasattr(duo.joint_calibrator, "report_and_reset_corruption_r2"):
+                r2_stats = duo.joint_calibrator.report_and_reset_corruption_r2(
+                    f"{corruption_type}/s{severity}"
+                )
+
+            corr_stats = {}
+            if hasattr(duo.joint_calibrator, "report_and_reset_corruption_stats"):
+                corr_stats = duo.joint_calibrator.report_and_reset_corruption_stats(
+                    f"{corruption_type}/s{severity}"
+                )
+
+            duo_acc = metrics_by_model["duo"]["accuracy"]
+            large_acc = metrics_by_model["large"]["accuracy"]
+            small_acc = metrics_by_model["small"]["accuracy"]
+            print(f"{corruption_type}/s{severity}: "
+                  f"duo={duo_acc:.4f}  large={large_acc:.4f}  small={small_acc:.4f}")
+
+            if wandb_run is not None:
+                wandb_log = {}
+                for model_name, metrics in metrics_by_model.items():
+                    wandb_log.update({f"{prefix}{model_name}/{k}": v for k, v in metrics.items()})
+                wandb_log.update({f"{prefix}intersection/{k}": v for k, v in intersection_metrics.items()})
+                if duo.calibration_mode == "oracle_ts":
+                    wandb_log[f"{prefix}oracle/Tl"] = cal.Tl.item()
+                    wandb_log[f"{prefix}oracle/Ts"] = cal.Ts.item()
+                if r2_stats and not math.isnan(r2_stats["r2_l"]):
+                    wandb_log[f"{prefix}proxy/r2_large"] = r2_stats["r2_l"]
+                    wandb_log[f"{prefix}proxy/r2_small"] = r2_stats["r2_s"]
+                if corr_stats and corr_stats["n"] > 0:
+                    for key in ("sel_acc",
+                                "l_r2", "l_pearson_r", "l_spearman_rho",
+                                "l_pred_r2", "l_pred_pearson_r", "l_pred_spearman_rho",
+                                "s_r2", "s_pearson_r", "s_spearman_rho",
+                                "s_pred_r2", "s_pred_pearson_r", "s_pred_spearman_rho"):
+                        v = corr_stats[key]
+                        if not math.isnan(v):
+                            wandb_log[f"{prefix}proxy/{key}"] = v
+                wandb_run.log(wandb_log)
 
             logger.info(f"Results for {corruption_type} severity {severity}: {metrics_by_model['duo']}")
             row = {"mode": duo.mode, "corruption": corruption_type, "severity": severity}
@@ -476,11 +534,16 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
         avg_row["severity"] = 0
         for c in numeric_cols:
             avg_row[c] = sum(r[c] for r in results_rows) / len(results_rows)
-        table = wandb.Table(columns=cols)
-        for row in results_rows:
-            table.add_data(*[row[c] for c in cols])
-        table.add_data(*[avg_row[c] for c in cols])
-        wandb_run.log({"summary/results": table})
+        print(f"\naverage: duo={avg_row['duo/accuracy']:.4f}  "
+              f"large={avg_row['large/accuracy']:.4f}  "
+              f"small={avg_row['small/accuracy']:.4f}")
+        if wandb_run is not None:
+            table = wandb.Table(columns=cols)
+            for row in results_rows:
+                table.add_data(*[row[c] for c in cols])
+            table.add_data(*[avg_row[c] for c in cols])
+            wandb_run.log({"summary/results": table})
 
-    wandb_run.finish()
+    if wandb_run is not None:
+        wandb_run.finish()
 
