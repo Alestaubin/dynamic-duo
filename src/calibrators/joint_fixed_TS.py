@@ -153,3 +153,35 @@ class JointFixedTS(BaseJointCalibrator):
 
         return calibrator
 
+
+class PreScaledCalibrator(BaseJointCalibrator):
+    """Applies a frozen JointFixedTS pre-scaling before delegating to inner."""
+
+    def __init__(self, fixed_ts: JointFixedTS, inner: BaseJointCalibrator):
+        super().__init__()
+        self.fixed_ts = fixed_ts
+        self.inner = inner
+
+    def _scale(self, z_l, z_s):
+        return z_l / self.fixed_ts.Tl, z_s / self.fixed_ts.Ts
+
+    def calibrate(self, z_l, z_s):
+        return self.inner.calibrate(*self._scale(z_l, z_s))
+
+    def calibrate_with_grad(self, z_l, z_s):
+        return self.inner.calibrate_with_grad(*self._scale(z_l, z_s))
+
+    def forward(self, z_l, z_s):
+        return self.calibrate_with_grad(z_l, z_s)
+
+    def tune(self, *args, **kwargs):
+        return self.inner.tune(*args, **kwargs)
+
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            modules = self.__dict__.get("_modules", {})
+            if "inner" in modules:
+                return getattr(modules["inner"], name)
+            raise

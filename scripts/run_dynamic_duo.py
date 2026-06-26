@@ -1,7 +1,8 @@
 from src.tta.dynamic_duo import setup_duo, evaluate_dynamic_duo
 from src.utils.model import get_model
 from src.utils.data import load_config
-from src.calibrators.joint_fixed_TS import JointFixedTS
+from src.calibrators.base import BaseJointCalibrator
+from src.calibrators.joint_fixed_TS import JointFixedTS, PreScaledCalibrator
 from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_sample_nll_oracle import JointSampleNLLOracle
 from src.calibrators.joint_relative_entropy import JointRelativeEntropy
@@ -92,6 +93,11 @@ if __name__ == "__main__":
             )
         except ValueError as e:
             parser.error(str(e))
+        if args.calibration_mode == "proxy_anchor_coca" and args.fixed_ts_config is not None:
+            fixed_ts = JointFixedTS.load(args.fixed_ts_config)
+            fixed_ts.requires_grad_(False)
+            calibrator = PreScaledCalibrator(fixed_ts, calibrator)
+            print(f"Pre-scaling with JointFixedTS: Tl={fixed_ts.Tl.item():.4f}  Ts={fixed_ts.Ts.item():.4f}")
     elif args.calibration_mode == "fixed_ts":
         if args.fixed_ts_config is None:
             parser.error("--fixed_ts_config is required when --calibration_mode is fixed_ts")
