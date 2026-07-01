@@ -4,7 +4,9 @@ joint_proxy_anchor_coca.py
 COCA TS calibrator with per-batch proxy-driven anchor selection.
 
 Each batch:
-  1. Compute proxy scores r_l, r_s (nuclear_norm / atc / prototype).
+  1. Compute proxy scores r_l, r_s (nuclear_norm / nuclear_norm_cum / atc /
+     prototype). nuclear_norm_cum pools the nuclear norm over all batches seen
+     so far in the corruption, which is far less noisy than a single batch.
   2. Select anchor = the model with the higher selection score: the raw proxy,
      or the calibrated predicted accuracy when calibrated_selection=True.
   3. Fit COCA temperature tau aligning the source to the anchor.
@@ -33,11 +35,12 @@ from src.calibrators.temp.coca_temperature import CocaTemperature
 from src.proxies.proxies import (
     ProxyStats,
     FeatureExtractor,
+    RunningNuclearNorm,
     nuclear_norm_score,
     atc_score,
 )
 
-_PROXY_KINDS = {"nuclear_norm", "atc", "prototype"}
+_PROXY_KINDS = {"nuclear_norm", "nuclear_norm_cum", "atc", "prototype"}
 
 
 def _corr_stats(xs: list[float], ys: list[float]) -> dict:
@@ -128,6 +131,11 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         self._ext_l: FeatureExtractor | None = None
         self._ext_s: FeatureExtractor | None = None
 
+        # Cumulative nuclear norm accumulators (proxy_kind="nuclear_norm_cum");
+        # reset per corruption in report_and_reset_corruption_stats.
+        self._run_nuc_l = RunningNuclearNorm()
+        self._run_nuc_s = RunningNuclearNorm()
+
         # Per-batch state
         self._labels: torch.Tensor | None = None
         self._diag_done: bool = False
@@ -202,6 +210,13 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
     def _proxy_scores(self, z_l: torch.Tensor, z_s: torch.Tensor) -> tuple[float, float]:
         if self.proxy_kind == "nuclear_norm":
             return float(nuclear_norm_score(z_l)), float(nuclear_norm_score(z_s))
+        elif self.proxy_kind == "nuclear_norm_cum":
+            # Fold each batch into the running Gram exactly once: _diag_done is
+            # False only on a batch's first _forward (set True by _log_batch).
+            if not self._diag_done:
+                self._run_nuc_l.update(z_l)
+                self._run_nuc_s.update(z_s)
+            return self._run_nuc_l.score(z_l), self._run_nuc_s.score(z_s)
         elif self.proxy_kind == "atc":
             assert self.cfg_l.atc_threshold is not None, \
                 "atc proxy requires cfg_l.atc_threshold (build with build_proxy_stats)"
@@ -381,6 +396,7 @@ class JointProxyAnchorCoca(BaseJointCalibrator):
         self._corr_r_s.clear();    self._corr_acc_s.clear()
         self._corr_pred_l.clear(); self._corr_pred_s.clear()
         self._corr_duo_acc.clear()
+        self._run_nuc_l.reset();   self._run_nuc_s.reset()
         self._n_sel_correct = 0
         self._n_sel_total   = 0
 

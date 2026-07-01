@@ -62,6 +62,6 @@ python scripts/run_dynamic_duo.py \
     --mode no_adapt \
     --calibration_mode proxy_anchor_coca \
     --proxy_kind nuclear_norm \
-    --seed 0 --num_samples 5000 --csv_path out/temp1 --fixed_ts_config checkpoints/default
+    --seed 0 --num_samples 50000 --csv_path out/temp --fixed_ts_config checkpoints/default
 
 ```

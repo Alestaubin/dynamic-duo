@@ -46,7 +46,7 @@ if __name__ == "__main__":
     parser.add_argument("--coca_bs", type=int, default=None)
     parser.add_argument("--fixed_ts_config", type=str, default=None)
     parser.add_argument("--proxy_kind", type=str, default="prototype",
-                        choices=["nuclear_norm", "atc", "prototype"])
+                        choices=["nuclear_norm", "nuclear_norm_cum", "atc", "prototype"])
     parser.add_argument("--proto_metric", type=str, default="cosine",
                         choices=["cosine", "mahalanobis"],
                         help="Distance for the prototype proxy: cosine similarity to "
