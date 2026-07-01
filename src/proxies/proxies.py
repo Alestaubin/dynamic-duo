@@ -49,6 +49,45 @@ def nuclear_norm_score(logits: torch.Tensor) -> float:
     # return float(nuc / n)
 
 
+class RunningNuclearNorm:
+    """Cumulative nuclear norm of the softmax prediction matrix over every batch
+    seen so far — a less noisy reliability proxy than the single-batch score.
+
+    The full nuclear norm needs only the running k×k Gram matrix G = Σ_b P_bᵀ P_b,
+    not the stored (n_total × k) prediction matrix, because
+        ‖P‖_* = Σ_i σ_i(P) = Σ_i √λ_i(PᵀP) = Σ_i √λ_i(G).
+    score() applies the same bounded normalisation as nuclear_norm_score, now
+    over all pooled data, so single-batch noise averages out.
+
+    Stateful: update() once per batch, reset() at each stream boundary
+    (e.g. per corruption).
+    """
+
+    def __init__(self) -> None:
+        self._gram: torch.Tensor | None = None
+        self._n: int = 0
+
+    @torch.no_grad()
+    def update(self, logits: torch.Tensor) -> None:
+        p = torch.softmax(logits, dim=1)
+        self._gram = p.t() @ p if self._gram is None else self._gram + p.t() @ p
+        self._n += p.shape[0]
+
+    @torch.no_grad()
+    def score(self, logits: torch.Tensor | None = None) -> float:
+        """Cumulative bounded nuclear norm over all updated batches. Before the
+        first update, falls back to the single-batch score of `logits`."""
+        if self._gram is None:
+            return nuclear_norm_score(logits) if logits is not None else float("nan")
+        c = self._gram.shape[0]
+        nuc = torch.linalg.eigvalsh(self._gram).clamp_min(0).sqrt().sum()
+        return float(nuc / (self._n * min(self._n, c)) ** 0.5)
+
+    def reset(self) -> None:
+        self._gram = None
+        self._n = 0
+
+
 @torch.no_grad()
 def _atc_sample_scores(logits: torch.Tensor, kind: str = "neg_entropy") -> torch.Tensor:
     p = torch.softmax(logits, dim=1)

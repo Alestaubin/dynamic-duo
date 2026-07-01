@@ -70,7 +70,6 @@ def _fit_and_save_calibration_maps(
     seed: int | None = None,
 ):
     """Collect records over CALIBRATOR corruptions in one combined loader, fit, save."""
-    import torch as _torch
     from tqdm import tqdm
     from src.utils.data import load_imagenetC
     from src.proxies.proxies import FeatureExtractor
@@ -97,8 +96,8 @@ def _fit_and_save_calibration_maps(
     records = []
     try:
         for imgs, labels in tqdm(loader, desc="collecting calibration records"):
-            xl = _torch.stack([large_preprocess(img) for img in imgs]).to(device)
-            xs = _torch.stack([small_preprocess(img) for img in imgs]).to(device)
+            xl = torch.stack([large_preprocess(img) for img in imgs]).to(device)
+            xs = torch.stack([small_preprocess(img) for img in imgs]).to(device)
             zl, fl = ext_l(xl)
             zs, fs = ext_s(xs)
             records.append(make_record(
