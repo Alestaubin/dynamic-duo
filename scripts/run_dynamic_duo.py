@@ -31,6 +31,15 @@ python scripts/run_dynamic_duo.py \
     --proxy_cache resnet50_vitb16 \
     --calib_map resnet50_vitb16_dev \
     --calibrated_selection
+
+# proxy-anchor COCA with cumulative nuclear norm proxy:
+python scripts/run_dynamic_duo.py \
+    --config cfgs/dynamic_duo_config.yaml \
+    --mode no_adapt \
+    --calibration_mode proxy_anchor_coca \
+    --proxy_kind nuclear_norm_cum \
+    --seed 0 \
+    --wandb
 """
 
 
@@ -42,9 +51,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--calibration_mode", type=str, default="fixed")
-    parser.add_argument("--norm_logits", action="store_true")
-    parser.add_argument("--coca_bs", type=int, default=None)
-    parser.add_argument("--fixed_ts_config", type=str, default=None)
+    parser.add_argument("--norm_logits", action="store_true", 
+                        help="Whether to L2-normalize the logits before calibration. ")
+    parser.add_argument("--coca_bs", type=int, default=None, 
+                        help="Batch size for COCA calibration, independent of the TENT batch size.")
     parser.add_argument("--proxy_kind", type=str, default="prototype",
                         choices=["nuclear_norm", "nuclear_norm_cum", "atc", "prototype"])
     parser.add_argument("--proto_metric", type=str, default="cosine",
@@ -54,10 +64,16 @@ if __name__ == "__main__":
                              "Mahalanobis to raw class means. Only used when "
                              "--proxy_kind prototype.")
     parser.add_argument("--proxy_cache", type=str, default=None)
-    parser.add_argument("--calib_map", type=str, default=None)
-    parser.add_argument("--calibrated_selection", action="store_true")
+    parser.add_argument("--calib_map", type=str, default=None, help="Path to a CSV file. ")
+    parser.add_argument("--calibrated_selection", action="store_true",
+                        help="Whether to use calibrated selection."
+                        "If set, ")
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--csv_path", type=str, default=None)
+    parser.add_argument("--precalibrate", action="store_true", 
+                        help="Whether to precalibrate the duo with a fixed temperature. ")
+    parser.add_argument("--fixed_ts_config", type=str, default=None,
+                        help="Path to a file containing the fixed temperature configuration.")
 
     args = parser.parse_args()
 
@@ -92,11 +108,6 @@ if __name__ == "__main__":
             )
         except ValueError as e:
             parser.error(str(e))
-        if args.calibration_mode == "proxy_anchor_coca" and args.fixed_ts_config is not None:
-            fixed_ts = JointFixedTS.load(args.fixed_ts_config)
-            fixed_ts.requires_grad_(False)
-            calibrator = PreScaledCalibrator(fixed_ts, calibrator)
-            print(f"Pre-scaling with JointFixedTS: Tl={fixed_ts.Tl.item():.4f}  Ts={fixed_ts.Ts.item():.4f}")
     elif args.calibration_mode == "fixed_ts":
         if args.fixed_ts_config is None:
             parser.error("--fixed_ts_config is required when --calibration_mode is fixed_ts")
@@ -115,6 +126,13 @@ if __name__ == "__main__":
         calibrator = JointLambdaEntropy(init_lambda=0.5)
     else:
         raise ValueError(f"Invalid calibration mode: {args.calibration_mode}")
+    
+    if args.precalibrate:
+        assert args.fixed_ts_config is not None, "--fixed_ts_config is required when --precalibrate is set"
+        fixed_ts = JointFixedTS.load(args.fixed_ts_config)
+        fixed_ts.requires_grad_(False)
+        calibrator = PreScaledCalibrator(fixed_ts, calibrator)
+        print(f"Pre-scaling with JointFixedTS: Tl={fixed_ts.Tl.item():.4f}  Ts={fixed_ts.Ts.item():.4f}")
 
     duo = setup_duo(
         large=large_model,
