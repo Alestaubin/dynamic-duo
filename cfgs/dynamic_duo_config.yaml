@@ -3,6 +3,10 @@ VAL_DIR: ./data/imagenet-val
 BS: 128
 WORKERS: 8
 CALIBRATOR:
+  # Dev-shift corruptions/severities used to fit calibration maps
+  # (--calib_map) and, for --calibration_mode proxy_weighted, to grid-search
+  # --proxy_beta (see src/proxies/calibrator_setup.fit_beta). VAL_DIR above
+  # supplies the val-set reliability prior (proxies.fit_val_reliability).
   CORRUPTIONS:
     - 'gaussian_blur'
     - 'saturate'

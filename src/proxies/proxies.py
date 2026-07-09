@@ -34,6 +34,13 @@ DEFAULT_PROXY_DIR = Path("data/proxy_stats")
 PROXY_STATS_SUFFIX = ".proxystats.pt"
 
 
+def _logit(p: float, eps: float = 1e-6) -> float:
+    """Scalar log-odds, clamped so p=0/1 don't blow up."""
+    import math
+    p = min(max(p, eps), 1.0 - eps)
+    return math.log(p / (1.0 - p))
+
+
 # ─── Raw proxy functions ─────────────────────────────────────────────────────
 
 @torch.no_grad()
@@ -50,8 +57,9 @@ def nuclear_norm_score(logits: torch.Tensor) -> float:
 
 
 class RunningNuclearNorm:
-    """Cumulative nuclear norm of the softmax prediction matrix over every batch
-    seen so far — a less noisy reliability proxy than the single-batch score.
+    """Recency-weighted cumulative nuclear norm of the softmax prediction matrix
+    — a less noisy reliability proxy than the single-batch score, that can also
+    track a model whose reliability is drifting as it adapts.
 
     The full nuclear norm needs only the running k×k Gram matrix G = Σ_b P_bᵀ P_b,
     not the stored (n_total × k) prediction matrix, because
@@ -59,24 +67,40 @@ class RunningNuclearNorm:
     score() applies the same bounded normalisation as nuclear_norm_score, now
     over all pooled data, so single-batch noise averages out.
 
+    `decay` (λ ∈ [0, 1]) exponentially down-weights older batches in both the
+    Gram matrix and the effective sample count:
+        G_t = (1 - λ) · G_{t-1} + P_tᵀ P_t
+        n_t = (1 - λ) · n_{t-1} + b_t
+    λ=0 reproduces the original cumulative (unweighted) average exactly; λ=1
+    keeps only the latest batch (equivalent to nuclear_norm_score of it).
+
     Stateful: update() once per batch, reset() at each stream boundary
     (e.g. per corruption).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, decay: float = 0.0) -> None:
+        assert 0.0 <= decay <= 1.0, f"decay must be in [0, 1], got {decay}"
+        self.decay = decay
         self._gram: torch.Tensor | None = None
-        self._n: int = 0
+        self._n: float = 0.0
 
     @torch.no_grad()
     def update(self, logits: torch.Tensor) -> None:
         p = torch.softmax(logits, dim=1)
-        self._gram = p.t() @ p if self._gram is None else self._gram + p.t() @ p
-        self._n += p.shape[0]
+        batch_gram = p.t() @ p
+        b = p.shape[0]
+        if self._gram is None:
+            self._gram = batch_gram
+            self._n = float(b)
+        else:
+            lam = self.decay
+            self._gram = (1.0 - lam) * self._gram + batch_gram
+            self._n = (1.0 - lam) * self._n + b
 
     @torch.no_grad()
     def score(self, logits: torch.Tensor | None = None) -> float:
-        """Cumulative bounded nuclear norm over all updated batches. Before the
-        first update, falls back to the single-batch score of `logits`."""
+        """Recency-weighted bounded nuclear norm over all updated batches. Before
+        the first update, falls back to the single-batch score of `logits`."""
         if self._gram is None:
             return nuclear_norm_score(logits) if logits is not None else float("nan")
         c = self._gram.shape[0]
@@ -85,7 +109,7 @@ class RunningNuclearNorm:
 
     def reset(self) -> None:
         self._gram = None
-        self._n = 0
+        self._n = 0.0
 
 
 @torch.no_grad()
@@ -237,6 +261,12 @@ class ProxyStats:
     # raw proxy → predicted accuracy. Populated at runtime by
     # calibration.CalibrationMaps.attach(); NOT persisted with these stats.
     calib: dict[str, IsotonicRegression] = field(default_factory=dict)
+    # Validation-set reliability prior + per-proxy scale, used by
+    # JointProxyWeighted (soft weighting). Populated by fit_val_reliability();
+    # NOT persisted with these stats (same treatment as .calib).
+    val_acc: float | None = None
+    proxy_mean: dict[str, float] = field(default_factory=dict)
+    proxy_std: dict[str, float] = field(default_factory=dict)
 
     def _has_prototype_state(self) -> bool:
         if self.proto_metric == "mahalanobis":
@@ -274,6 +304,34 @@ class ProxyStats:
         if proxy_name in self.calib:
             return float(self.calib[proxy_name].predict([raw_value])[0])
         return raw_value
+
+    def reliability_score(
+        self,
+        proxy_name: str,
+        raw_value: float,
+        mode: Literal["zscore", "isotonic"] = "zscore",
+    ) -> float:
+        """Put a raw proxy value on a common, val-based reliability scale so two
+        heterogeneous models' proxies become comparable (JointProxyWeighted).
+
+        "zscore" (default, lightweight): standardise by the val-set proxy
+        mean/std (fit_val_reliability). No fitted curve, so it can't overfit —
+        just recentres/rescales.
+        "isotonic": map through the fitted calib curve (calibration.py) to a
+        predicted accuracy, then take its logit, so it lands in the same
+        unbounded logit space the zscore mode already produces.
+        """
+        if mode == "zscore":
+            mean = self.proxy_mean.get(proxy_name)
+            std = self.proxy_std.get(proxy_name)
+            assert mean is not None and std is not None, (
+                f"no val proxy_mean/proxy_std for proxy '{proxy_name}' on model "
+                f"'{self.name}'; call fit_val_reliability first"
+            )
+            return (raw_value - mean) / max(std, 1e-6)
+        if mode == "isotonic":
+            return _logit(self.predicted_acc(proxy_name, raw_value))
+        raise ValueError(f"mode must be 'zscore' or 'isotonic', got '{mode}'")
 
 
 # ─── Feature extraction via forward hooks ────────────────────────────────────
@@ -332,6 +390,48 @@ def _source_pass(ext_l, preprocess_l, ext_s, preprocess_s, loader, device):
     return (torch.cat(z_l), torch.cat(f_l),
             torch.cat(z_s), torch.cat(f_s),
             torch.cat(labs))
+
+
+@torch.no_grad()
+def fit_val_reliability(
+    cfg: ProxyStats,
+    logits: torch.Tensor,
+    feats: torch.Tensor | None,
+    labels: torch.Tensor,
+    proxy_name: str,
+    batch_size: int = 64,
+) -> None:
+    """Fill cfg.val_acc and cfg.proxy_mean/proxy_std[proxy_name] from a pool of
+    clean validation logits/features/labels (e.g. from _source_pass).
+
+    val_acc becomes the Kalman prior mean's source (via logit(val_acc)) for
+    ProxyFilter. proxy_mean/std are fit by chunking the pool into batch_size
+    groups and scoring each the same way a live test batch would — so they are
+    on the same scale as the online per-batch proxy stream, not the (usually
+    much less noisy) full-pool score. proxy_name="nuclear_norm_cum" reuses the
+    "nuclear_norm" per-batch score: the running accumulator differs only in how
+    batches are pooled over time at test time, not in the per-batch quantity.
+    """
+    cfg.val_acc = float((logits.argmax(1) == labels).float().mean())
+
+    lookup_name = "nuclear_norm" if proxy_name == "nuclear_norm_cum" else proxy_name
+    n = logits.shape[0]
+    scores: list[float] = []
+    for start in range(0, n, batch_size):
+        end = start + batch_size
+        z_b = logits[start:end]
+        f_b = feats[start:end] if feats is not None else None
+        raw = cfg.raw_proxies(z_b, f_b)
+        assert lookup_name in raw, (
+            f"proxy '{proxy_name}' not computable from raw_proxies() for model "
+            f"'{cfg.name}' (missing atc_threshold / prototype state?)"
+        )
+        scores.append(raw[lookup_name])
+
+    scores_t = torch.tensor(scores)
+    cfg.proxy_mean[proxy_name] = float(scores_t.mean())
+    cfg.proxy_std[proxy_name] = float(scores_t.std(unbiased=False).clamp_min(1e-6)) \
+        if len(scores) > 1 else 1.0
 
 
 # ─── Persistence (dedicated stats-only folder) ─────────────────────────────
@@ -538,3 +638,95 @@ if __name__ == "__main__":
     assert torch.allclose(a.class_means, means) and torch.allclose(a.precision, prec)
     assert abs(a.prototype_proxy(feats) - score) < 1e-5
     print("proxies mahalanobis self-test passed")
+
+    # ─── RunningNuclearNorm decay self-test (Task 1.1) ───────────────────────
+    import statistics
+
+    torch.manual_seed(1)
+    batches = [torch.randn(8, 5) for _ in range(6)]
+
+    def _old_cumulative_score(gram: torch.Tensor, n: float) -> float:
+        c = gram.shape[0]
+        nuc = torch.linalg.eigvalsh(gram).clamp_min(0).sqrt().sum()
+        return float(nuc / (n * min(n, c)) ** 0.5)
+
+    # decay=0 reproduces the original unweighted cumulative average exactly.
+    rnn0 = RunningNuclearNorm(decay=0.0)
+    gram_ref, n_ref = None, 0
+    for b in batches:
+        p = torch.softmax(b, dim=1)
+        gram_ref = p.t() @ p if gram_ref is None else gram_ref + p.t() @ p
+        n_ref += p.shape[0]
+        rnn0.update(b)
+        assert abs(rnn0.score() - _old_cumulative_score(gram_ref, n_ref)) < 1e-5
+    print("RunningNuclearNorm decay=0 regression self-test passed")
+
+    # decay=1 keeps only the latest batch (== single-batch score).
+    rnn1 = RunningNuclearNorm(decay=1.0)
+    for b in batches:
+        rnn1.update(b)
+        assert abs(rnn1.score() - nuclear_norm_score(b)) < 1e-5
+    print("RunningNuclearNorm decay=1 self-test passed")
+
+    # 0<decay<1 on a stationary stream: lower score variance than per-batch.
+    torch.manual_seed(2)
+    stream = [torch.randn(16, 10) for _ in range(60)]
+    rnn_ema = RunningNuclearNorm(decay=0.1)
+    per_batch_scores, ema_scores = [], []
+    for b in stream:
+        per_batch_scores.append(nuclear_norm_score(b))
+        rnn_ema.update(b)
+        ema_scores.append(rnn_ema.score())
+    var_per_batch = statistics.pvariance(per_batch_scores[20:])  # skip burn-in
+    var_ema = statistics.pvariance(ema_scores[20:])
+    assert var_ema < var_per_batch, \
+        f"EMA-Gram variance {var_ema} not lower than per-batch {var_per_batch}"
+    print(f"RunningNuclearNorm decay=0.1 variance-reduction self-test passed "
+          f"(per_batch={var_per_batch:.2e}, ema={var_ema:.2e})")
+
+    # Step-change stream: EMA-Gram tracks the shift (not stuck at the old level).
+    torch.manual_seed(3)
+    pre_step  = [torch.randn(16, 10) - 3.0 for _ in range(30)]   # low-confidence regime
+    post_step = [torch.randn(16, 10) + 3.0 for _ in range(30)]   # high-confidence regime
+    rnn_step = RunningNuclearNorm(decay=0.1)
+    for b in pre_step:
+        rnn_step.update(b)
+    score_before = rnn_step.score()
+    for b in post_step:
+        rnn_step.update(b)
+    score_after = rnn_step.score()
+    assert score_after > score_before, \
+        "EMA-Gram did not track a step change in the underlying stream"
+    print("RunningNuclearNorm decay=0.1 step-change self-test passed")
+
+    # ─── Val reliability prior + calibration self-test (Task 2.1) ────────────
+    torch.manual_seed(4)
+    val_logits = torch.randn(256, 10)
+    val_labels = torch.randint(0, 10, (256,))
+    cfg_val = ProxyStats(name="dummy", num_classes=10)
+    fit_val_reliability(cfg_val, val_logits, None, val_labels, "nuclear_norm", batch_size=16)
+    assert cfg_val.val_acc is not None and 0.0 <= cfg_val.val_acc <= 1.0
+    assert "nuclear_norm" in cfg_val.proxy_mean and "nuclear_norm" in cfg_val.proxy_std
+    assert cfg_val.proxy_std["nuclear_norm"] > 0.0
+    print("fit_val_reliability self-test passed")
+
+    # nuclear_norm_cum reuses the nuclear_norm per-batch scoring.
+    cfg_cum = ProxyStats(name="dummy2", num_classes=10)
+    fit_val_reliability(cfg_cum, val_logits, None, val_labels, "nuclear_norm_cum", batch_size=16)
+    assert abs(cfg_cum.proxy_mean["nuclear_norm_cum"] - cfg_val.proxy_mean["nuclear_norm"]) < 1e-6
+    print("fit_val_reliability nuclear_norm_cum aliasing self-test passed")
+
+    # zscore reliability_score: a raw value at the mean scores 0; symmetric std shift scores +/-1.
+    mean = cfg_val.proxy_mean["nuclear_norm"]
+    std = cfg_val.proxy_std["nuclear_norm"]
+    assert abs(cfg_val.reliability_score("nuclear_norm", mean, mode="zscore")) < 1e-6
+    assert abs(cfg_val.reliability_score("nuclear_norm", mean + std, mode="zscore") - 1.0) < 1e-4
+    print("reliability_score zscore self-test passed")
+
+    # isotonic reliability_score: needs a calib map; predicted_acc=0.5 -> logit=0.
+    from sklearn.isotonic import IsotonicRegression as _IR
+    iso = _IR(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+    iso.fit([0.0, 0.5, 1.0], [0.1, 0.5, 0.9])
+    cfg_val.calib["nuclear_norm"] = iso
+    assert abs(cfg_val.reliability_score("nuclear_norm", 0.5, mode="isotonic")) < 1e-4
+    print("reliability_score isotonic self-test passed")

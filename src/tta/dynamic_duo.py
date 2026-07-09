@@ -33,7 +33,7 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy", "lambda_entropy", "soft_anchor", "proxy_anchor_coca"}
+_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy", "lambda_entropy", "soft_anchor", "proxy_anchor_coca", "proxy_weighted"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -152,9 +152,18 @@ class DynamicDuo(nn.Module):
                 "COCA TS with per-batch proxy-driven anchor selection",
                 proxy_kind,
             )
+        elif calibration_mode == "proxy_weighted":
+            proxy_kind = getattr(joint_calibrator, "proxy_kind", "unknown")
+            logger.info(
+                "Calibrator PROXY-WEIGHTED (proxy_weighted) | proxy=%s | "
+                "continuous reliability-weighted combination (beta=%s, pool=%s)",
+                proxy_kind,
+                getattr(joint_calibrator, "beta", "unknown"),
+                getattr(joint_calibrator, "pool", "unknown"),
+            )
 
     def forward(self, x, labels=None):
-        if self.calibration_mode in {"batch_oracle_ts", "sample_oracle_ts", "soft_anchor", "proxy_anchor_coca"} and labels is not None:
+        if self.calibration_mode in {"batch_oracle_ts", "sample_oracle_ts", "soft_anchor", "proxy_anchor_coca", "proxy_weighted"} and labels is not None:
             self.joint_calibrator.set_labels(labels)
         for _ in range(self.steps):
             outputs, z_large, z_small = forward_and_adapt(
@@ -319,7 +328,7 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
 
 
     # Register prototype feature hooks for proxy-based calibrators.
-    if (calibration_mode in {"soft_anchor", "proxy_anchor_coca"}
+    if (calibration_mode in {"soft_anchor", "proxy_anchor_coca", "proxy_weighted"}
             and getattr(joint_calibrator, "proxy_kind", None) == "prototype"):
         joint_calibrator.register_hooks(large, small)
         logger.info("setup_duo: registered prototype feature hooks on large and small models")
@@ -394,8 +403,9 @@ def collect_logits(large, large_preprocess, small, small_preprocess, data_loader
 def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None, use_wandb=False):
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
+    proxy_kind_str = getattr(duo.joint_calibrator, "proxy_kind", None)
     run_name = (
-        f"{duo.mode} | {calibration_name}{' normalized' if duo.norm_logits else ' '}{'proxy_kind: ' + duo.joint_calibrator.proxy_kind if isinstance(duo.joint_calibrator, JointProxyAnchorCoca) else ''}{' calibrated_selection ' if isinstance(duo.joint_calibrator, JointProxyAnchorCoca) and duo.joint_calibrator.calibrated_selection else ' '}| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
+        f"{duo.mode} | {calibration_name}{' normalized' if duo.norm_logits else ' '}{'proxy_kind: ' + proxy_kind_str if proxy_kind_str else ''}{' calibrated_selection ' if isinstance(duo.joint_calibrator, JointProxyAnchorCoca) and duo.joint_calibrator.calibrated_selection else ' '}| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
     )
     if use_wandb:
         wandb_run = wandb.init(
@@ -509,12 +519,13 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                     wandb_log[f"{prefix}proxy/r2_large"] = r2_stats["r2_l"]
                     wandb_log[f"{prefix}proxy/r2_small"] = r2_stats["r2_s"]
                 if corr_stats and corr_stats["n"] > 0:
-                    for key in ("sel_acc",
-                                "l_r2", "l_pearson_r", "l_spearman_rho",
-                                "l_pred_r2", "l_pred_pearson_r", "l_pred_spearman_rho",
-                                "s_r2", "s_pearson_r", "s_spearman_rho",
-                                "s_pred_r2", "s_pred_pearson_r", "s_pred_spearman_rho"):
-                        v = corr_stats[key]
+                    # Different calibrators report different diagnostic keys
+                    # (e.g. JointProxyAnchorCoca has "sel_acc"/"*_pred_*",
+                    # JointProxyWeighted has "mean_w_l"/"mean_duo_vs_best_gap");
+                    # log whichever numeric keys are present.
+                    for key, v in corr_stats.items():
+                        if key == "n" or not isinstance(v, (int, float)):
+                            continue
                         if not math.isnan(v):
                             wandb_log[f"{prefix}proxy/{key}"] = v
                 wandb_run.log(wandb_log)
