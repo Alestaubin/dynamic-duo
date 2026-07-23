@@ -32,12 +32,12 @@ python scripts/run_dynamic_duo.py \
     --calib_map resnet50_vitb16_dev \
     --calibrated_selection
 
-# proxy-anchor COCA with cumulative nuclear norm proxy:
+# proxy-anchor COCA with the nuclear norm proxy:
 python scripts/run_dynamic_duo.py \
     --config cfgs/dynamic_duo_config.yaml \
     --mode no_adapt \
     --calibration_mode proxy_anchor_coca \
-    --proxy_kind nuclear_norm_cum \
+    --proxy_kind nuclear_norm \
     --seed 0 \
     --wandb
 """
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     parser.add_argument("--coca_bs", type=int, default=None, 
                         help="Batch size for COCA calibration, independent of the TENT batch size.")
     parser.add_argument("--proxy_kind", type=str, default="prototype",
-                        choices=["nuclear_norm", "nuclear_norm_cum", "atc", "prototype"])
+                        choices=["nuclear_norm", "atc", "prototype"])
     parser.add_argument("--proto_metric", type=str, default="cosine",
                         choices=["cosine", "mahalanobis"],
                         help="Distance for the prototype proxy: cosine similarity to "
