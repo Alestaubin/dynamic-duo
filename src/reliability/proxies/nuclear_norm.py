@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import torch
 
-from src.proxies.base import Proxy, register
+from src.reliability.proxies.base import Proxy, register
 
 
 @torch.no_grad()

@@ -1,12 +1,14 @@
 """
-calibration.py
-==============
+maps.py
+=======
 Builds, saves, and loads the per-model maps that turn a raw reliability proxy
-value into a predicted accuracy.
+value into a predicted accuracy — Section 3 ("cross-model calibration") of
+the filtered-proxy soft-weighting pipeline.
 
 The map is a first-class artifact (CalibrationMaps), decoupled from
-ProxyStats and from the proxy-stats .pt file. Each model gets one
-isotonic regressor per proxy: raw_proxy_value -> predicted_accuracy. Fitting
+ProxyStats and from the proxy-stats .pt file. Each model gets one calibration
+map per proxy: raw_proxy_value -> predicted_accuracy, chosen from the ladder
+in this package (identity/linear/platt/beta/isotonic, see `method=`). Fitting
 pools batches across corruptions so the map generalises; an optional
 holdout set is excluded from the fit so you can measure held-out ranking
 quality.
@@ -35,10 +37,23 @@ from typing import Iterable
 
 import sklearn
 import torch
-from sklearn.isotonic import IsotonicRegression
 from tqdm import tqdm
 
-from src.proxies.proxies import ProxyStats, FeatureExtractor
+from src.reliability.proxies.stats import ProxyStats, FeatureExtractor
+from src.reliability.calibration.base import CalibrationMap
+from src.reliability.calibration.identity import IdentityMap
+from src.reliability.calibration.linear import LinearMap
+from src.reliability.calibration.platt import PlattMap
+from src.reliability.calibration.beta import BetaMap
+from src.reliability.calibration.isotonic import IsotonicMap
+
+_MAP_BUILDERS = {
+    "identity": lambda y_min, y_max, increasing: IdentityMap(),
+    "linear": lambda y_min, y_max, increasing: LinearMap(),
+    "platt": lambda y_min, y_max, increasing: PlattMap(),
+    "beta": lambda y_min, y_max, increasing: BetaMap(),
+    "isotonic": lambda y_min, y_max, increasing: IsotonicMap(y_min=y_min, y_max=y_max, increasing=increasing),
+}
 
 __all__ = [
     "BatchRecord",
@@ -146,12 +161,13 @@ def collect_records(
 
 @dataclass
 class CalibrationMaps:
-    """Per-model isotonic maps raw_proxy -> predicted accuracy, plus provenance."""
+    """Per-model calibration maps raw_proxy -> predicted accuracy, plus provenance."""
     large_name: str
     small_name: str
-    calib_l: dict[str, IsotonicRegression] = field(default_factory=dict)
-    calib_s: dict[str, IsotonicRegression] = field(default_factory=dict)
+    calib_l: dict[str, CalibrationMap] = field(default_factory=dict)
+    calib_s: dict[str, CalibrationMap] = field(default_factory=dict)
     proxy_name: str = ""
+    method: str = "isotonic"
     n_fit_records: int = 0
     fit_corruptions: list[str] = field(default_factory=list)
     sklearn_version: str = sklearn.__version__
@@ -161,12 +177,12 @@ class CalibrationMaps:
         return [self.proxy_name] if self.proxy_name else list(self.calib_l.keys())
 
     def predict_l(self, proxy: str, raw: float) -> float:
-        iso = self.calib_l.get(proxy)
-        return float(iso.predict([raw])[0]) if iso is not None else raw
+        m = self.calib_l.get(proxy)
+        return m.predict(raw) if m is not None else raw
 
     def predict_s(self, proxy: str, raw: float) -> float:
-        iso = self.calib_s.get(proxy)
-        return float(iso.predict([raw])[0]) if iso is not None else raw
+        m = self.calib_s.get(proxy)
+        return m.predict(raw) if m is not None else raw
 
     def attach(self, cfg_l: ProxyStats, cfg_s: ProxyStats) -> None:
         """Wire these maps onto two ProxyStats' .calib dicts (in place)."""
@@ -186,11 +202,16 @@ def fit_calibration_maps(
     proxy_name: str,
     large_name: str,
     small_name: str,
+    method: str = "isotonic",
     y_min: float = 0.0,
     y_max: float = 1.0,
     increasing: bool | str = True,
 ) -> CalibrationMaps:
-    """Fit per-model isotonic maps raw_proxy -> accuracy for a single proxy.
+    """Fit per-model calibration maps raw_proxy -> accuracy for a single proxy.
+
+    `method` selects the rung of the Section-3 calibration ladder:
+    "identity" | "linear" | "platt" | "beta" | "isotonic" (default, matches
+    the map previously hardcoded here).
 
     The caller is responsible for passing only the records that should be used
     for fitting (i.e. holdout filtering happens upstream, not here).
@@ -198,8 +219,9 @@ def fit_calibration_maps(
     A model with fewer than 2 distinct raw values skips fitting; predict_* /
     predicted_acc then falls back to the identity for that model.
     """
-    calib_l: dict[str, IsotonicRegression] = {}
-    calib_s: dict[str, IsotonicRegression] = {}
+    assert method in _MAP_BUILDERS, f"method must be one of {sorted(_MAP_BUILDERS)}, got '{method}'"
+    calib_l: dict[str, CalibrationMap] = {}
+    calib_s: dict[str, CalibrationMap] = {}
     for calib, side in ((calib_l, "l"), (calib_s, "s")):
         pairs = [
             (getattr(r, f"raw_{side}")[proxy_name], getattr(r, f"acc_{side}"))
@@ -208,11 +230,8 @@ def fit_calibration_maps(
         if len({p[0] for p in pairs}) < 2:
             continue
         xs, ys = zip(*pairs)
-        iso = IsotonicRegression(
-            out_of_bounds="clip", y_min=y_min, y_max=y_max, increasing=increasing
-        )
-        iso.fit(list(xs), list(ys))
-        calib[proxy_name] = iso
+        m = _MAP_BUILDERS[method](y_min, y_max, increasing).fit(xs, ys)
+        calib[proxy_name] = m
 
     return CalibrationMaps(
         large_name=large_name,
@@ -220,6 +239,7 @@ def fit_calibration_maps(
         calib_l=calib_l,
         calib_s=calib_s,
         proxy_name=proxy_name,
+        method=method,
         n_fit_records=len(records),
         fit_corruptions=sorted({r.corruption for r in records}),
     )
@@ -230,9 +250,10 @@ def fit_calibration(
     cfg_s: ProxyStats,
     dev_records: list[BatchRecord],
     proxy_name: str,
+    method: str = "isotonic",
 ) -> CalibrationMaps:
     """Convenience wrapper: fit maps and attach onto the stats in place."""
-    maps = fit_calibration_maps(dev_records, proxy_name, cfg_l.name, cfg_s.name)
+    maps = fit_calibration_maps(dev_records, proxy_name, cfg_l.name, cfg_s.name, method=method)
     maps.attach(cfg_l, cfg_s)
     return maps
 
@@ -262,6 +283,7 @@ def save_calibration_maps(
             "calib_l": maps.calib_l,
             "calib_s": maps.calib_s,
             "proxy_name": maps.proxy_name,
+            "method": maps.method,
             "n_fit_records": maps.n_fit_records,
             "fit_corruptions": maps.fit_corruptions,
             "sklearn_version": maps.sklearn_version,
@@ -295,6 +317,7 @@ def load_calibration_maps(
         calib_s=data.get("calib_s", {}),
         # backward compat: old files saved proxy_names list
         proxy_name=data.get("proxy_name") or (data.get("proxy_names") or [""])[0],
+        method=data.get("method", "isotonic"),
         n_fit_records=data.get("n_fit_records", 0),
         fit_corruptions=data.get("fit_corruptions", []),
         sklearn_version=saved_ver or sklearn.__version__,

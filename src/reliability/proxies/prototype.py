@@ -19,7 +19,7 @@ from typing import Literal
 import torch
 import torch.nn.functional as F
 
-from src.proxies.base import Proxy, register
+from src.reliability.proxies.base import Proxy, register
 
 
 @torch.no_grad()

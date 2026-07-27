@@ -1,13 +1,13 @@
 """
-proxies.py
-==========
+stats.py
+========
 Per-batch reliability proxies for heterogeneous model pairs.
 
-Each proxy (nuclear_norm, atc, prototype) is a Proxy subclass living in its
-own file under src/proxies/ (see base.py). This module provides ProxyStats,
-the dataclass that holds per-model SOURCE-FITTED proxy state, FeatureExtractor
-for hook-based penultimate feature capture, and build_proxy_stats for building
-both ProxyStats from a source dataloader.
+Each proxy (nuclear_norm, atc, prototype, ac_mc, cot) is a Proxy subclass
+living in its own file under src/reliability/proxies/ (see base.py). This
+module provides ProxyStats, the dataclass that holds per-model SOURCE-FITTED
+proxy state, FeatureExtractor for hook-based penultimate feature capture, and
+build_proxy_stats for building both ProxyStats from a source dataloader.
 
 Adding a new proxy: create a Proxy subclass in its own file, decorate it with
 @register, and import that module below — it then appears automatically in
@@ -16,7 +16,8 @@ PROXY_KINDS and in every ProxyStats.
 Persistence: stats live in their own directory (DEFAULT_PROXY_DIR) and
 nothing else does — one file per (large, small) pair. The calib maps that turn
 a raw proxy into predicted accuracy are NOT stored here; they are a separate
-artifact owned by calibration.py and attached at runtime onto .calib.
+artifact owned by src.reliability.calibration.maps and attached at runtime
+onto .calib.
 """
 
 from __future__ import annotations
@@ -28,13 +29,12 @@ from typing import Literal
 
 import torch
 import torch.nn as nn
-from sklearn.isotonic import IsotonicRegression
 from tqdm import tqdm
 
-from src.proxies.base import Proxy, build_all, registered_names
-from src.proxies.nuclear_norm import NuclearNormProxy, nuclear_norm_score
-from src.proxies.atc import ATCProxy, atc_score, fit_atc_threshold
-from src.proxies.prototype import (
+from src.reliability.proxies.base import Proxy, build_all, registered_names
+from src.reliability.proxies.nuclear_norm import NuclearNormProxy, nuclear_norm_score
+from src.reliability.proxies.atc import ATCProxy, atc_score, fit_atc_threshold
+from src.reliability.proxies.prototype import (
     PrototypeProxy,
     prototype_score,
     mahalanobis_score,
@@ -42,10 +42,10 @@ from src.proxies.prototype import (
     build_class_means,
     build_tied_precision,
 )
+from src.reliability.proxies.ac_mc import AcMcProxy, ac_mc_score
+from src.reliability.proxies.cot import CotProxy, cot_score
+from src.reliability.calibration.base import CalibrationMap
 
-# Re-exported so existing `from src.proxies.proxies import <name>` call sites
-# (e.g. lambda_entropy_temperature.py) keep working unchanged now that the
-# proxy implementations live in their own files.
 __all__ = [
     "PROXY_KINDS",
     "ProxyStats",
@@ -60,6 +60,8 @@ __all__ = [
     "ATCProxy", "atc_score", "fit_atc_threshold",
     "PrototypeProxy", "prototype_score", "mahalanobis_score",
     "build_prototypes", "build_class_means", "build_tied_precision",
+    "AcMcProxy", "ac_mc_score",
+    "CotProxy", "cot_score",
 ]
 
 # Dedicated, stats-only directory + distinctive suffix so the folder is
@@ -85,8 +87,8 @@ class ProxyStats:
     num_classes: int
     proxies: dict[str, Proxy] = field(default_factory=build_all)
     # raw proxy → predicted accuracy. Populated at runtime by
-    # calibration.CalibrationMaps.attach(); NOT persisted with these stats.
-    calib: dict[str, IsotonicRegression] = field(default_factory=dict)
+    # calibration.maps.CalibrationMaps.attach(); NOT persisted with these stats.
+    calib: dict[str, CalibrationMap] = field(default_factory=dict)
 
     def fit_source(
         self, logits: torch.Tensor, features: torch.Tensor,
@@ -107,7 +109,7 @@ class ProxyStats:
 
     def predicted_acc(self, proxy_name: str, raw_value: float) -> float:
         if proxy_name in self.calib:
-            return float(self.calib[proxy_name].predict([raw_value])[0])
+            return self.calib[proxy_name].predict(raw_value)
         return raw_value
 
 

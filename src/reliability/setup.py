@@ -1,22 +1,32 @@
 """
-calibrator_setup.py
-===================
-Factory helpers for proxy-based calibrators (proxy_anchor_coca, soft_anchor).
+setup.py
+========
+Factory helpers for the filtered-proxy soft-weighting calibrator
+(JointProxyWeighted, paper Sections 2-5).
 
 Keeps all proxy-stats building, calibration-map fitting/loading, and calibrator
 construction out of the top-level run script.
 
 Public API
 ----------
-build_proxy_calibrator(calibration_mode, proxy_kind, ...) -> BaseJointCalibrator
+build_proxy_weighted_calibrator(proxy_kind, ...) -> JointProxyWeighted
+fit_beta(...) -> float
 """
 
 from __future__ import annotations
 
-import torch
+import math
 
-from src.proxies.proxies import build_proxy_stats, ProxyStats
-from src.proxies.calibration import load_calibration_maps
+import torch
+import torch.nn.functional as F
+
+from src.reliability.proxies.stats import build_proxy_stats, ProxyStats
+from src.reliability.calibration.maps import load_calibration_maps
+
+# Proxy kinds that need a source-data pass to fit state before scoring:
+# atc (threshold), prototype (class means), cot (source label marginal).
+# nuclear_norm and ac_mc are stateless.
+_SOURCE_FIT_KINDS = {"atc", "prototype", "cot"}
 
 
 def _build_proxy_stats(
@@ -28,11 +38,12 @@ def _build_proxy_stats(
     cache_path: str | None,
     proto_metric: str = "cosine",
 ) -> tuple[ProxyStats, ProxyStats]:
-    """Return (cfg_l, cfg_s). atc/prototype run a source pass; nuclear_norm is free.
+    """Return (cfg_l, cfg_s). atc/prototype/cot run a source pass; nuclear_norm
+    and ac_mc are stateless and free.
 
     proto_metric ("cosine" | "mahalanobis") selects the prototype-proxy distance.
     """
-    if proxy_kind in {"atc", "prototype"}:
+    if proxy_kind in _SOURCE_FIT_KINDS:
         from torch.utils.data import DataLoader
         from torchvision import datasets
         from src.utils.data import _pil_collate_fn
@@ -68,12 +79,13 @@ def _fit_and_save_calibration_maps(
     proxy_name: str,
     num_samples: int | None = None,
     seed: int | None = None,
+    calib_method: str = "isotonic",
 ):
     """Collect records over CALIBRATOR corruptions in one combined loader, fit, save."""
     from tqdm import tqdm
     from src.utils.data import load_imagenetC
-    from src.proxies.proxies import FeatureExtractor
-    from src.proxies.calibration import make_record, fit_calibration_maps, save_calibration_maps
+    from src.reliability.proxies.stats import FeatureExtractor
+    from src.reliability.calibration.maps import make_record, fit_calibration_maps, save_calibration_maps
 
     corruptions = config["CALIBRATOR"]["CORRUPTIONS"]
     severities  = config["CALIBRATOR"]["SEVERITIES"]
@@ -110,18 +122,24 @@ def _fit_and_save_calibration_maps(
         ext_l.remove()
         ext_s.remove()
 
-    maps = fit_calibration_maps(records, proxy_name, cfg_l.name, cfg_s.name)
+    maps = fit_calibration_maps(records, proxy_name, cfg_l.name, cfg_s.name, method=calib_method)
     save_calibration_maps(maps, name)
     print(f"[calib map] Fitted on {len(records)} batches, proxy={proxy_name}")
     return maps
 
 
-def build_proxy_calibrator(
-    calibration_mode: str,
+def build_proxy_weighted_calibrator(
     proxy_kind: str,
     proxy_cache: str | None,
     calib_map: str | None,
-    calibrated_selection: bool,
+    calib_method: str,
+    filter_kind: str,
+    filter_kwargs: dict | None,
+    beta: float,
+    pool: str,
+    prior_l: float,
+    prior_s: float,
+    base_ts,
     csv_path: str | None,
     config: dict,
     large_model, large_preprocess,
@@ -131,13 +149,24 @@ def build_proxy_calibrator(
     seed: int | None = None,
     proto_metric: str = "cosine",
 ):
-    """Build a proxy-based calibrator (proxy_anchor_coca or soft_anchor).
+    """Build a JointProxyWeighted calibrator (paper Sections 2-5).
 
-    Handles proxy-stats building, calibration-map loading/fitting, and
-    calibrated-selection validation before constructing the calibrator.
-
-    Raises ValueError for invalid argument combinations.
+    prior_l, prior_s are each model's clean-source accuracy in [0, 1]
+    (converted to the ema/kalman filters' logit-space reset prior — see
+    src.reliability.calibration.logit.to_logit); default 0.5 (neutral) if
+    unknown. base_ts is a frozen JointFixedTS supplying the (T_l, T_s) prior
+    for the Section-5 combination — load one the same way the fixed_ts
+    calibration mode does, or pass None for T_l = T_s = 1.0.
     """
+    from src.calibrators.joint_proxy_weighted import JointProxyWeighted
+    from src.reliability.calibration.logit import to_logit
+
+    assert proxy_kind != "agreement", (
+        "proxy_kind='agreement' scores the model pair, not a single model, "
+        "and cannot drive JointProxyWeighted's gate; see "
+        "src/reliability/proxies/agreement.py."
+    )
+
     cfg_l, cfg_s = _build_proxy_stats(
         proxy_kind, config,
         large_model, large_preprocess, small_model, small_preprocess,
@@ -156,30 +185,91 @@ def build_proxy_calibrator(
                 proxy_name=proxy_kind,
                 num_samples=num_samples,
                 seed=seed,
+                calib_method=calib_method,
             )
         maps.attach(cfg_l, cfg_s)
-        print(f"Attached calibration map '{calib_map}' (proxy={maps.proxy_name})")
+        print(f"Attached calibration map '{calib_map}' (proxy={maps.proxy_name}, method={maps.method})")
+    else:
+        print(f"[proxy_weighted] no --calib_map given; gating on the raw '{proxy_kind}' "
+              f"score directly (Section 3's identity baseline).")
 
-    if calibrated_selection:
-        if calib_map is None:
-            raise ValueError("--calibrated_selection requires --calib_map")
-        if proxy_kind not in cfg_l.calib or proxy_kind not in cfg_s.calib:
-            raise ValueError(
-                f"--calibrated_selection set but calib map has no '{proxy_kind}' "
-                f"entry for both models "
-                f"(map proxies: {sorted(set(cfg_l.calib) | set(cfg_s.calib))})"
-            )
+    return JointProxyWeighted(
+        proxy_kind=proxy_kind,
+        cfg_l=cfg_l,
+        cfg_s=cfg_s,
+        beta=beta,
+        pool=pool,
+        filter_kind=filter_kind,
+        filter_kwargs=filter_kwargs,
+        prior_l=to_logit(prior_l),
+        prior_s=to_logit(prior_s),
+        base_ts=base_ts,
+        csv_path=csv_path,
+    )
 
-    if calibration_mode == "proxy_anchor_coca":
-        from src.calibrators.joint_proxy_anchor_coca import JointProxyAnchorCoca
-        return JointProxyAnchorCoca(
-            proxy_kind=proxy_kind,
-            cfg_l=cfg_l,
-            cfg_s=cfg_s,
-            csv_path=csv_path,
-            calibrated_selection=calibrated_selection,
+
+def fit_beta(
+    calibrator,
+    large_model, large_preprocess,
+    small_model, small_preprocess,
+    config: dict,
+    device: torch.device,
+    betas: list[float] | None = None,
+    num_samples: int | None = None,
+    seed: int | None = None,
+) -> float:
+    """Grid-search calibrator.beta against held-out dev-shift NLL (Section 5).
+
+    Runs the CALIBRATOR corruptions/severities once, caching each batch's
+    filtered scores (x_l, x_s) and logits so every candidate beta can be
+    re-scored (gate + combine only) without re-running the models or the
+    stateful temporal filters more than once per batch. Sets and returns the
+    best beta; mutates calibrator.beta in place.
+    """
+    from src.utils.data import load_imagenetC
+
+    if betas is None:
+        betas = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+
+    corruptions = config["CALIBRATOR"]["CORRUPTIONS"]
+    severities = config["CALIBRATOR"]["SEVERITIES"]
+    T_l = float(calibrator.base_ts.Tl.item()) if calibrator.base_ts is not None else 1.0
+    T_s = float(calibrator.base_ts.Ts.item()) if calibrator.base_ts is not None else 1.0
+
+    cached = []  # (x_l, x_s, z_l, z_s, labels), one entry per dev batch
+    for corruption in corruptions:
+        calibrator.set_corruption(corruption)
+        loader = load_imagenetC(
+            config["TEST_DIR"], severities=severities, corruption_types=[corruption],
+            device=device, batch_size=config["BS"], num_workers=config["WORKERS"],
+            num_samples=num_samples, seed=seed,
         )
-    else:  # soft_anchor
-        raise NotImplementedError(
-            "JointSoftAnchor is not currently supported. Use proxy_anchor_coca."
-        )
+        for imgs, labels in loader:
+            xl = torch.stack([large_preprocess(img) for img in imgs]).to(device)
+            xs = torch.stack([small_preprocess(img) for img in imgs]).to(device)
+            with torch.no_grad():
+                zl = large_model(xl)
+                zs = small_model(xs)
+                _, _, _, _, _, x_l, x_s, _ = calibrator._forward(zl, zs)
+            cached.append((x_l, x_s, zl.cpu(), zs.cpu(), labels))
+
+    best_beta, best_nll = betas[0], float("inf")
+    for candidate in betas:
+        total_nll, n = 0.0, 0
+        for x_l, x_s, zl, zs, labels in cached:
+            w_l = 1.0 / (1.0 + math.exp(-candidate * (x_l - x_s)))
+            w_s = 1.0 - w_l
+            if calibrator.pool == "log":
+                z_duo = w_l * (zl / T_l) + w_s * (zs / T_s)
+            else:
+                p_duo = w_l * F.softmax(zl / T_l, dim=1) + w_s * F.softmax(zs / T_s, dim=1)
+                z_duo = torch.log(p_duo.clamp(min=1e-8))
+            total_nll += F.cross_entropy(z_duo, labels, reduction="sum").item()
+            n += len(labels)
+        avg_nll = total_nll / n
+        if avg_nll < best_nll:
+            best_nll, best_beta = avg_nll, candidate
+
+    calibrator.beta = best_beta
+    print(f"[fit_beta] best beta={best_beta} (dev NLL={best_nll:.4f})")
+    return best_beta
