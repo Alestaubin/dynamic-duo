@@ -102,8 +102,8 @@ def make_record(
     return BatchRecord(
         corruption=corruption,
         severity=severity,
-        raw_l=cfg_l.raw_proxies(logits_l, feats_l),
-        raw_s=cfg_s.raw_proxies(logits_s, feats_s),
+        raw_l=cfg_l.raw_proxies(logits_l, feats_l, labels=labels),
+        raw_s=cfg_s.raw_proxies(logits_s, feats_s, labels=labels),
         acc_l=float((logits_l.argmax(1) == labels).float().mean()),
         acc_s=float((logits_s.argmax(1) == labels).float().mean()),
     )

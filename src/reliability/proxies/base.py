@@ -47,6 +47,9 @@ class Proxy(ABC):
     """
 
     name: str = ""
+    # True only for the cheating OracleProxy: lets raw_proxies() skip it
+    # gracefully (rather than crashing) when labels aren't available.
+    requires_labels: bool = False
 
     def fit_source(
         self,
@@ -63,8 +66,18 @@ class Proxy(ABC):
         return True
 
     @abstractmethod
-    def score(self, logits: torch.Tensor, features: torch.Tensor | None) -> float:
-        """Reliability score for one batch; higher = more reliable."""
+    def score(
+        self,
+        logits: torch.Tensor,
+        features: torch.Tensor | None,
+        labels: torch.Tensor | None = None,
+    ) -> float:
+        """Reliability score for one batch; higher = more reliable.
+
+        `labels` is None for every label-free proxy (the normal case); it
+        exists only so the cheating OracleProxy (see oracle.py) can share
+        this same interface and registry.
+        """
 
     def state_dict(self) -> dict:
         """Source-fitted state to persist. Empty for stateless proxies."""

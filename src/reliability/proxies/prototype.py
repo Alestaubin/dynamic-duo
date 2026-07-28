@@ -151,7 +151,7 @@ class PrototypeProxy(Proxy):
         else:
             self.prototypes = build_prototypes(features, labels, num_classes)
 
-    def score(self, logits: torch.Tensor, features: torch.Tensor) -> float:
+    def score(self, logits: torch.Tensor, features: torch.Tensor, labels: torch.Tensor | None = None) -> float:
         """Lazily moves the stored source state onto `features`' device,
         caching it in place."""
         assert self.is_fitted, \

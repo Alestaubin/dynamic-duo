@@ -44,6 +44,7 @@ from src.reliability.proxies.prototype import (
 )
 from src.reliability.proxies.ac_mc import AcMcProxy, ac_mc_score
 from src.reliability.proxies.cot import CotProxy, cot_score
+from src.reliability.proxies.oracle import OracleProxy, oracle_score
 from src.reliability.calibration.base import CalibrationMap
 
 __all__ = [
@@ -62,6 +63,7 @@ __all__ = [
     "build_prototypes", "build_class_means", "build_tied_precision",
     "AcMcProxy", "ac_mc_score",
     "CotProxy", "cot_score",
+    "OracleProxy", "oracle_score",
 ]
 
 # Dedicated, stats-only directory + distinctive suffix so the folder is
@@ -97,15 +99,20 @@ class ProxyStats:
         for proxy in self.proxies.values():
             proxy.fit_source(logits, features, labels, num_classes)
 
-    def raw_proxies(self, logits: torch.Tensor, features: torch.Tensor) -> dict[str, float]:
+    def raw_proxies(
+        self, logits: torch.Tensor, features: torch.Tensor, labels: torch.Tensor | None = None,
+    ) -> dict[str, float]:
         return {
-            name: proxy.score(logits, features)
+            name: proxy.score(logits, features, labels=labels)
             for name, proxy in self.proxies.items()
-            if proxy.is_fitted
+            if proxy.is_fitted and not (proxy.requires_labels and labels is None)
         }
 
-    def score(self, proxy_name: str, logits: torch.Tensor, features: torch.Tensor | None) -> float:
-        return self.proxies[proxy_name].score(logits, features)
+    def score(
+        self, proxy_name: str, logits: torch.Tensor, features: torch.Tensor | None,
+        labels: torch.Tensor | None = None,
+    ) -> float:
+        return self.proxies[proxy_name].score(logits, features, labels=labels)
 
     def predicted_acc(self, proxy_name: str, raw_value: float) -> float:
         if proxy_name in self.calib:

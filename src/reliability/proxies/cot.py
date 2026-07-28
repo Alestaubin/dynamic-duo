@@ -62,7 +62,7 @@ class CotProxy(Proxy):
         counts = torch.bincount(labels, minlength=num_classes).float()
         self.class_probs = counts / counts.sum()
 
-    def score(self, logits: torch.Tensor, features: torch.Tensor | None) -> float:
+    def score(self, logits: torch.Tensor, features: torch.Tensor | None, labels: torch.Tensor | None = None) -> float:
         assert self.class_probs is not None, \
             "CotProxy not fitted; call fit_source() or build_proxy_stats()"
         probs = self.class_probs.to(logits.device)

@@ -32,7 +32,7 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "oracle_ts", "proxy_weighted"}
+_CALIB_MODES = {"fixed_ts", "oracle_ts", "proxy_weighted", "coca"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -59,6 +59,10 @@ class DynamicDuo(nn.Module):
                             combination (paper Sections 2-5). Uses
                             set_labels() injected by DynamicDuo.forward()
                             for diagnostics only (never for adaptation).
+      * "coca"           -> JointCoca: self-adapting per-batch temperature-
+                            scaling baseline (COCA TS, Yi et al. 2025) —
+                            fits a single tau aligning the small model to the
+                            large one each batch; owns its own optimizer.
     """
     def __init__(
         self,
@@ -131,6 +135,9 @@ class DynamicDuo(nn.Module):
                 "filtered-proxy soft gate + combination (Sections 2-5)",
                 proxy_kind,
             )
+        elif calibration_mode == "coca":
+            # Self-adapting: owns its optimization internally, fits per batch.
+            logger.info("Calibrator SELF-ADAPTING (coca) | fits its temperature per batch")
 
     def forward(self, x, labels=None):
         if self.calibration_mode == "proxy_weighted" and labels is not None:

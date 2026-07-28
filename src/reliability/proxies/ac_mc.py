@@ -25,7 +25,7 @@ def ac_mc_score(logits: torch.Tensor) -> float:
 class AcMcProxy(Proxy):
     name = "ac_mc"
 
-    def score(self, logits: torch.Tensor, features: torch.Tensor | None) -> float:
+    def score(self, logits: torch.Tensor, features: torch.Tensor | None, labels: torch.Tensor | None = None) -> float:
         return ac_mc_score(logits)
 
 

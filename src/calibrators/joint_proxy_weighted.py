@@ -4,7 +4,17 @@ joint_proxy_weighted.py
 Filtered-proxy soft weighting (paper Sections 2-5): continuous, reliability-
 weighted combination of the two models.
 
-Each batch:
+Proxy batching (paper Section 1): the proxy batch size b_t is a distinct
+hyperparameter from the adaptation batch size — a proxy batch may aggregate
+several adaptation batches. Every adaptation batch still gets its own
+combined (gated) output every call (the TENT loss needs one every step), but
+the proxy score / calibration / filter / gate pipeline below only actually
+RUNS once every `proxy_batch_size` samples; in between, the last computed
+gate weight is reused as-is. Larger proxy batches reduce the score's sampling
+noise at the cost of a slower-reacting weight (set proxy_batch_size=1, the
+default, to react every adaptation batch).
+
+Each proxy batch:
   1. Raw proxy scores r_l, r_s (Section 2 — any src.reliability.proxies kind
      except "agreement", which scores the pair rather than a single model
      and so has no r_l/r_s split; see proxies/agreement.py).
@@ -12,9 +22,13 @@ Each batch:
      attached CalibrationMaps (Section 3), then to log-odds (eq. 8,
      src.reliability.calibration.logit.to_logit).
   3. Denoise the log-odds score with a per-model temporal filter (Section 4:
-     none / running_mean / ema / kalman — src.reliability.filters).
+     none / running_mean / ema / kalman — src.reliability.filters). The
+     filter's own stream is thus indexed by proxy batches, matching the
+     paper's t = 1, 2, ... (Section 1), not by adaptation batches.
   4. Gate: w_l = sigmoid(beta * (x_l - x_s)), w_s = 1 - w_l (eq. 15).
-  5. Combine against a frozen JointFixedTS's (T_l, T_s) prior — the proxy
+
+Every adaptation batch (Section 5 combination) then:
+  5. Combines against a frozen JointFixedTS's (T_l, T_s) prior — the proxy
      only sets the weight ratio between the two models, not their base
      scale (unidentifiable together, so T_l/T_s stay FIXED here; do not
      also fit temperatures inside this calibrator). Two pooling modes:
@@ -99,7 +113,9 @@ class JointProxyWeighted(BaseJointCalibrator):
     Parameters
     ----------
     proxy_kind : any src.reliability.proxies.stats.PROXY_KINDS member
-        ("nuclear_norm" | "atc" | "prototype" | "ac_mc" | "cot").
+        ("nuclear_norm" | "atc" | "prototype" | "ac_mc" | "cot" | "oracle").
+        "oracle" is a cheat (uses ground-truth labels as the score) meant only
+        as an upper-bound reference — never a real deployment signal.
     cfg_l, cfg_s : ProxyStats for large and small model, with a
         CalibrationMaps for this proxy_kind attached to .calib (see
         src.reliability.calibration.maps).
@@ -111,10 +127,15 @@ class JointProxyWeighted(BaseJointCalibrator):
         {"q", "r", "prior_var"}.
     prior_l, prior_s : each model's logit-space prior (typically
         to_logit(val_acc) — see src.reliability.calibration.logit), used as
-        the ema/kalman reset point at each corruption boundary.
+        the ema/kalman reset point at each corruption boundary, and as the
+        initial gate weight (via the sigmoid) before the first proxy batch
+        completes.
     base_ts : frozen JointFixedTS supplying T_l, T_s. If None, T_l = T_s = 1.0.
     eps : clip predicted accuracies into (eps, 1-eps) before the logit
         transform (eq. 6).
+    proxy_batch_size : number of samples to aggregate into one proxy
+        computation (Section 1's b_t), independent of the adaptation batch
+        size. 1 (default) recomputes the gate every adaptation batch.
     csv_path : if given, append per-batch diagnostics rows to this CSV file.
     """
 
@@ -137,6 +158,7 @@ class JointProxyWeighted(BaseJointCalibrator):
         prior_s: float = 0.0,
         base_ts: JointFixedTS | None = None,
         eps: float = 1e-3,
+        proxy_batch_size: int = 1,
         csv_path: str | None = None,
         log_every: int = 10,
     ):
@@ -146,6 +168,7 @@ class JointProxyWeighted(BaseJointCalibrator):
         assert pool in _POOL_KINDS, f"pool must be one of {_POOL_KINDS}, got '{pool}'"
         assert filter_kind in _FILTER_KINDS, \
             f"filter_kind must be one of {_FILTER_KINDS}, got '{filter_kind}'"
+        assert proxy_batch_size >= 1, f"proxy_batch_size must be >= 1, got {proxy_batch_size}"
 
         self.proxy_kind = proxy_kind
         self.cfg_l = cfg_l
@@ -157,6 +180,7 @@ class JointProxyWeighted(BaseJointCalibrator):
         self.prior_l = prior_l
         self.prior_s = prior_s
         self.eps = eps
+        self.proxy_batch_size = proxy_batch_size
         self.log_every = log_every
 
         # base_ts is registered as a submodule (if given) so DynamicDuo's
@@ -192,6 +216,29 @@ class JointProxyWeighted(BaseJointCalibrator):
         self._current_corruption: str = ""
         self._n_batches: int = 0
 
+        # Proxy-batch accumulation buffer (Section 1's b_t): filled across
+        # possibly several adaptation batches, flushed once it reaches
+        # proxy_batch_size samples. Cleared on set_corruption() too, so a
+        # partial buffer never leaks across a corruption boundary.
+        self._buf_z_l: list[torch.Tensor] = []
+        self._buf_z_s: list[torch.Tensor] = []
+        self._buf_f_l: list[torch.Tensor] = []
+        self._buf_f_s: list[torch.Tensor] = []
+        self._buf_labels: list[torch.Tensor] = []
+        self._buf_n: int = 0
+
+        # Cached gate outputs, held constant between proxy-batch flushes and
+        # used to combine every adaptation batch in the meantime. Initialised
+        # from the priors so the very first (possibly incomplete) proxy batch
+        # still gates sensibly.
+        self._cached_r_l: float = 0.0
+        self._cached_r_s: float = 0.0
+        self._cached_a_l: float = 0.5
+        self._cached_a_s: float = 0.5
+        self._cached_x_l: float = prior_l
+        self._cached_x_s: float = prior_s
+        self._cached_w_l: float = float(torch.sigmoid(torch.tensor(beta * (prior_l - prior_s))))
+
         # Per-corruption accumulators (cleared by report_and_reset_corruption_stats)
         self._corr_r_l:   list[float] = []
         self._corr_r_s:   list[float] = []
@@ -215,10 +262,18 @@ class JointProxyWeighted(BaseJointCalibrator):
 
     def set_corruption(self, label: str) -> None:
         """New corruption stream: the model resets to source here, so the
-        temporal filters reset to their priors too (Section 4)."""
+        temporal filters reset to their priors too (Section 4), and any
+        partially-filled proxy batch from the previous corruption is
+        discarded rather than mixed into the new stream."""
         self._current_corruption = label
         self._filter_l.reset()
         self._filter_s.reset()
+        self._buf_z_l.clear(); self._buf_z_s.clear()
+        self._buf_f_l.clear(); self._buf_f_s.clear()
+        self._buf_labels.clear()
+        self._buf_n = 0
+        self._cached_x_l, self._cached_x_s = self.prior_l, self.prior_s
+        self._cached_w_l = float(torch.sigmoid(torch.tensor(self.beta * (self.prior_l - self.prior_s))))
 
     def set_labels(self, labels: torch.Tensor) -> None:
         self._labels = labels
@@ -226,18 +281,22 @@ class JointProxyWeighted(BaseJointCalibrator):
     # ── Internals ─────────────────────────────────────────────────────────── #
 
     @torch.no_grad()
-    def _proxy_scores(self, z_l: torch.Tensor, z_s: torch.Tensor) -> tuple[float, float]:
-        f_l = self._ext_l._feats if self._ext_l is not None else None
-        f_s = self._ext_s._feats if self._ext_s is not None else None
-        return (self.cfg_l.score(self.proxy_kind, z_l, f_l),
-                self.cfg_s.score(self.proxy_kind, z_s, f_s))
+    def _proxy_scores(
+        self,
+        z_l: torch.Tensor, z_s: torch.Tensor,
+        f_l: torch.Tensor | None, f_s: torch.Tensor | None,
+        labels: torch.Tensor | None,
+    ) -> tuple[float, float]:
+        # Only the cheating OracleProxy (proxy_kind="oracle") actually uses
+        # labels; every other proxy ignores the kwarg.
+        return (self.cfg_l.score(self.proxy_kind, z_l, f_l, labels=labels),
+                self.cfg_s.score(self.proxy_kind, z_s, f_s, labels=labels))
 
-    def _gate_and_combine(
-        self, z_l: torch.Tensor, z_s: torch.Tensor, r_l: float, r_s: float,
-    ) -> tuple[torch.Tensor, float, float, float, float, float]:
-        """Sections 3-5: calibrate -> logit -> filter -> gate -> combine.
+    def _gate(self, r_l: float, r_s: float) -> tuple[float, float, float, float, float]:
+        """Sections 3-4: calibrate -> logit -> filter -> gate.
 
-        Returns (z_duo, a_l, a_s, x_l, x_s, w_l).
+        Returns (a_l, a_s, x_l, x_s, w_l). Runs once per proxy batch (not
+        necessarily once per adaptation batch — see _maybe_update_gate).
         """
         a_l = min(max(self.cfg_l.predicted_acc(self.proxy_kind, r_l), self.eps), 1.0 - self.eps)
         a_s = min(max(self.cfg_s.predicted_acc(self.proxy_kind, r_s), self.eps), 1.0 - self.eps)
@@ -246,26 +305,70 @@ class JointProxyWeighted(BaseJointCalibrator):
         x_s = self._filter_s.update(to_logit(a_s, self.eps))
 
         w_l = float(torch.sigmoid(torch.tensor(self.beta * (x_l - x_s))))
-        w_s = 1.0 - w_l
+        return a_l, a_s, x_l, x_s, w_l
 
+    def _combine(self, z_l: torch.Tensor, z_s: torch.Tensor, w_l: float) -> torch.Tensor:
+        """Section 5: combine THIS adaptation batch's logits at a given gate
+        weight — always runs, every adaptation batch, regardless of whether
+        this batch also happened to trigger a proxy-batch gate refresh."""
+        w_s = 1.0 - w_l
         T_l = float(self.base_ts.Tl.item()) if self.base_ts is not None else 1.0
         T_s = float(self.base_ts.Ts.item()) if self.base_ts is not None else 1.0
 
         if self.pool == "log":
-            z_duo = w_l * (z_l / T_l) + w_s * (z_s / T_s)
+            return w_l * (z_l / T_l) + w_s * (z_s / T_s)
         else:  # linear
             p_duo = w_l * F.softmax(z_l / T_l, dim=1) + w_s * F.softmax(z_s / T_s, dim=1)
-            z_duo = torch.log(p_duo.clamp(min=1e-8))
+            return torch.log(p_duo.clamp(min=1e-8))
 
-        return z_duo, a_l, a_s, x_l, x_s, w_l
+    def _maybe_update_gate(self, z_l: torch.Tensor, z_s: torch.Tensor) -> None:
+        """Buffer this adaptation batch into the running proxy batch; once it
+        reaches proxy_batch_size samples, compute the proxy scores and refresh
+        the cached gate (_cached_r_l, ..., _cached_w_l), then clear the buffer.
+        Below proxy_batch_size, this only buffers — the cached gate from the
+        last completed proxy batch (or the prior, initially) is left as-is.
+        """
+        f_l = self._ext_l._feats.detach() if self._ext_l is not None else None
+        f_s = self._ext_s._feats.detach() if self._ext_s is not None else None
+
+        self._buf_z_l.append(z_l.detach())
+        self._buf_z_s.append(z_s.detach())
+        if f_l is not None:
+            self._buf_f_l.append(f_l)
+            self._buf_f_s.append(f_s)
+        if self._labels is not None:
+            self._buf_labels.append(self._labels.detach())
+        self._buf_n += z_l.shape[0]
+
+        if self._buf_n < self.proxy_batch_size:
+            return
+
+        agg_z_l = torch.cat(self._buf_z_l, dim=0)
+        agg_z_s = torch.cat(self._buf_z_s, dim=0)
+        agg_f_l = torch.cat(self._buf_f_l, dim=0) if self._buf_f_l else None
+        agg_f_s = torch.cat(self._buf_f_s, dim=0) if self._buf_f_s else None
+        agg_labels = torch.cat(self._buf_labels, dim=0) if self._buf_labels else None
+
+        r_l, r_s = self._proxy_scores(agg_z_l, agg_z_s, agg_f_l, agg_f_s, agg_labels)
+        a_l, a_s, x_l, x_s, w_l = self._gate(r_l, r_s)
+        self._cached_r_l, self._cached_r_s = r_l, r_s
+        self._cached_a_l, self._cached_a_s = a_l, a_s
+        self._cached_x_l, self._cached_x_s = x_l, x_s
+        self._cached_w_l = w_l
+
+        self._buf_z_l.clear(); self._buf_z_s.clear()
+        self._buf_f_l.clear(); self._buf_f_s.clear()
+        self._buf_labels.clear()
+        self._buf_n = 0
 
     def _forward(
         self, z_l: torch.Tensor, z_s: torch.Tensor
-    ) -> tuple[torch.Tensor, float, float, float, float, float, float]:
+    ) -> tuple[torch.Tensor, float, float, float, float, float, float, float]:
         """Returns (z_duo, r_l, r_s, a_l, a_s, x_l, x_s, w_l)."""
-        r_l, r_s = self._proxy_scores(z_l, z_s)
-        z_duo, a_l, a_s, x_l, x_s, w_l = self._gate_and_combine(z_l, z_s, r_l, r_s)
-        return z_duo, r_l, r_s, a_l, a_s, x_l, x_s, w_l
+        self._maybe_update_gate(z_l, z_s)
+        z_duo = self._combine(z_l, z_s, self._cached_w_l)
+        return (z_duo, self._cached_r_l, self._cached_r_s, self._cached_a_l,
+                self._cached_a_s, self._cached_x_l, self._cached_x_s, self._cached_w_l)
 
     def _log_batch(
         self,
@@ -388,7 +491,7 @@ if __name__ == "__main__":
     torch.manual_seed(0)
     K, B = 10, 16
 
-    def _make_calibrator(filter_kind="none", pool="linear", beta=4.0):
+    def _make_calibrator(filter_kind="none", pool="linear", beta=4.0, proxy_batch_size=1):
         cfg_l = ProxyStats(name="large", num_classes=K)
         cfg_s = ProxyStats(name="small", num_classes=K)
         # No CalibrationMaps attached: predicted_acc() falls back to the raw
@@ -397,6 +500,7 @@ if __name__ == "__main__":
         return JointProxyWeighted(
             proxy_kind="nuclear_norm", cfg_l=cfg_l, cfg_s=cfg_s,
             beta=beta, pool=pool, filter_kind=filter_kind, log_every=0,
+            proxy_batch_size=proxy_batch_size,
         )
 
     # A confidently-correct large model + a near-uniform (unreliable) small
@@ -456,5 +560,36 @@ if __name__ == "__main__":
         c.set_corruption("t"); c.set_labels(torch.randint(0, K, (B,)))
         out = c.calibrate(z_l_confident, z_s_uniform)
         assert torch.isfinite(out).all()
+
+    # proxy_batch_size > 1 aggregates several adaptation batches into one
+    # proxy computation: the gate weight (and cached r_l/r_s/a_l/a_s) must
+    # stay frozen for the first proxy_batch_size-1 adaptation batches, then
+    # refresh exactly once the buffer reaches proxy_batch_size samples.
+    pbs_calib = _make_calibrator(proxy_batch_size=3 * B)  # 3 adaptation batches per proxy batch
+    pbs_calib.set_corruption("t")
+    w_l_before = pbs_calib._cached_w_l
+    for i in range(2):  # 2 of 3 needed batches: buffer not yet full
+        pbs_calib.set_labels(torch.randint(0, K, (B,)))
+        pbs_calib.calibrate(z_l_confident, z_s_uniform)
+        assert pbs_calib._cached_w_l == w_l_before, \
+            f"gate weight must not update before the proxy batch fills (batch {i})"
+        assert pbs_calib._buf_n == (i + 1) * B
+    pbs_calib.set_labels(torch.randint(0, K, (B,)))
+    pbs_calib.calibrate(z_l_confident, z_s_uniform)  # 3rd batch: buffer now full -> flush
+    assert pbs_calib._buf_n == 0, "buffer must be cleared after flushing"
+    from src.reliability.proxies.nuclear_norm import nuclear_norm_score
+    expected_r_l = nuclear_norm_score(torch.cat([z_l_confident] * 3, dim=0))
+    assert abs(pbs_calib._cached_r_l - expected_r_l) < 1e-6, \
+        "flushed proxy score must be computed on the concatenated 3-batch buffer"
+
+    # set_corruption mid-accumulation discards the partial buffer instead of
+    # carrying it into the new corruption's first proxy batch.
+    pbs_calib2 = _make_calibrator(proxy_batch_size=10 * B)
+    pbs_calib2.set_corruption("c1")
+    pbs_calib2.set_labels(torch.randint(0, K, (B,)))
+    pbs_calib2.calibrate(z_l_confident, z_s_uniform)
+    assert pbs_calib2._buf_n == B
+    pbs_calib2.set_corruption("c2")
+    assert pbs_calib2._buf_n == 0
 
     print("JointProxyWeighted self-test passed")

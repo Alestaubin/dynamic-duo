@@ -148,6 +148,7 @@ def build_proxy_weighted_calibrator(
     num_samples: int | None = None,
     seed: int | None = None,
     proto_metric: str = "cosine",
+    proxy_batch_size: int = 1,
 ):
     """Build a JointProxyWeighted calibrator (paper Sections 2-5).
 
@@ -157,6 +158,8 @@ def build_proxy_weighted_calibrator(
     unknown. base_ts is a frozen JointFixedTS supplying the (T_l, T_s) prior
     for the Section-5 combination — load one the same way the fixed_ts
     calibration mode does, or pass None for T_l = T_s = 1.0.
+    proxy_batch_size is the proxy batch size b_t (Section 1), independent of
+    the adaptation batch size — see JointProxyWeighted's docstring.
     """
     from src.calibrators.joint_proxy_weighted import JointProxyWeighted
     from src.reliability.calibration.logit import to_logit
@@ -204,6 +207,7 @@ def build_proxy_weighted_calibrator(
         prior_l=to_logit(prior_l),
         prior_s=to_logit(prior_s),
         base_ts=base_ts,
+        proxy_batch_size=proxy_batch_size,
         csv_path=csv_path,
     )
 

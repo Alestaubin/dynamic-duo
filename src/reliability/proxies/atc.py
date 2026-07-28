@@ -55,7 +55,7 @@ class ATCProxy(Proxy):
     def fit_source(self, logits, features, labels, num_classes) -> None:
         self.threshold = fit_atc_threshold(logits, labels, self.kind)
 
-    def score(self, logits: torch.Tensor, features: torch.Tensor | None) -> float:
+    def score(self, logits: torch.Tensor, features: torch.Tensor | None, labels: torch.Tensor | None = None) -> float:
         assert self.threshold is not None, \
             "ATCProxy not fitted; call fit_source() or build_proxy_stats()"
         return atc_score(logits, self.threshold, self.kind)

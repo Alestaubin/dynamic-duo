@@ -27,5 +27,5 @@ def nuclear_norm_score(logits: torch.Tensor) -> float:
 class NuclearNormProxy(Proxy):
     name = "nuclear_norm"
 
-    def score(self, logits: torch.Tensor, features: torch.Tensor | None) -> float:
+    def score(self, logits: torch.Tensor, features: torch.Tensor | None, labels: torch.Tensor | None = None) -> float:
         return nuclear_norm_score(logits)
