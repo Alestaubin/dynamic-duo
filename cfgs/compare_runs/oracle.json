@@ -1,12 +1,17 @@
 [
     {
+        "name": "oracle_ts",
+        "calibration_mode": "oracle_ts"
+    },
+    {
+        "name": "coca_ts",
+        "calibration_mode": "coca",
+        "coca_bs": 128
+    },
+    {
         "name": "fixed_ts",
         "calibration_mode": "fixed_ts",
         "fixed_ts_config": "checkpoints/fixed_ts/default"
-    },
-    {
-        "name": "oracle_ts",
-        "calibration_mode": "oracle_ts"
     },
     {
         "name": "proxy_weighted_oracle_nofilter",

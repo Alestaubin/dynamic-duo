@@ -27,6 +27,8 @@ def get_model(model_name, freeze=True, verbose=True):
         model, preprocess = load_vit_b_16(verbose=verbose)
     elif model_name == "efficientnet_b0":
         model, preprocess = load_efficientnet_b0(verbose=verbose)
+    elif model_name == "efficientnet_b4":
+        model, preprocess = load_efficientnet_b4(verbose=verbose)
     else:
         raise ValueError(f"Model {model_name} not recognized. Add it to model_loader.py")
         
@@ -46,6 +48,18 @@ def load_efficientnet_b0(verbose=True):
     weights = models.EfficientNet_B0_Weights.DEFAULT
     preprocess = weights.transforms()
     model = models.efficientnet_b0(weights=weights)
+    model.eval()
+    return model, preprocess
+
+def load_efficientnet_b4(verbose=True):
+    """
+    Loads EfficientNet-B4 pretrained on ImageNet-1K.
+    """
+    if verbose:
+        print("Loading EfficientNet-B4 (Pretrained: ImageNet-1K)...")
+    weights = models.EfficientNet_B4_Weights.DEFAULT
+    preprocess = weights.transforms()
+    model = models.efficientnet_b4(weights=weights)
     model.eval()
     return model, preprocess
 
@@ -127,33 +141,36 @@ def load_resnet34(verbose=True):
     return model, preprocess
 
     
-def load_convnext_base():
+def load_convnext_base(verbose=True):
     """
     Loads ConvNeXt-Base pretrained on ImageNet-1K.
     """
-    print("Loading ConvNeXt-Base (Pretrained: ImageNet-1K)...")
+    if verbose:
+        print("Loading ConvNeXt-Base (Pretrained: ImageNet-1K)...")
     weights = models.ConvNeXt_Base_Weights.DEFAULT
     preprocess = weights.transforms()
     model = models.convnext_base(weights=weights)
     model.eval()
     return model, preprocess
 
-def load_wideresnet50_2():
+def load_wideresnet50_2(verbose=True):
     """
     Loads Wide ResNet-50-2 pretrained on ImageNet-1K.
     """
-    print("Loading Wide ResNet-50-2 (Pretrained: ImageNet-1K)...")
+    if verbose:
+        print("Loading Wide ResNet-50-2 (Pretrained: ImageNet-1K)...")
     weights = models.Wide_ResNet50_2_Weights.DEFAULT
     preprocess = weights.transforms()
     model = models.wide_resnet50_2(weights=weights)
     model.eval()
     return model, preprocess
 
-def load_resnext50():
+def load_resnext50(verbose=True):
     """
     Loads ResNeXt-50 pretrained on ImageNet-1K.
     """
-    print("Loading ResNeXt-50 (Pretrained: ImageNet-1K)...")
+    if verbose:
+        print("Loading ResNeXt-50 (Pretrained: ImageNet-1K)...")
     weights = models.ResNeXt50_32X4D_Weights.DEFAULT
     preprocess = weights.transforms()
     model = models.resnext50_32x4d(weights=weights)
