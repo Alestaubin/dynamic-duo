@@ -19,6 +19,37 @@ already a legitimate rung of the Section-3 ladder, see
 src.reliability.calibration.identity), so it's directly comparable to the
 other methods as the "no calibration" reference row.
 
+Why sel_acc alone is misleading (and what bal_sel_acc / gap_bias fix)
+----------------------------------------------------------------------
+Plain `sel_acc` (does sign(score_l - score_s) match sign(acc_l - acc_s)?)
+looks good for a proxy that's simply, structurally biased toward whichever
+model is better ON AVERAGE across the eval set, even if it never actually
+tracks BATCH-level swaps in relative reliability — because that global
+favorite is right most of the time anyway. Concretely: ac_mc/nuclear_norm
+with identity calibration scored ~0.94-0.95 sel_acc in an earlier sweep, but
+an end-to-end run showed their gate weight w_l NEVER dropped below 0.5 in
+ANY corruption, including ones where the small model was actually more
+accurate — the raw confidence scores of a ViT and a ResNet just live on
+different scales, exactly the problem Section 3 calibration exists to fix,
+and sel_acc's sign-only check can't see it because the larger model wins
+often enough overall to mask it.
+
+Two additions catch this:
+  - bal_sel_acc: sel_acc computed separately on "large is actually better"
+    and "small is actually better" chunks, then averaged (like balanced
+    accuracy under class imbalance). A proxy that's just biased toward one
+    model scores near 1.0 on its favorite's chunks and near 0.0 on the
+    other's; a genuinely batch-reactive proxy scores well on both.
+  - gap_bias / gap_corr: fit score_gap = slope*acc_gap + gap_bias (both
+    SIGNED, continuous — not just their signs) across chunks. gap_bias is
+    the score gap the calibration predicts when the two models are equally
+    accurate — should be ~0; a large nonzero value is the same "always
+    favors one model" signature caught more directly (in the units the
+    Section-5 gate actually consumes) than bal_sel_acc's binary view.
+    gap_corr is the Pearson correlation of the two signed gaps — whether
+    the score's MAGNITUDE (not just sign) tracks the true relative
+    advantage, which is what a smooth sigmoid gate needs, unlike sel_acc.
+
 Usage
 -----
     python scripts/sweep_proxies.py --config cfgs/dynamic_duo_config.yaml \
@@ -51,6 +82,9 @@ _SOURCE_FIT_KINDS = {"atc", "prototype", "cot"}
 _TABLE_COLUMNS = [
     "proxy_kind", "calib_method", "proxy_batch_size", "n",
     "sel_acc", "sel_correct", "sel_total",
+    "bal_sel_acc", "sel_acc_large_better", "sel_acc_small_better",
+    "n_large_better", "n_small_better",
+    "gap_bias", "gap_slope", "gap_corr",
     "l_r2", "l_pearson_r", "l_spearman_rho",
     "s_r2", "s_pearson_r", "s_spearman_rho",
 ]
@@ -73,7 +107,13 @@ def _corr_stats(xs: list[float], ys: list[float]) -> dict:
 
 def _selection_accuracy(score_l, score_s, acc_l, acc_s) -> tuple[float, int, int]:
     """Fraction of non-tie chunks where sign(score_l - score_s) matches
-    sign(acc_l - acc_s). Returns (accuracy, n_correct, n_total_non_tie)."""
+    sign(acc_l - acc_s). Returns (accuracy, n_correct, n_total_non_tie).
+
+    Misleading on its own when one model is better on AVERAGE across most
+    chunks: a proxy that just always favors that model scores well here
+    without ever tracking batch-level swaps — see _balanced_selection_accuracy
+    and _gap_stats, which catch that failure mode (see module docstring).
+    """
     correct = total = 0
     for sl, ss, al, as_ in zip(score_l, score_s, acc_l, acc_s):
         if abs(al - as_) < 1e-9:
@@ -83,6 +123,64 @@ def _selection_accuracy(score_l, score_s, acc_l, acc_s) -> tuple[float, int, int
             correct += 1
     acc = correct / total if total > 0 else float("nan")
     return acc, correct, total
+
+
+def _balanced_selection_accuracy(score_l, score_s, acc_l, acc_s) -> dict:
+    """sel_acc computed separately on chunks where large is actually better
+    vs where small is actually better, then averaged — like balanced
+    accuracy under class imbalance. A proxy that's simply biased toward one
+    model (rather than genuinely batch-reactive) scores near 1.0 on that
+    model's chunks and near 0.0 on the other's, which the plain (pooled)
+    sel_acc can't see if one regime dominates the eval set.
+    """
+    correct_l = total_l = 0
+    correct_s = total_s = 0
+    for sl, ss, al, as_ in zip(score_l, score_s, acc_l, acc_s):
+        if abs(al - as_) < 1e-9:
+            continue
+        pred_large_better = sl > ss
+        if al > as_:
+            total_l += 1
+            correct_l += int(pred_large_better)
+        else:
+            total_s += 1
+            correct_s += int(not pred_large_better)
+    acc_l_better = correct_l / total_l if total_l > 0 else float("nan")
+    acc_s_better = correct_s / total_s if total_s > 0 else float("nan")
+    balanced = (
+        (acc_l_better + acc_s_better) / 2
+        if total_l > 0 and total_s > 0 else float("nan")
+    )
+    return {
+        "bal_sel_acc": balanced,
+        "sel_acc_large_better": acc_l_better,
+        "sel_acc_small_better": acc_s_better,
+        "n_large_better": total_l,
+        "n_small_better": total_s,
+    }
+
+
+def _gap_stats(cal_l, cal_s, acc_l, acc_s) -> dict:
+    """Fit score_gap = slope*acc_gap + gap_bias across chunks (both signed,
+    continuous, not just their signs) plus their Pearson correlation.
+
+    gap_bias is the score gap the calibration predicts when the two models
+    are EQUALLY accurate — should be ~0; a large nonzero value means the
+    score structurally favors one model regardless of who's actually
+    better, exactly the failure a smooth sigmoid gate is vulnerable to (it
+    consumes the gap's magnitude, not sel_acc's sign-only view of it).
+    gap_corr is how well the gap's MAGNITUDE tracks the true advantage.
+    """
+    nan_result = {"gap_bias": float("nan"), "gap_slope": float("nan"), "gap_corr": float("nan")}
+    if len(cal_l) < 3:
+        return nan_result
+    score_gap = np.asarray(cal_l, dtype=np.float64) - np.asarray(cal_s, dtype=np.float64)
+    acc_gap = np.asarray(acc_l, dtype=np.float64) - np.asarray(acc_s, dtype=np.float64)
+    if acc_gap.std() < 1e-8 or score_gap.std() < 1e-8:
+        return nan_result
+    slope, bias = np.polyfit(acc_gap, score_gap, 1)
+    corr = float(np.corrcoef(score_gap, acc_gap)[0, 1])
+    return {"gap_bias": float(bias), "gap_slope": float(slope), "gap_corr": corr}
 
 
 def _chunks(n: int, size: int) -> list[slice]:
@@ -133,7 +231,10 @@ def main():
     parser.add_argument("--eval_num_samples", type=int, default=None,
                         help="Cap on samples per eval (corruption, severity) stream.")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--sort_by", type=str, default="sel_acc", choices=_TABLE_COLUMNS)
+    parser.add_argument("--sort_by", type=str, default="bal_sel_acc", choices=_TABLE_COLUMNS,
+                        help="Defaults to bal_sel_acc rather than sel_acc, since sel_acc "
+                             "alone can be fooled by a proxy that's just biased toward "
+                             "whichever model is better on average (see module docstring).")
     parser.add_argument("--csv_path", type=str, default=None,
                         help="If given, write the full comparison table to this CSV path.")
     args = parser.parse_args()
@@ -242,11 +343,15 @@ def main():
                 acc_s_list = [acc_s for r_l, r_s, acc_l, acc_s in raw]
 
                 sel_acc, sel_correct, sel_total = _selection_accuracy(cal_l, cal_s, acc_l_list, acc_s_list)
+                bal_stats = _balanced_selection_accuracy(cal_l, cal_s, acc_l_list, acc_s_list)
+                gap_stats = _gap_stats(cal_l, cal_s, acc_l_list, acc_s_list)
                 l_stats = _corr_stats(cal_l, acc_l_list)
                 s_stats = _corr_stats(cal_s, acc_s_list)
                 rows.append({
                     "proxy_kind": pk, "calib_method": cm, "proxy_batch_size": pbs, "n": len(raw),
                     "sel_acc": sel_acc, "sel_correct": sel_correct, "sel_total": sel_total,
+                    **bal_stats,
+                    **gap_stats,
                     "l_r2": l_stats["r2"], "l_pearson_r": l_stats["pearson_r"], "l_spearman_rho": l_stats["spearman_rho"],
                     "s_r2": s_stats["r2"], "s_pearson_r": s_stats["pearson_r"], "s_spearman_rho": s_stats["spearman_rho"],
                 })
@@ -266,17 +371,29 @@ def main():
 
 def _print_table(rows: list[dict]) -> None:
     header = (f"{'proxy_kind':<12} {'calib_method':<10} {'pbs':>6} {'n':>5}  "
-              f"{'sel_acc':>8} ({'ok':>4}/{'tot':>4})   "
+              f"{'sel_acc':>8}  {'bal_sel':>8} ({'L':>6}/{'S':>6})  "
+              f"{'gap_bias':>9} {'gap_corr':>9}   "
               f"{'l_R2':>6} {'l_r':>6} {'l_rho':>6}   {'s_R2':>6} {'s_r':>6} {'s_rho':>6}")
     print("\n" + header)
     print("-" * len(header))
     for r in rows:
         print(
             f"{r['proxy_kind']:<12} {r['calib_method']:<10} {r['proxy_batch_size']:>6} {r['n']:>5}  "
-            f"{_fmt(r['sel_acc'], 8)} ({r['sel_correct']:>4}/{r['sel_total']:>4})   "
+            f"{_fmt(r['sel_acc'], 8)}  {_fmt(r['bal_sel_acc'], 8)} "
+            f"({_fmt(r['sel_acc_large_better'], 6)}/{_fmt(r['sel_acc_small_better'], 6)})  "
+            f"{_fmt(r['gap_bias'], 9)} {_fmt(r['gap_corr'], 9)}   "
             f"{_fmt(r['l_r2'])} {_fmt(r['l_pearson_r'])} {_fmt(r['l_spearman_rho'])}   "
             f"{_fmt(r['s_r2'])} {_fmt(r['s_pearson_r'])} {_fmt(r['s_spearman_rho'])}"
         )
+    print(
+        "\nsel_acc = pooled selection accuracy (can be misleading, see module docstring).  "
+        "bal_sel = balanced selection accuracy, averaged over (L=large-actually-better, "
+        "S=small-actually-better) chunks — the more trustworthy target.  "
+        "gap_bias = predicted score gap when models are equally accurate (want ~0; large "
+        "nonzero = structurally favors one model).  gap_corr = correlation of the signed "
+        "score gap with the signed true accuracy gap (want high — this is what the "
+        "Section-5 sigmoid gate actually consumes)."
+    )
 
 
 if __name__ == "__main__":

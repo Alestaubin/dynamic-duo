@@ -1,0 +1,40 @@
+[
+    {
+        "name": "fixed_ts",
+        "calibration_mode": "fixed_ts",
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "oracle_ts",
+        "calibration_mode": "oracle_ts"
+    },
+    {
+        "name": "coca_ts",
+        "calibration_mode": "coca",
+        "coca_bs": 128
+    },
+    {
+        "name": "proxy_weighted_ac_mc",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "ac_mc",
+        "calib_method": "identity",
+        "proxy_batch_size": 512,
+        "filter_kind": "ema",
+        "filter_kwargs": {"alpha": 0.5},
+        "pool": "linear",
+        "fit_beta": true,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "proxy_weighted_nuclear_norm",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "proxy_batch_size": 512,
+        "filter_kind": "ema",
+        "filter_kwargs": {"alpha": 0.5},
+        "pool": "linear",
+        "fit_beta": true,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    }
+]

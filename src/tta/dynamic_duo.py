@@ -378,7 +378,7 @@ def collect_logits(large, large_preprocess, small, small_preprocess, data_loader
 
 
 def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None,
-                          use_wandb=False, group=None, run_name=None):
+                          use_wandb=False, group=None, run_name=None, on_corruption_start=None):
     """Runs duo over cfg['EVAL']'s corruptions/severities; returns results_rows
     (one dict per corruption/severity, plus a final "average" row).
 
@@ -387,6 +387,11 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
     together in the W&B UI. run_name overrides the auto-generated wandb run
     name — useful for the same reason (a short, consistent label per config
     rather than the verbose default).
+
+    on_corruption_start(corruption_type, severity), if given, is called once
+    per stream right before duo.reset() — an extension point for callers
+    that need to know corruption boundaries without re-implementing this
+    loop (e.g. a logits cache keyed per corruption/severity).
     """
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
@@ -401,6 +406,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             project=wandb_project,
             name=run_name,
             group=group,
+            tags=[cfg["LARGE"]["NAME"], cfg["SMALL"]["NAME"]],
             config={
                 "mode": duo.mode,
                 "calibration_mode": duo.calibration_mode,
@@ -431,6 +437,8 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
     for severity in cfg["EVAL"]["SEVERITIES"]:
         for corruption_type in cfg["EVAL"]["CORRUPTIONS"]:
             logger.info(f"Evaluating corruption {corruption_type} severity {severity}")
+            if on_corruption_start is not None:
+                on_corruption_start(corruption_type, severity)
             try:
                 duo.reset()
                 logger.info("resetting model")

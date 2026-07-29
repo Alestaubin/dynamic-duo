@@ -251,6 +251,7 @@ def fit_beta(
         for imgs, labels in loader:
             xl = torch.stack([large_preprocess(img) for img in imgs]).to(device)
             xs = torch.stack([small_preprocess(img) for img in imgs]).to(device)
+            calibrator.set_labels(labels)  # oracle proxy_kind requires labels to score at all
             with torch.no_grad():
                 zl = large_model(xl)
                 zs = small_model(xs)
