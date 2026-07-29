@@ -377,11 +377,21 @@ def collect_logits(large, large_preprocess, small, small_preprocess, data_loader
     return torch.cat(all_z_l), torch.cat(all_z_s), torch.cat(all_labels)
 
 
-def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None, use_wandb=False):
+def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None,
+                          use_wandb=False, group=None, run_name=None):
+    """Runs duo over cfg['EVAL']'s corruptions/severities; returns results_rows
+    (one dict per corruption/severity, plus a final "average" row).
+
+    group is passed straight to wandb.init(group=...) so multiple calls (e.g.
+    from a driver script comparing several calibrators) can be grouped
+    together in the W&B UI. run_name overrides the auto-generated wandb run
+    name — useful for the same reason (a short, consistent label per config
+    rather than the verbose default).
+    """
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
     proxy_kind = getattr(duo.joint_calibrator, "proxy_kind", None)
-    run_name = (
+    run_name = run_name or (
         f"{duo.mode} | {calibration_name}{' normalized' if duo.norm_logits else ' '}"
         f"{' proxy_kind: ' + proxy_kind if proxy_kind else ' '}"
         f"| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
@@ -390,6 +400,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
         wandb_run = wandb.init(
             project=wandb_project,
             name=run_name,
+            group=group,
             config={
                 "mode": duo.mode,
                 "calibration_mode": duo.calibration_mode,
@@ -518,7 +529,10 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                 table.add_data(*[row[c] for c in cols])
             table.add_data(*[avg_row[c] for c in cols])
             wandb_run.log({"summary/results": table})
+        results_rows.append(avg_row)
 
     if wandb_run is not None:
         wandb_run.finish()
+
+    return results_rows
 

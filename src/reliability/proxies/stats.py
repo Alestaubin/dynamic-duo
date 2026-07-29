@@ -122,33 +122,51 @@ class ProxyStats:
 
 # ─── Feature extraction via forward hooks ────────────────────────────────────
 
-def _hook_spec(model: nn.Module, model_name: str):
-    """Return (layer_to_hook, output_transform) for penultimate feature capture.
+# Attribute names torchvision classification models use for their final
+# Linear layer: resnet/resnext/wide_resnet -> fc; efficientnet/convnext/
+# densenet/mobilenet/vgg -> classifier (a Sequential ending in Linear);
+# vit -> heads; swin -> head.
+_CLASSIFIER_ATTRS = ("fc", "classifier", "heads", "head")
 
-    vit_b_16  : encoder output (N, seq, dim) → CLS token (N, dim=768)
-    resnet50  : avgpool output (N, C, 1, 1)  → flatten (N, C=2048)
-    """
-    name = model_name.lower()
-    if "vit" in name:
-        return model.encoder, lambda out: out[:, 0, :]
-    if "resnet" in name:
-        return model.avgpool, lambda out: out.flatten(1)
+
+def _find_final_linear(model: nn.Module, model_name: str) -> nn.Linear:
+    """Locate a model's final classification Linear layer by checking common
+    torchvision attribute names, descending into a Sequential to its last
+    Linear submodule if the attribute isn't a bare Linear itself."""
+    for attr in _CLASSIFIER_ATTRS:
+        module = getattr(model, attr, None)
+        if isinstance(module, nn.Linear):
+            return module
+        if isinstance(module, nn.Sequential):
+            linears = [m for m in module if isinstance(m, nn.Linear)]
+            if linears:
+                return linears[-1]
     raise ValueError(
-        f"No feature-hook spec for model '{model_name}'. Add it to _hook_spec()."
+        f"Could not locate a final Linear classifier on '{model_name}' "
+        f"(checked attributes: {_CLASSIFIER_ATTRS}). Add explicit support "
+        f"in _find_final_linear()."
     )
 
 
 class FeatureExtractor:
-    """Wraps a model; captures penultimate features alongside logits via a forward hook."""
+    """Wraps a model; captures the penultimate feature alongside logits via a
+    forward PRE-hook on the model's final Linear classifier.
+
+    Architecture-agnostic by construction: whatever tensor a model's own
+    final Linear layer consumes IS the penultimate feature — a pooled/
+    flattened CNN feature map (resnet, efficientnet, convnext, densenet,
+    mobilenet, ...) or a transformer's CLS token (vit, swin, ...) alike — so
+    there is no need to special-case each architecture's internal pooling.
+    """
 
     def __init__(self, model: nn.Module, model_name: str):
         self.model = model
         self._feats: torch.Tensor | None = None
-        layer, self._transform = _hook_spec(model, model_name)
-        self._handle = layer.register_forward_hook(self._capture)
+        linear = _find_final_linear(model, model_name)
+        self._handle = linear.register_forward_pre_hook(self._capture)
 
-    def _capture(self, module, inp, out):
-        self._feats = self._transform(out).detach()
+    def _capture(self, module, inputs):
+        self._feats = inputs[0].detach()
 
     @torch.no_grad()
     def __call__(self, x: torch.Tensor):
