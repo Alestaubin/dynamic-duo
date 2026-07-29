@@ -1,0 +1,48 @@
+[
+    {
+        "name": "oracle_ts",
+        "calibration_mode": "oracle_ts"
+    },
+    {
+        "name": "coca_ts",
+        "calibration_mode": "coca",
+        "coca_bs": 128
+    },
+    {
+        "name": "proxy_weighted_cot_platt_1024",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "cot",
+        "calib_map": "resnet50_efficientnet_b0_cot_platt_dev",
+        "calib_method": "platt",
+        "proxy_batch_size": 1024,
+        "filter_kind": "ema",
+        "filter_kwargs": {"alpha": 0.5},
+        "pool": "linear",
+        "fit_beta": true
+    },
+    {
+        "name": "proxy_weighted_cot_linear_1024",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "cot",
+        "calib_map": "resnet50_efficientnet_b0_cot_linear_dev",
+        "calib_method": "linear",
+        "proxy_batch_size": 1024,
+        "filter_kind": "ema",
+        "filter_kwargs": {"alpha": 0.5},
+        "pool": "linear",
+        "fit_beta": true
+    },
+    {
+        "name": "proxy_weighted_prototype_beta_1024",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "prototype",
+        "proto_metric": "cosine",
+        "calib_map": "resnet50_efficientnet_b0_prototype_beta_dev",
+        "calib_method": "beta",
+        "proxy_batch_size": 1024,
+        "filter_kind": "ema",
+        "filter_kwargs": {"alpha": 0.5},
+        "pool": "linear",
+        "fit_beta": true
+    }
+]

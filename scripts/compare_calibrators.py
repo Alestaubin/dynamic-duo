@@ -172,10 +172,13 @@ def _load_run_configs(path: str) -> list[dict]:
     return run_configs
 
 
-# Curated columns for the console table (the wandb summary Table gets everything).
+# evaluate_dynamic_duo's results_rows now only carry accuracy/ece/nll/entropy
+# per model (duo/large/small) — this is just the console table's column
+# order/subset, the wandb summary Table (see _log_summary_to_wandb) logs
+# every column that's there.
 _SUMMARY_DISPLAY_COLS = [
     "duo/accuracy", "large/accuracy", "small/accuracy",
-    "duo/nll", "duo/ece",
+    "duo/ece", "duo/nll", "duo/entropy",
 ]
 
 
@@ -262,7 +265,9 @@ def main():
     parser.add_argument("--steps", type=int, default=1)
     parser.add_argument("--num_samples", type=int, default=5000)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--wandb_project", type=str, default="dynamic-duos")
+    parser.add_argument("--wandb_project", type=str, default="proxy-weighted-duo-calibration",
+                        help="Dedicated W&B project for these filtered-proxy soft-weighting "
+                             "comparisons, separate from other dynamic-duos experiments.")
     parser.add_argument("--group", type=str, default=None,
                         help="Shared wandb group tag for all runs in this comparison. "
                              "Defaults to a timestamp so repeated invocations don't collide.")

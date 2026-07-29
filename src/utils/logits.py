@@ -23,6 +23,7 @@ def get_model_logits(
     tent_mode: bool = False,
     norm_type: str = None,
     seed: int | None = None,
+    num_samples: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Return (logits, labels) for the given model and data split.
@@ -30,16 +31,25 @@ def get_model_logits(
     Pass corruption=None for ImageNet val; otherwise ImageNet-C with the
     given corruption type and severity level.  Results are saved under
     cache_dir/<model_name>/<split_key>.pt so subsequent calls are instant.
+
+    num_samples/seed must match between the large- and small-model calls for
+    the same corruption/severity — they select and order the ImageNet-C
+    subset, so a mismatch (or a stale cache entry from a different
+    num_samples/seed) desyncs the two models' labels.
     """
     if tent_mode and norm_type is None:
         raise ValueError("norm_type must be specified when tent_mode is True")
-    
+
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     split_key = "val" if corruption is None else f"{corruption}_{severity}"
     if tent_mode:
         split_key += "_tent_mode"
+    if num_samples is not None:
+        split_key += f"_n{num_samples}"
+    if seed is not None:
+        split_key += f"_seed{seed}"
     cache_path = os.path.join(cache_dir, model_name, f"{split_key}.pt")
 
     if os.path.exists(cache_path):
@@ -60,7 +70,7 @@ def get_model_logits(
         loader = load_imagenetC(
             test_dir, severities=severity, corruption_types=[corruption],
             device=device, batch_size=batch_size, num_workers=num_workers,
-            seed=seed,
+            seed=seed, num_samples=num_samples,
         )
     else:
         ds = datasets.ImageFolder(val_dir if corruption is None

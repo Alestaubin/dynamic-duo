@@ -1,10 +1,9 @@
-import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, softmax_entropy, collect_params, configure_model_frozen
 from src.utils.data import load_imagenetC
-from src.utils.metrics import get_metrics_dict, get_intersection_metrics
+from src.utils.metrics import get_metrics_dict
 from src.utils.model import _preprocess_batch
 from src.utils.logit_transforms import logit_pnorm, normalize
 import logging
@@ -460,6 +459,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                     batch_size=cfg["BS"], num_workers=cfg["WORKERS"],
                     corruption=corruption_type, severity=severity, device=device,
                     tent_mode=True, norm_type=cfg["LARGE"]["NORM"],
+                    seed=seed, num_samples=num_samples,
                 )
                 z_s, labels_s = get_model_logits(
                     model_name=cfg["SMALL"]["NAME"], val_dir=cfg["VAL_DIR"],
@@ -467,6 +467,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                     batch_size=cfg["BS"], num_workers=cfg["WORKERS"],
                     corruption=corruption_type, severity=severity, device=device,
                     tent_mode=True, norm_type=cfg["SMALL"]["NORM"],
+                    seed=seed, num_samples=num_samples,
                 )
                 assert torch.equal(labels_l, labels_s), "Logit collection mismatch: large and small labels differ"
                 cal = duo.joint_calibrator
@@ -485,13 +486,21 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             loader = load_imagenetC(cfg["TEST_DIR"], **loader_kwargs)
             probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
             metrics_by_model = {name: get_metrics_dict(p, labels) for name, p in probs_dict.items()}
-            intersection_metrics = get_intersection_metrics(probs_dict, labels)
+            # Average entropy per model for this corruption: run_duo already
+            # accumulates it batch-by-batch in duo._diag (softmax_entropy),
+            # so no extra forward pass is needed to report it alongside
+            # accuracy/ece/nll.
+            entropy_by_model = {
+                name: (duo._diag[name]["ent_sum"] / duo._diag[name]["n"] if duo._diag[name]["n"] > 0 else float("nan"))
+                for name in ("large", "small", "duo")
+            }
 
-            corr_stats = {}
+            # Still call report_and_reset_corruption_stats for its console
+            # print + accumulator-clearing side effect (needed every
+            # corruption regardless of what gets logged to wandb) — just
+            # don't propagate its correlation-diagnostic numbers to wandb.
             if hasattr(duo.joint_calibrator, "report_and_reset_corruption_stats"):
-                corr_stats = duo.joint_calibrator.report_and_reset_corruption_stats(
-                    f"{corruption_type}/s{severity}"
-                )
+                duo.joint_calibrator.report_and_reset_corruption_stats(f"{corruption_type}/s{severity}")
 
             duo_acc = metrics_by_model["duo"]["accuracy"]
             large_acc = metrics_by_model["large"]["accuracy"]
@@ -499,25 +508,26 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             print(f"{corruption_type}/s{severity}: "
                   f"duo={duo_acc:.4f}  large={large_acc:.4f}  small={small_acc:.4f}")
 
+            # Only the 4 metrics we actually plot: accuracy, ece, nll, entropy —
+            # per model (duo/large/small). Everything else get_metrics_dict/
+            # get_intersection_metrics/report_and_reset_corruption_stats can
+            # compute is still available in the console output, just not logged.
             if wandb_run is not None:
                 wandb_log = {}
                 for model_name, metrics in metrics_by_model.items():
-                    wandb_log.update({f"{prefix}{model_name}/{k}": v for k, v in metrics.items()})
-                wandb_log.update({f"{prefix}intersection/{k}": v for k, v in intersection_metrics.items()})
-                if duo.calibration_mode == "oracle_ts":
-                    wandb_log[f"{prefix}oracle/Tl"] = cal.Tl.item()
-                    wandb_log[f"{prefix}oracle/Ts"] = cal.Ts.item()
-                if corr_stats and corr_stats["n"] > 0:
-                    for key, v in corr_stats.items():
-                        if key != "n" and isinstance(v, (int, float)) and not math.isnan(v):
-                            wandb_log[f"{prefix}proxy/{key}"] = v
+                    wandb_log[f"{prefix}{model_name}/accuracy"] = metrics["accuracy"]
+                    wandb_log[f"{prefix}{model_name}/ece"] = metrics["ece"]
+                    wandb_log[f"{prefix}{model_name}/nll"] = metrics["nll"]
+                    wandb_log[f"{prefix}{model_name}/entropy"] = entropy_by_model[model_name]
                 wandb_run.log(wandb_log)
 
             logger.info(f"Results for {corruption_type} severity {severity}: {metrics_by_model['duo']}")
             row = {"mode": duo.mode, "corruption": corruption_type, "severity": severity}
             for model_name, metrics in metrics_by_model.items():
-                row.update({f"{model_name}/{k}": v for k, v in metrics.items()})
-            row.update({f"intersection/{k}": v for k, v in intersection_metrics.items()})
+                row[f"{model_name}/accuracy"] = metrics["accuracy"]
+                row[f"{model_name}/ece"] = metrics["ece"]
+                row[f"{model_name}/nll"] = metrics["nll"]
+                row[f"{model_name}/entropy"] = entropy_by_model[model_name]
             results_rows.append(row)
 
     if results_rows:
