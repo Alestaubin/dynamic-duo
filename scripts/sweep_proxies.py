@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import csv as csv_module
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -236,7 +237,8 @@ def main():
                              "alone can be fooled by a proxy that's just biased toward "
                              "whichever model is better on average (see module docstring).")
     parser.add_argument("--csv_path", type=str, default=None,
-                        help="If given, write the full comparison table to this CSV path.")
+                        help="Where to write the full comparison table. Defaults to "
+                             "out/proxy_sweep_<large>_<small>_<timestamp>.csv.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -247,6 +249,10 @@ def main():
     small_model, small_preprocess = get_model(config["SMALL"]["NAME"])
     large_model = large_model.to(device).eval()
     small_model = small_model.to(device).eval()
+
+    if args.csv_path is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.csv_path = f"out/proxy_sweep_{config['LARGE']['NAME']}_{config['SMALL']['NAME']}_{timestamp}.csv"
 
     # One source-fit pass covering every requested proxy kind at once (fit_source
     # is a no-op for stateless proxies) — never repeated per proxy_kind.
