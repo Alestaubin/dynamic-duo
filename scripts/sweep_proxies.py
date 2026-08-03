@@ -256,6 +256,17 @@ def main():
     parser.add_argument("--csv_path", type=str, default=None,
                         help="Where to write the full comparison table. Defaults to "
                              "out/proxy_sweep_<large>_<small>_<timestamp>.csv.")
+    parser.add_argument("--log_wandb", action="store_true",
+                        help="Log the full sweep as one wandb.Table (all rows, every "
+                             "_TABLE_COLUMNS field) — wandb's table UI lets you click any "
+                             "column header (bal_sel_acc, gap_corr, sel_acc, ...) to sort "
+                             "interactively, so you aren't limited to --sort_by's one ranking "
+                             "or the console's two fixed tables.")
+    parser.add_argument("--wandb_project", type=str, default="proxy-weighted-duo-calibration")
+    parser.add_argument("--wandb_group", type=str, default=None,
+                        help="Defaults to a timestamp. Always prefixed with the duo's model "
+                             "names (see duo_tag below) so two duos' sweeps can never mix in "
+                             "the same wandb group.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -443,10 +454,26 @@ def main():
             writer.writerows(rows)
         print(f"\nWrote {len(rows)} rows to {path}")
 
+    if args.log_wandb:
+        import wandb
+        duo_tag = f"{config['LARGE']['NAME']}+{config['SMALL']['NAME']}"
+        group = f"{duo_tag}__{args.wandb_group or datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        run = wandb.init(
+            project=args.wandb_project, group=group, name=f"proxy_sweep_{duo_tag}",
+            job_type="proxy_sweep", tags=[config["LARGE"]["NAME"], config["SMALL"]["NAME"]],
+        )
+        table = wandb.Table(columns=_TABLE_COLUMNS)
+        for r in rows:
+            table.add_data(*[r[c] for c in _TABLE_COLUMNS])
+        run.log({"proxy_sweep": table})
+        run.finish()
+        print(f"\nLogged {len(rows)} rows to wandb project '{args.wandb_project}' "
+              f"(group='{group}') — click any column header in the table UI to sort by it.")
+
 
 def _print_table(rows: list[dict], title: str | None = None) -> None:
     header = (f"{'proxy_kind':<12} {'calib_method':<10} {'pbs':>6} {'n':>5}  "
-              f"{'sel_acc':>8}  {'bal_sel':>8} ({'L':>6}/{'S':>6})  "
+              f"{'sel_acc':>8}  {'bal_sel':>8} ({'L':>6}/{'S':>6}) ({'nL':>4}/{'nS':>4})  "
               f"{'gap_bias':>9} {'gap_corr':>9}   "
               f"{'l_R2':>6} {'l_r':>6} {'l_rho':>6}   {'s_R2':>6} {'s_r':>6} {'s_rho':>6}")
     if title:
@@ -457,7 +484,8 @@ def _print_table(rows: list[dict], title: str | None = None) -> None:
         print(
             f"{r['proxy_kind']:<12} {r['calib_method']:<10} {r['proxy_batch_size']:>6} {r['n']:>5}  "
             f"{_fmt(r['sel_acc'], 8)}  {_fmt(r['bal_sel_acc'], 8)} "
-            f"({_fmt(r['sel_acc_large_better'], 6)}/{_fmt(r['sel_acc_small_better'], 6)})  "
+            f"({_fmt(r['sel_acc_large_better'], 6)}/{_fmt(r['sel_acc_small_better'], 6)}) "
+            f"({r['n_large_better']:>4}/{r['n_small_better']:>4})  "
             f"{_fmt(r['gap_bias'], 9)} {_fmt(r['gap_corr'], 9)}   "
             f"{_fmt(r['l_r2'])} {_fmt(r['l_pearson_r'])} {_fmt(r['l_spearman_rho'])}   "
             f"{_fmt(r['s_r2'])} {_fmt(r['s_pearson_r'])} {_fmt(r['s_spearman_rho'])}"
@@ -465,7 +493,10 @@ def _print_table(rows: list[dict], title: str | None = None) -> None:
     print(
         "\nsel_acc = pooled selection accuracy (can be misleading, see module docstring).  "
         "bal_sel = balanced selection accuracy, averaged over (L=large-actually-better, "
-        "S=small-actually-better) chunks — the more trustworthy target.  "
+        "S=small-actually-better) chunks — the more trustworthy target. (nL/nS) are the chunk "
+        "COUNTS behind L/S — bal_sel is nan (not 0) when one side has zero chunks (e.g. a large "
+        "proxy_batch_size can average away every chance the small model had to actually win a "
+        "chunk), which is an honest 'no data' rather than a computed score of 0.  "
         "gap_bias = predicted score gap when models are equally accurate (want ~0; large "
         "nonzero = structurally favors one model).  gap_corr = correlation of the signed "
         "score gap with the signed true accuracy gap (want high — this is what the "
