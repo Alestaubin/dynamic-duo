@@ -69,12 +69,12 @@ from pathlib import Path
 import numpy as np
 import torch
 from scipy.stats import pearsonr, spearmanr
-from tqdm import tqdm
 
 from src.utils.data import load_config, load_imagenetC
 from src.utils.model import get_model
+from src.utils.stream_cache import duo_cache_dir, stream_key, collect_stream, load_or_collect_stream
 from src.reliability.proxies.stats import FeatureExtractor, build_proxy_stats, ProxyStats
-from src.reliability.calibration.maps import collect_records, fit_calibration_maps, CalibrationMaps
+from src.reliability.calibration.maps import make_record, fit_calibration_maps, CalibrationMaps
 
 _ALL_PROXY_KINDS = ["nuclear_norm", "atc", "prototype", "ac_mc", "cot"]
 _ALL_CALIB_METHODS = ["identity", "linear", "platt", "beta", "isotonic"]
@@ -188,19 +188,22 @@ def _chunks(n: int, size: int) -> list[slice]:
     return [slice(i, min(i + size, n)) for i in range(0, n, size)]
 
 
-@torch.no_grad()
-def _collect_stream(loader, preprocess_l, preprocess_s, ext_l, ext_s, device):
-    """Full (z_l, z_s, f_l, f_s, labels) for one loader, concatenated."""
-    zl_all, zs_all, fl_all, fs_all, labels_all = [], [], [], [], []
-    for imgs, labels in tqdm(loader, desc="collecting", leave=False):
-        xl = torch.stack([preprocess_l(img) for img in imgs]).to(device)
-        xs = torch.stack([preprocess_s(img) for img in imgs]).to(device)
-        zl, fl = ext_l(xl)
-        zs, fs = ext_s(xs)
-        zl_all.append(zl.cpu()); zs_all.append(zs.cpu())
-        fl_all.append(fl.cpu()); fs_all.append(fs.cpu())
-        labels_all.append(labels)
-    return (torch.cat(zl_all), torch.cat(zs_all), torch.cat(fl_all), torch.cat(fs_all), torch.cat(labels_all))
+def _records_from_raw(cfg_l, cfg_s, z_l, z_s, f_l, f_s, labels, batch_size, corruption, severity):
+    """Rebuild BatchRecords from cached raw (z, f, labels), one per original
+    batch_size-sized chunk (matching the DataLoader batches make_record would
+    have seen live — see _chunks). Always rescored fresh against the CURRENT
+    cfg_l/cfg_s: a cached record must never be reused across runs that fit
+    different proxies, or a newly-requested proxy_kind would be silently
+    missing from a stale record's raw_l/raw_s dict."""
+    n = z_l.shape[0]
+    return [
+        make_record(
+            cfg_l, cfg_s,
+            z_l[sl], z_s[sl], f_l[sl], f_s[sl], labels[sl],
+            corruption, severity,
+        )
+        for sl in _chunks(n, batch_size)
+    ]
 
 
 def _fmt(v: float, w: int = 6, d: int = 3) -> str:
@@ -232,6 +235,20 @@ def main():
     parser.add_argument("--eval_num_samples", type=int, default=None,
                         help="Cap on samples per eval (corruption, severity) stream.")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--use_cache", action="store_true",
+                        help="Cache the (z_l, z_s, f_l, f_s, labels) collected for the "
+                             "calibration stream and each eval (corruption, severity) stream "
+                             "under cache/stream_cache/<large>+<small>/ (see src.utils."
+                             "stream_cache — automatic, duo-specific, no directory to pick), "
+                             "keyed by corruptions/severities/num_samples/seed — a repeat sweep "
+                             "on the same duo/data skips both model-forward passes entirely. "
+                             "Caches penultimate features too, so it's never skipped for "
+                             "proxy_kind='prototype'. Proxy scoring itself always re-runs fresh "
+                             "from the cached tensors (never cached), so a cache built with a "
+                             "different --proxy_kinds selection is still safe to reuse.")
+    parser.add_argument("--overwrite_cache", action="store_true",
+                        help="With --use_cache, always recompute and overwrite any existing "
+                             "cache entries instead of reusing them.")
     parser.add_argument("--sort_by", type=str, default="bal_sel_acc", choices=_TABLE_COLUMNS,
                         help="Defaults to bal_sel_acc rather than sel_acc, since sel_acc "
                              "alone can be fooled by a proxy that's just biased toward "
@@ -255,23 +272,47 @@ def main():
         args.csv_path = f"out/proxy_sweep_{config['LARGE']['NAME']}_{config['SMALL']['NAME']}_{timestamp}.csv"
 
     # One source-fit pass covering every requested proxy kind at once (fit_source
-    # is a no-op for stateless proxies) — never repeated per proxy_kind.
+    # is a no-op for stateless proxies) — never repeated per proxy_kind, and
+    # cached to checkpoints/proxy_stats/<large>+<small>/ so re-running the
+    # sweep (or a different sweep) against the same duo skips the source pass
+    # entirely instead of re-fitting atc/prototype/cot from scratch every time.
     needs_source_fit = any(pk in _SOURCE_FIT_KINDS for pk in args.proxy_kinds)
     if needs_source_fit:
-        from torch.utils.data import DataLoader
-        from torchvision import datasets
-        from src.utils.data import _pil_collate_fn
-        print("Fitting proxy source state (atc/prototype/cot) from VAL_DIR...")
-        src_ds = datasets.ImageFolder(config["VAL_DIR"])
-        src_loader = DataLoader(
-            src_ds, batch_size=config["BS"], shuffle=False,
-            num_workers=config["WORKERS"], pin_memory=(device.type == "cuda"),
-            collate_fn=_pil_collate_fn,
-        )
+        duo_dir = Path("checkpoints/proxy_stats") / f"{config['LARGE']['NAME']}+{config['SMALL']['NAME']}"
+        # proto_metric is baked into the cache name (not just the duo) since a
+        # cached prototype proxy is metric-specific — a different --proto_metric
+        # needs its own cache entry rather than silently reusing the wrong one.
+        cache_name = f"proto_{args.proto_metric}"
+        cache_file = duo_dir / f"{cache_name}.proxystats.pt"
+
+        if cache_file.exists():
+            print(
+                f"\n{'=' * 70}\n"
+                f"[proxy stats] LOADING CACHED source-fit stats for "
+                f"{config['LARGE']['NAME']}+{config['SMALL']['NAME']} "
+                f"(proto_metric={args.proto_metric})\n"
+                f"  <- {cache_file}\n"
+                f"{'=' * 70}\n"
+            )
+            src_loader = None  # unused on a cache hit — build_proxy_stats returns before touching it
+        else:
+            from torch.utils.data import DataLoader
+            from torchvision import datasets
+            from src.utils.data import _pil_collate_fn
+            print(f"No cached source-fit stats at {cache_file} — fitting "
+                  f"atc/prototype/cot from VAL_DIR (will cache for next time)...")
+            src_ds = datasets.ImageFolder(config["VAL_DIR"])
+            src_loader = DataLoader(
+                src_ds, batch_size=config["BS"], shuffle=False,
+                num_workers=config["WORKERS"], pin_memory=(device.type == "cuda"),
+                collate_fn=_pil_collate_fn,
+            )
+
         cfg_l, cfg_s = build_proxy_stats(
             large_model, large_preprocess, config["LARGE"]["NAME"],
             small_model, small_preprocess, config["SMALL"]["NAME"],
             src_loader, device, proto_metric=args.proto_metric,
+            cache_path=cache_name, cache_dir=duo_dir,
         )
     else:
         cfg_l = ProxyStats(name=config["LARGE"]["NAME"], num_classes=1000)
@@ -285,19 +326,31 @@ def main():
     ext_l = FeatureExtractor(large_model, cfg_l.name)
     ext_s = FeatureExtractor(small_model, cfg_s.name)
 
+    stream_cache_dir = duo_cache_dir(config["LARGE"]["NAME"], config["SMALL"]["NAME"]) if args.use_cache else None
+
     try:
         # --- Phase B: one pass over calibration (dev-shift) data, fit every
         # (proxy_kind, calib_method) map from the SAME collected records. ---
         print(f"Collecting calibration records over {len(calib_corruptions)} corruptions x {len(calib_severities)} severities, over {args.calib_num_samples} samples each...")
-        calib_loader = load_imagenetC(
-            config["TEST_DIR"], severities=calib_severities, corruption_types=calib_corruptions,
-            device=device, batch_size=config["BS"], num_workers=config["WORKERS"],
-            num_samples=args.calib_num_samples, seed=args.seed,
+        calib_tag = (
+            "calib_" + "-".join(sorted(calib_corruptions)) +
+            f"_sev{'-'.join(str(s) for s in sorted(calib_severities))}"
         )
-        records = collect_records(
-            cfg_l, cfg_s, ext_l, large_preprocess, ext_s, small_preprocess,
-            streams=[("mixed", 0, calib_loader)], device=device,
+        calib_key = stream_key(calib_tag, args.calib_num_samples, args.seed)
+
+        def _collect_calib():
+            calib_loader = load_imagenetC(
+                config["TEST_DIR"], severities=calib_severities, corruption_types=calib_corruptions,
+                device=device, batch_size=config["BS"], num_workers=config["WORKERS"],
+                num_samples=args.calib_num_samples, seed=args.seed,
+            )
+            return collect_stream(calib_loader, large_preprocess, small_preprocess, ext_l, ext_s, device)
+
+        z_l, z_s, f_l, f_s, labels = load_or_collect_stream(
+            stream_cache_dir, calib_key, _collect_calib,
+            use_cache=args.use_cache, overwrite_cache=args.overwrite_cache,
         )
+        records = _records_from_raw(cfg_l, cfg_s, z_l, z_s, f_l, f_s, labels, config["BS"], "mixed", 0)
         print(f"Collected {len(records)} calibration records.")
 
         fitted_maps: dict[tuple[str, str], CalibrationMaps] = {}
@@ -313,14 +366,20 @@ def main():
         eval_data: dict[tuple[str, int], tuple] = {}
         for severity in eval_severities:
             for corruption in eval_corruptions:
-                loader = load_imagenetC(
-                    config["TEST_DIR"], severities=severity, corruption_types=[corruption],
-                    device=device, batch_size=config["BS"], num_workers=config["WORKERS"],
-                    num_samples=args.eval_num_samples, seed=args.seed,
-                )
+                eval_key = stream_key(f"{corruption}_s{severity}", args.eval_num_samples, args.seed)
+
+                def _collect_eval(corruption=corruption, severity=severity):
+                    loader = load_imagenetC(
+                        config["TEST_DIR"], severities=severity, corruption_types=[corruption],
+                        device=device, batch_size=config["BS"], num_workers=config["WORKERS"],
+                        num_samples=args.eval_num_samples, seed=args.seed,
+                    )
+                    return collect_stream(loader, large_preprocess, small_preprocess, ext_l, ext_s, device)
+
                 print(f"Collecting eval stream {corruption}/s{severity}...")
-                eval_data[(corruption, severity)] = _collect_stream(
-                    loader, large_preprocess, small_preprocess, ext_l, ext_s, device,
+                eval_data[(corruption, severity)] = load_or_collect_stream(
+                    stream_cache_dir, eval_key, _collect_eval,
+                    use_cache=args.use_cache, overwrite_cache=args.overwrite_cache,
                 )
     finally:
         ext_l.remove()
@@ -363,8 +422,18 @@ def main():
                 })
 
     rows.sort(key=lambda r: (r[args.sort_by] if r[args.sort_by] == r[args.sort_by] else -1), reverse=True)
+    _print_table(rows, title=f"Ranked by {args.sort_by}")
 
-    _print_table(rows)
+    # gap_corr (does the signed, continuous score gap track the signed true
+    # accuracy gap?) is the metric closest to what the Section-5 sigmoid gate
+    # actually consumes — printed as its own ranking alongside --sort_by's,
+    # since the two don't always agree (see the gap_bias gotcha in CLAUDE.md).
+    if args.sort_by != "gap_corr":
+        gap_corr_rows = sorted(
+            rows, key=lambda r: (r["gap_corr"] if r["gap_corr"] == r["gap_corr"] else -1), reverse=True,
+        )
+        _print_table(gap_corr_rows, title="Ranked by gap_corr")
+
     if args.csv_path:
         path = Path(args.csv_path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -375,11 +444,13 @@ def main():
         print(f"\nWrote {len(rows)} rows to {path}")
 
 
-def _print_table(rows: list[dict]) -> None:
+def _print_table(rows: list[dict], title: str | None = None) -> None:
     header = (f"{'proxy_kind':<12} {'calib_method':<10} {'pbs':>6} {'n':>5}  "
               f"{'sel_acc':>8}  {'bal_sel':>8} ({'L':>6}/{'S':>6})  "
               f"{'gap_bias':>9} {'gap_corr':>9}   "
               f"{'l_R2':>6} {'l_r':>6} {'l_rho':>6}   {'s_R2':>6} {'s_r':>6} {'s_rho':>6}")
+    if title:
+        print(f"\n=== {title} ===")
     print("\n" + header)
     print("-" * len(header))
     for r in rows:

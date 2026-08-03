@@ -52,13 +52,15 @@ Usage
     python scripts/compare_calibrators.py --config cfgs/dynamic_duo_config.yaml \\
         --only proxy_weighted_ac_mc coca_ts
 
-    # cache large/small logits so repeat --mode no_adapt comparisons (e.g.
-    # default.json then calibrated.json then oracle.json, same --num_samples
-    # --seed) skip the model forward pass entirely after the first one:
+    # cache large/small logits+features so repeat --mode no_adapt comparisons
+    # (e.g. default.json then calibrated.json then oracle.json, same
+    # --num_samples --seed) skip the model forward pass entirely after the
+    # first one populates the cache. Directory is automatic (per duo — see
+    # src.utils.stream_cache), no path to pick:
     python scripts/compare_calibrators.py --config cfgs/dynamic_duo_config.yaml \\
         --configs_file cfgs/compare_runs/calibrated.json \\
         --num_samples 10000 --seed 0 --mode no_adapt \\
-        --logits_cache_dir cache/compare_logits
+        --use_cache
 """
 
 from __future__ import annotations
@@ -69,99 +71,17 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 import wandb
 
 from src.tta.dynamic_duo import setup_duo, evaluate_dynamic_duo
 from src.utils.model import get_model
-from src.utils.data import load_config
+from src.utils.data import load_config, load_imagenetC
+from src.utils.stream_cache import DuoStreamCache, duo_cache_dir
 from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.calibrators.joint_coca import JointCoca
 from src.reliability.setup import build_proxy_weighted_calibrator, fit_beta
 
 DEFAULT_CONFIGS_FILE = "cfgs/compare_runs/default.json"
-
-
-class _CachedModel(nn.Module):
-    """Wraps a FROZEN model so forward() replays cached logits instead of
-    recomputing them, once a cache file exists for the current (model_name,
-    corruption, severity, num_samples, seed, batch_size). On a cache miss,
-    forwards normally and records outputs to save once the stream ends.
-
-    Only valid for --mode no_adapt: configure_model_frozen puts the model in
-    train() (TENT uses batch statistics even when frozen — see tent.py), so
-    BatchNorm outputs depend on batch COMPOSITION, not just which samples
-    are used. The cache is safe because load_imagenetC's DataLoader shuffle
-    is seeded deterministically: calling it again with the identical
-    (corruption, severity, num_samples, seed, batch_size) reproduces the
-    exact same batch sequence, so replaying logits in forward() call order
-    lines up with the correct samples without needing to reimplement any
-    sampling/shuffling logic here.
-
-    Attribute lookups that miss on the wrapper (e.g. FeatureExtractor's
-    search for a final Linear classifier, for the prototype proxy) fall
-    through to the wrapped model transparently.
-    """
-
-    def __init__(self, model: nn.Module, cache_dir: str, model_name: str,
-                 num_samples: int | None, seed: int | None, batch_size: int):
-        super().__init__()
-        self.model = model
-        self.cache_dir = Path(cache_dir)
-        self.model_name = model_name
-        self.num_samples = num_samples
-        self.seed = seed
-        self.batch_size = batch_size
-        self._cached: torch.Tensor | None = None
-        self._pos = 0
-        self._recording: list[torch.Tensor] = []
-        self._current_path: Path | None = None
-
-    def _path_for(self, corruption: str, severity: int) -> Path:
-        key = f"{corruption}_{severity}_n{self.num_samples}_s{self.seed}_bs{self.batch_size}"
-        return self.cache_dir / self.model_name / f"{key}.pt"
-
-    def set_stream(self, corruption: str, severity: int) -> None:
-        """Call once per (corruption, severity), before that stream's batches
-        start arriving — flushes the previous stream's recording (if any)
-        and loads/prepares the new stream's cache slot."""
-        self._flush()
-        self._current_path = self._path_for(corruption, severity)
-        if self._current_path.exists():
-            print(f"[logits cache] hit  {self.model_name}/{corruption}_{severity}")
-            self._cached = torch.load(self._current_path, map_location="cpu", weights_only=True)
-        else:
-            print(f"[logits cache] miss {self.model_name}/{corruption}_{severity} — will cache this run")
-            self._cached = None
-        self._pos = 0
-
-    def _flush(self) -> None:
-        if self._cached is None and self._recording and self._current_path is not None:
-            self._current_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(torch.cat(self._recording), self._current_path)
-            print(f"[logits cache] saved {self._current_path}")
-        self._recording = []
-
-    def finish(self) -> None:
-        """Call after the last stream to flush any still-pending recording."""
-        self._flush()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self._cached is not None:
-            n = x.shape[0]
-            out = self._cached[self._pos: self._pos + n].to(x.device)
-            self._pos += n
-            return out
-        out = self.model(x)
-        if self._current_path is not None:  # only record once inside a real eval stream
-            self._recording.append(out.detach().cpu())
-        return out
-
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.model, name)
 
 
 def _load_run_configs(path: str) -> list[dict]:
@@ -276,21 +196,27 @@ def main():
                         help="JSON file with a list of run configs (see cfgs/compare_runs/).")
     parser.add_argument("--only", type=str, nargs="+", default=None,
                         help="Restrict to these run names (see --configs_file) instead of all of them.")
-    parser.add_argument("--logits_cache_dir", type=str, default=None,
-                        help="If given (and --mode no_adapt), cache each model's per-"
-                             "corruption logits here so repeat comparisons on the same "
-                             "duo/--num_samples/--seed skip the model forward pass "
-                             "entirely after the first run_cfg populates the cache. "
-                             "Ignored (with a warning) for any other --mode, where "
-                             "logits are calibrator-dependent and can't be shared.")
+    parser.add_argument("--use_cache", action="store_true",
+                        help="If set (and --mode no_adapt), cache each (corruption, "
+                             "severity) stream's logits AND penultimate features (see "
+                             "src.utils.stream_cache) under an automatic, duo-specific "
+                             "directory, so repeat comparisons on the same duo/--num_samples/"
+                             "--seed skip the model forward pass entirely after the first "
+                             "run_cfg populates the cache — including proxy_kind='prototype', "
+                             "which needs the features too. Ignored (with a warning) for any "
+                             "other --mode, where logits are calibrator-dependent (adaptation "
+                             "mutates the models) and can't be shared across run_cfgs.")
+    parser.add_argument("--overwrite_cache", action="store_true",
+                        help="With --use_cache, always recompute and overwrite any existing "
+                             "cache entries instead of reusing them.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = load_config(args.config)
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
 
-    if args.logits_cache_dir and args.mode != "no_adapt":
-        print(f"WARNING: --logits_cache_dir has no effect with --mode {args.mode!r} "
+    if args.use_cache and args.mode != "no_adapt":
+        print(f"WARNING: --use_cache has no effect with --mode {args.mode!r} "
               f"(only 'no_adapt' has calibrator-independent logits to cache); ignoring.")
 
     # Duo identity is always prefixed onto the group, even a user-supplied
@@ -324,21 +250,17 @@ def main():
         large_model = large_model.to(device)
         small_model = small_model.to(device)
 
-        cached_large = cached_small = None
-        if args.logits_cache_dir and args.mode == "no_adapt" and run_cfg.get("proxy_kind") == "prototype":
-            print(f"[{run_cfg['name']}] proxy_kind=prototype needs a live forward pass every "
-                  f"batch (penultimate features via a hook that a cache hit would never "
-                  f"trigger) — skipping the logits cache for this config only.")
-        elif args.logits_cache_dir and args.mode == "no_adapt":
-            cached_large = _CachedModel(
-                large_model, args.logits_cache_dir, config["LARGE"]["NAME"],
-                args.num_samples, args.seed, config["BS"],
+        stream_cache_ctrl = None
+        if args.use_cache and args.mode == "no_adapt":
+            stream_cache_ctrl = DuoStreamCache(
+                large_model, config["LARGE"]["NAME"], large_preprocess,
+                small_model, config["SMALL"]["NAME"], small_preprocess,
+                device=device,
+                cache_dir=duo_cache_dir(config["LARGE"]["NAME"], config["SMALL"]["NAME"]),
+                num_samples=args.num_samples, seed=args.seed,
+                use_cache=True, overwrite_cache=args.overwrite_cache,
             )
-            cached_small = _CachedModel(
-                small_model, args.logits_cache_dir, config["SMALL"]["NAME"],
-                args.num_samples, args.seed, config["BS"],
-            )
-            large_model, small_model = cached_large, cached_small
+            large_model, small_model = stream_cache_ctrl.large, stream_cache_ctrl.small
 
         csv_path = str(Path(args.out_dir) / run_cfg["name"])
         calibrator = _build_calibrator(
@@ -354,10 +276,24 @@ def main():
             cfg=config, steps=args.steps,
         )
 
+        if stream_cache_ctrl is not None:
+            # register_hooks (proxy_kind="prototype") ran inside setup_duo, if
+            # at all — feed its extractor(s) too, so a replayed (cached) batch
+            # still gets valid features pushed into whatever the calibrator
+            # itself reads from (see DuoStreamCache/CachedModel docstrings).
+            stream_cache_ctrl.attach_extra_feature_extractors(
+                getattr(calibrator, "_ext_l", None), getattr(calibrator, "_ext_s", None),
+            )
+
         def _on_corruption_start(corruption, severity):
-            if cached_large is not None:
-                cached_large.set_stream(corruption, severity)
-                cached_small.set_stream(corruption, severity)
+            if stream_cache_ctrl is not None:
+                def _loader_factory(corruption=corruption, severity=severity):
+                    return load_imagenetC(
+                        config["TEST_DIR"], severities=severity, corruption_types=[corruption],
+                        device=device, batch_size=config["BS"], num_workers=config["WORKERS"],
+                        num_samples=args.num_samples, seed=args.seed,
+                    )
+                stream_cache_ctrl.set_stream(f"{corruption}_s{severity}", _loader_factory)
 
         results_rows = evaluate_dynamic_duo(
             duo, config, wandb_project=args.wandb_project,
@@ -365,9 +301,8 @@ def main():
             use_wandb=True, group=group, run_name=run_cfg["name"],
             on_corruption_start=_on_corruption_start,
         )
-        if cached_large is not None:
-            cached_large.finish()
-            cached_small.finish()
+        if stream_cache_ctrl is not None:
+            stream_cache_ctrl.finish()
 
         avg_row = next((r for r in results_rows if r.get("corruption") == "average"), None)
         if avg_row is not None:

@@ -15,8 +15,8 @@ CALIBRATOR:
     # - 4
     - 5
 
-SMALL:
-  NAME: efficientnet_b0
+LARGE:
+  NAME: vit_b_16
   NORM: LN
   OPTIM:    
     METHOD: "Adam"
@@ -32,7 +32,7 @@ SMALL:
     # NESTEROV: false
     # DAMPENING: 0.0
 
-LARGE:
+SMALL:
   NAME: resnet50
   NORM: BN
   OPTIM:
@@ -53,25 +53,25 @@ LARGE:
 EVAL:
   CORRUPTIONS:
     # - 'clean'
-    # - 'gaussian_blur'
-    # - 'saturate'
-    # - 'spatter'
-    # - 'speckle_noise'
-    - 'brightness'
-    - 'contrast'
-    - 'defocus_blur'
-    - 'elastic_transform'
-    - 'fog'
-    - 'frost'
-    - 'gaussian_noise'
-    - 'glass_blur'
-    - 'impulse_noise'
-    - 'jpeg_compression'
-    - 'motion_blur'
-    - 'pixelate'
-    - 'shot_noise'
-    - 'snow'
-    - 'zoom_blur'
+    - 'gaussian_blur'
+    - 'saturate'
+    - 'spatter'
+    - 'speckle_noise'
+    # - 'brightness'
+    # - 'contrast'
+    # - 'defocus_blur'
+    # - 'elastic_transform'
+    # - 'fog'
+    # - 'frost'
+    # - 'gaussian_noise'
+    # - 'glass_blur'
+    # - 'impulse_noise'
+    # - 'jpeg_compression'
+    # - 'motion_blur'
+    # - 'pixelate'
+    # - 'shot_noise'
+    # - 'snow'
+    # - 'zoom_blur'
   SEVERITIES:
     # - 1
     # - 2
