@@ -40,15 +40,22 @@ Two additions catch this:
     accuracy under class imbalance). A proxy that's just biased toward one
     model scores near 1.0 on its favorite's chunks and near 0.0 on the
     other's; a genuinely batch-reactive proxy scores well on both.
-  - gap_bias / gap_corr: fit score_gap = slope*acc_gap + gap_bias (both
-    SIGNED, continuous — not just their signs) across chunks. gap_bias is
-    the score gap the calibration predicts when the two models are equally
-    accurate — should be ~0; a large nonzero value is the same "always
-    favors one model" signature caught more directly (in the units the
-    Section-5 gate actually consumes) than bal_sel_acc's binary view.
-    gap_corr is the Pearson correlation of the two signed gaps — whether
-    the score's MAGNITUDE (not just sign) tracks the true relative
-    advantage, which is what a smooth sigmoid gate needs, unlike sel_acc.
+  - gap_bias / gap_slope / gap_corr / gap_spearman: fit
+    score_gap = slope*acc_gap + gap_bias (both SIGNED, continuous — not
+    just their signs) across chunks. gap_bias is the score gap the
+    calibration predicts when the two models are equally accurate — should
+    be ~0; a large nonzero value is the same "always favors one model"
+    signature caught more directly (in the units the Section-5 gate
+    actually consumes) than bal_sel_acc's binary view. gap_slope is the
+    fitted sensitivity — how much score_gap moves per unit of acc_gap; near
+    0 means the score barely reacts to real accuracy swings regardless of
+    how consistent that (weak) reaction is. gap_corr is the Pearson
+    correlation of the two signed gaps — whether the score's MAGNITUDE (not
+    just sign) tracks the true relative advantage LINEARLY, which is what a
+    smooth sigmoid gate needs, unlike sel_acc. gap_spearman is the same
+    check but rank-based instead of linear, so it still credits a proxy
+    that tracks the accuracy gap monotonically through a nonlinear
+    calibration map even when gap_corr undersells it.
 
 Usage
 -----
@@ -85,7 +92,7 @@ _TABLE_COLUMNS = [
     "sel_acc", "sel_correct", "sel_total",
     "bal_sel_acc", "sel_acc_large_better", "sel_acc_small_better",
     "n_large_better", "n_small_better",
-    "gap_bias", "gap_slope", "gap_corr",
+    "gap_bias", "gap_slope", "gap_corr", "gap_spearman",
     "l_r2", "l_pearson_r", "l_spearman_rho",
     "s_r2", "s_pearson_r", "s_spearman_rho",
 ]
@@ -163,16 +170,23 @@ def _balanced_selection_accuracy(score_l, score_s, acc_l, acc_s) -> dict:
 
 def _gap_stats(cal_l, cal_s, acc_l, acc_s) -> dict:
     """Fit score_gap = slope*acc_gap + gap_bias across chunks (both signed,
-    continuous, not just their signs) plus their Pearson correlation.
+    continuous, not just their signs) plus their Pearson and Spearman
+    correlations.
 
     gap_bias is the score gap the calibration predicts when the two models
     are EQUALLY accurate — should be ~0; a large nonzero value means the
     score structurally favors one model regardless of who's actually
     better, exactly the failure a smooth sigmoid gate is vulnerable to (it
     consumes the gap's magnitude, not sel_acc's sign-only view of it).
-    gap_corr is how well the gap's MAGNITUDE tracks the true advantage.
+    gap_slope is the fitted sensitivity of score_gap to acc_gap.
+    gap_corr is how well the gap's MAGNITUDE tracks the true advantage
+    LINEARLY; gap_spearman is the same but rank-based, so it still credits
+    a monotonic-but-nonlinear relationship that gap_corr would undersell.
     """
-    nan_result = {"gap_bias": float("nan"), "gap_slope": float("nan"), "gap_corr": float("nan")}
+    nan_result = {
+        "gap_bias": float("nan"), "gap_slope": float("nan"),
+        "gap_corr": float("nan"), "gap_spearman": float("nan"),
+    }
     if len(cal_l) < 3:
         return nan_result
     score_gap = np.asarray(cal_l, dtype=np.float64) - np.asarray(cal_s, dtype=np.float64)
@@ -180,8 +194,12 @@ def _gap_stats(cal_l, cal_s, acc_l, acc_s) -> dict:
     if acc_gap.std() < 1e-8 or score_gap.std() < 1e-8:
         return nan_result
     slope, bias = np.polyfit(acc_gap, score_gap, 1)
-    corr = float(np.corrcoef(score_gap, acc_gap)[0, 1])
-    return {"gap_bias": float(bias), "gap_slope": float(slope), "gap_corr": corr}
+    pearson_corr, _ = pearsonr(score_gap, acc_gap)
+    spearman_corr, _ = spearmanr(score_gap, acc_gap)
+    return {
+        "gap_bias": float(bias), "gap_slope": float(slope),
+        "gap_corr": float(pearson_corr), "gap_spearman": float(spearman_corr),
+    }
 
 
 def _chunks(n: int, size: int) -> list[slice]:
@@ -204,10 +222,6 @@ def _records_from_raw(cfg_l, cfg_s, z_l, z_s, f_l, f_s, labels, batch_size, corr
         )
         for sl in _chunks(n, batch_size)
     ]
-
-
-def _fmt(v: float, w: int = 6, d: int = 3) -> str:
-    return f"{v:{w}.{d}f}" if v == v else f"{'nan':>{w}}"
 
 
 def main():
@@ -260,8 +274,7 @@ def main():
                         help="Log the full sweep as one wandb.Table (all rows, every "
                              "_TABLE_COLUMNS field) — wandb's table UI lets you click any "
                              "column header (bal_sel_acc, gap_corr, sel_acc, ...) to sort "
-                             "interactively, so you aren't limited to --sort_by's one ranking "
-                             "or the console's two fixed tables.")
+                             "interactively, so you aren't limited to --sort_by's one ranking.")
     parser.add_argument("--wandb_project", type=str, default="proxy-weighted-duo-calibration")
     parser.add_argument("--wandb_group", type=str, default=None,
                         help="Defaults to a timestamp. Always prefixed with the duo's model "
@@ -433,17 +446,6 @@ def main():
                 })
 
     rows.sort(key=lambda r: (r[args.sort_by] if r[args.sort_by] == r[args.sort_by] else -1), reverse=True)
-    _print_table(rows, title=f"Ranked by {args.sort_by}")
-
-    # gap_corr (does the signed, continuous score gap track the signed true
-    # accuracy gap?) is the metric closest to what the Section-5 sigmoid gate
-    # actually consumes — printed as its own ranking alongside --sort_by's,
-    # since the two don't always agree (see the gap_bias gotcha in CLAUDE.md).
-    if args.sort_by != "gap_corr":
-        gap_corr_rows = sorted(
-            rows, key=lambda r: (r["gap_corr"] if r["gap_corr"] == r["gap_corr"] else -1), reverse=True,
-        )
-        _print_table(gap_corr_rows, title="Ranked by gap_corr")
 
     if args.csv_path:
         path = Path(args.csv_path)
@@ -469,39 +471,6 @@ def main():
         run.finish()
         print(f"\nLogged {len(rows)} rows to wandb project '{args.wandb_project}' "
               f"(group='{group}') — click any column header in the table UI to sort by it.")
-
-
-def _print_table(rows: list[dict], title: str | None = None) -> None:
-    header = (f"{'proxy_kind':<12} {'calib_method':<10} {'pbs':>6} {'n':>5}  "
-              f"{'sel_acc':>8}  {'bal_sel':>8} ({'L':>6}/{'S':>6}) ({'nL':>4}/{'nS':>4})  "
-              f"{'gap_bias':>9} {'gap_corr':>9}   "
-              f"{'l_R2':>6} {'l_r':>6} {'l_rho':>6}   {'s_R2':>6} {'s_r':>6} {'s_rho':>6}")
-    if title:
-        print(f"\n=== {title} ===")
-    print("\n" + header)
-    print("-" * len(header))
-    for r in rows:
-        print(
-            f"{r['proxy_kind']:<12} {r['calib_method']:<10} {r['proxy_batch_size']:>6} {r['n']:>5}  "
-            f"{_fmt(r['sel_acc'], 8)}  {_fmt(r['bal_sel_acc'], 8)} "
-            f"({_fmt(r['sel_acc_large_better'], 6)}/{_fmt(r['sel_acc_small_better'], 6)}) "
-            f"({r['n_large_better']:>4}/{r['n_small_better']:>4})  "
-            f"{_fmt(r['gap_bias'], 9)} {_fmt(r['gap_corr'], 9)}   "
-            f"{_fmt(r['l_r2'])} {_fmt(r['l_pearson_r'])} {_fmt(r['l_spearman_rho'])}   "
-            f"{_fmt(r['s_r2'])} {_fmt(r['s_pearson_r'])} {_fmt(r['s_spearman_rho'])}"
-        )
-    print(
-        "\nsel_acc = pooled selection accuracy (can be misleading, see module docstring).  "
-        "bal_sel = balanced selection accuracy, averaged over (L=large-actually-better, "
-        "S=small-actually-better) chunks — the more trustworthy target. (nL/nS) are the chunk "
-        "COUNTS behind L/S — bal_sel is nan (not 0) when one side has zero chunks (e.g. a large "
-        "proxy_batch_size can average away every chance the small model had to actually win a "
-        "chunk), which is an honest 'no data' rather than a computed score of 0.  "
-        "gap_bias = predicted score gap when models are equally accurate (want ~0; large "
-        "nonzero = structurally favors one model).  gap_corr = correlation of the signed "
-        "score gap with the signed true accuracy gap (want high — this is what the "
-        "Section-5 sigmoid gate actually consumes)."
-    )
 
 
 if __name__ == "__main__":

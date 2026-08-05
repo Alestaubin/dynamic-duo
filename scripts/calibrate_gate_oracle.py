@@ -48,13 +48,18 @@ tensors, re-chunked into adaptation batches in their original order so the
 stateful temporal filters see the exact same batch sequence a real run
 would (this matters: EMA/Kalman are order-dependent).
 
-Two reference numbers are printed alongside the sweep table:
-  - single-model baselines (large/small accuracy alone), the floor.
-  - a hard-selection ceiling per proxy_batch_size: for each proxy-batch-sized
-    chunk, pretend the gate picks (with certainty) whichever model is
-    actually more accurate on that exact chunk. This is the beta -> infinity
-    limit -- no real sigmoid gate at that batching granularity can beat it,
-    so it upper-bounds the entire sweep for a given proxy_batch_size.
+Reference numbers printed alongside the sweep table: single-model baselines
+(large/small accuracy alone, the floor) and the fixed_ts/coca_ts baseline
+rows folded into the same table (see _baseline_accuracy) -- these fuse both
+models' logits continuously rather than switching between them per chunk, so
+they're the right bar to compare the oracle gate against. (A prior version
+of this script also printed a "hard-selection ceiling" -- beta -> infinity,
+pick whichever model is more accurate per chunk with certainty -- as an
+upper bound on the sweep. It isn't one: fixed_ts/coca_ts routinely beat it,
+since continuous soft pooling exploits per-sample complementary evidence
+from both models that a hard per-chunk switch structurally cannot, even
+with perfect oracle labels. Removed to avoid the false impression of a
+ceiling.)
 
 Usage
 -----
@@ -72,23 +77,26 @@ from __future__ import annotations
 
 import argparse
 import csv as csv_module
+import itertools
 from pathlib import Path
 
+import calibration as cal
 import torch
 import torch.nn.functional as F
 
 from src.utils.data import load_config, load_imagenetC
 from src.utils.model import get_model
-from src.tta.tent import configure_model_frozen
+from src.tta.tent import configure_model_frozen, softmax_entropy
 from src.utils.stream_cache import duo_cache_dir, stream_key, collect_stream, load_or_collect_stream
 from src.calibrators.joint_fixed_TS import JointFixedTS
+from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_proxy_weighted import JointProxyWeighted
 from src.reliability.proxies.stats import ProxyStats, FeatureExtractor
 from src.reliability.calibration.logit import to_logit
 
 _TABLE_COLUMNS = [
     "beta", "pool", "filter_kind", "proxy_batch_size",
-    "duo_acc", "duo_nll", "mean_w_l", "large_acc", "small_acc",
+    "duo_acc", "duo_nll", "duo_ece", "duo_entropy", "mean_w_l", "large_acc", "small_acc",
 ]
 
 
@@ -143,26 +151,10 @@ def _collect_eval_streams(
     return streams
 
 
-def _hard_selection_ceiling(streams: dict, chunk_size: int) -> float:
-    """beta -> infinity reference: for each chunk_size-sample chunk, pick
-    (with certainty) whichever model is actually more accurate on that exact
-    chunk. Macro-averaged across streams, matching the sweep's own averaging."""
-    per_stream_acc = []
-    for (z_l, z_s, labels) in streams.values():
-        n = z_l.shape[0]
-        correct, total = 0.0, 0
-        for start in range(0, n, chunk_size):
-            sl = slice(start, min(start + chunk_size, n))
-            acc_l = float((z_l[sl].argmax(1) == labels[sl]).float().mean())
-            acc_s = float((z_s[sl].argmax(1) == labels[sl]).float().mean())
-            picked = max(acc_l, acc_s)
-            correct += picked * (sl.stop - sl.start)
-            total += (sl.stop - sl.start)
-        per_stream_acc.append(correct / total)
-    return sum(per_stream_acc) / len(per_stream_acc)
-
-
-def _diagnose_signal(streams: dict, proxy_batch_sizes: list[int]) -> None:
+def _diagnose_signal(
+    streams: dict, proxy_batch_sizes: list[int],
+    fixed_ts_baseline: dict | None = None, coca_baseline: dict | None = None,
+) -> None:
     """Print the RAW oracle accuracy gap (acc_l - acc_s) per (corruption,
     severity, proxy_batch_size) chunk, computed directly from the cached
     streams -- bypassing JointProxyWeighted/calibration/filter/beta/sigmoid
@@ -178,9 +170,24 @@ def _diagnose_signal(streams: dict, proxy_batch_sizes: list[int]) -> None:
       (c) neither of the above (mean gap sizeable and consistent, signal/
           noise not small) -- which would point back at a real bug in the
           gate/beta plumbing rather than a statistical noise-floor issue.
+
+    fixed_ts_baseline/coca_baseline (see _baseline_accuracy) are printed
+    alongside purely for reference -- they cost nothing extra to show here
+    since main() already needs them for the full sweep's baseline rows, and
+    having them next to the raw gap stats means --diagnose_only alone (which
+    returns before the expensive beta/pool/filter sweep) still tells you
+    where the existing calibrators land, not just the raw signal quality.
     """
     print(f"\n{'=' * 100}\nDIAGNOSTIC: raw oracle accuracy gap (acc_l - acc_s), before any "
           f"calibration/filter/gate\n{'=' * 100}")
+    if fixed_ts_baseline is not None:
+        print(f"Reference: fixed_ts duo_acc={fixed_ts_baseline['duo_acc']:.4f}  "
+              f"duo_nll={fixed_ts_baseline['duo_nll']:.4f}  duo_ece={fixed_ts_baseline['duo_ece']:.4f}")
+    else:
+        print("Reference: fixed_ts skipped (no --fixed_ts_config given)")
+    if coca_baseline is not None:
+        print(f"Reference: coca_ts  duo_acc={coca_baseline['duo_acc']:.4f}  "
+              f"duo_nll={coca_baseline['duo_nll']:.4f}  duo_ece={coca_baseline['duo_ece']:.4f}")
     header = (f"{'corruption':<22} {'sev':>4} {'pbs':>5} {'chunks':>7}  "
               f"{'mean acc_l':>11} {'mean acc_s':>11} {'mean gap':>9} {'std gap':>8}  "
               f"{'%L wins':>8} {'%S wins':>8} {'%tie':>6}")
@@ -223,7 +230,11 @@ def _run_config(streams, base_ts, beta, pool, filter_kind, filter_kwargs, proxy_
     flood stdout across a large sweep) -- the same pattern src.reliability.
     setup.fit_beta already uses for its own beta grid search.
 
-    Returns macro-averaged (over streams) duo accuracy/NLL/mean gate weight.
+    Returns macro-averaged (over streams) duo accuracy/NLL/ECE/entropy/mean
+    gate weight. ECE is computed once per stream over that stream's full
+    concatenated predictions (it bins over a distribution, so it can't be
+    accumulated batch-by-batch like a sum), then macro-averaged across
+    streams -- same convention as accuracy/NLL/mean_w_l here.
     """
     cfg_l = ProxyStats(name="large", num_classes=1000)
     cfg_s = ProxyStats(name="small", num_classes=1000)
@@ -238,7 +249,8 @@ def _run_config(streams, base_ts, beta, pool, filter_kind, filter_kwargs, proxy_
     for (corruption, severity), (z_l, z_s, labels) in streams.items():
         calibrator.set_corruption(f"{corruption}/s{severity}")
         n = z_l.shape[0]
-        correct, nll_sum, w_l_sum, total = 0.0, 0.0, 0.0, 0
+        correct, nll_sum, entropy_sum, w_l_sum, total = 0.0, 0.0, 0.0, 0.0, 0
+        z_duo_chunks = []
         for start in range(0, n, batch_size):
             sl = slice(start, min(start + batch_size, n))
             zl_b, zs_b, y_b = z_l[sl], z_s[sl], labels[sl]
@@ -248,10 +260,15 @@ def _run_config(streams, base_ts, beta, pool, filter_kind, filter_kwargs, proxy_
             bs = sl.stop - sl.start
             correct += float((z_duo.argmax(1) == y_b).float().sum())
             nll_sum += float(F.cross_entropy(z_duo, y_b, reduction="sum"))
+            entropy_sum += float(softmax_entropy(z_duo).sum())
             w_l_sum += w_l * bs
             total += bs
+            z_duo_chunks.append(z_duo)
+        probs = F.softmax(torch.cat(z_duo_chunks, dim=0), dim=1).numpy()
+        ece = cal.get_ece(probs, labels.numpy(), num_bins=15)
         per_stream_rows.append({
             "acc": correct / total, "nll": nll_sum / total, "mean_w_l": w_l_sum / total,
+            "entropy": entropy_sum / total, "ece": ece,
         })
 
     n_streams = len(per_stream_rows)
@@ -259,6 +276,8 @@ def _run_config(streams, base_ts, beta, pool, filter_kind, filter_kwargs, proxy_
         "duo_acc": sum(r["acc"] for r in per_stream_rows) / n_streams,
         "duo_nll": sum(r["nll"] for r in per_stream_rows) / n_streams,
         "mean_w_l": sum(r["mean_w_l"] for r in per_stream_rows) / n_streams,
+        "duo_entropy": sum(r["entropy"] for r in per_stream_rows) / n_streams,
+        "duo_ece": sum(r["ece"] for r in per_stream_rows) / n_streams,
     }
 
 
@@ -274,26 +293,37 @@ def _baseline_accuracy(streams: dict, calibrator) -> dict:
     for (z_l, z_s, labels) in streams.values():
         with torch.no_grad():
             z_duo = calibrator.calibrate(z_l, z_s)
+        # JointFixedTS.calibrate() always moves its inputs to cuda internally
+        # and returns the result there (see JointFixedTS.calibrate), regardless
+        # of what device z_l/z_s came in on -- unlike JointProxyWeighted, which
+        # only pulls T_l/T_s out as floats. Align labels to z_duo's device
+        # rather than assuming streams and calibrator output share one.
+        labels = labels.to(z_duo.device)
         acc = float((z_duo.argmax(1) == labels).float().mean())
         nll = float(F.cross_entropy(z_duo, labels, reduction="mean"))
-        per_stream.append((acc, nll))
+        entropy = float(softmax_entropy(z_duo).mean())
+        probs = F.softmax(z_duo, dim=1).cpu().numpy()
+        ece = cal.get_ece(probs, labels.cpu().numpy(), num_bins=15)
+        per_stream.append({"acc": acc, "nll": nll, "entropy": entropy, "ece": ece})
     n = len(per_stream)
     return {
-        "duo_acc": sum(a for a, _ in per_stream) / n,
-        "duo_nll": sum(v for _, v in per_stream) / n,
+        "duo_acc": sum(r["acc"] for r in per_stream) / n,
+        "duo_nll": sum(r["nll"] for r in per_stream) / n,
+        "duo_entropy": sum(r["entropy"] for r in per_stream) / n,
+        "duo_ece": sum(r["ece"] for r in per_stream) / n,
     }
 
 
 def _print_table(rows: list[dict]) -> None:
     header = (f"{'beta':>6} {'pool':<7} {'filter':<13} {'pbs':>5}  "
-              f"{'duo_acc':>8} {'duo_nll':>8} {'mean_w_l':>9}   "
+              f"{'duo_acc':>8} {'duo_nll':>8} {'duo_ece':>8} {'duo_ent':>8} {'mean_w_l':>9}   "
               f"{'large_acc':>9} {'small_acc':>9}")
     print("\n" + header)
     print("-" * len(header))
     for r in rows:
         print(f"{r['beta']:>6.2f} {r['pool']:<7} {r['filter_kind']:<13} {r['proxy_batch_size']:>5}  "
-              f"{r['duo_acc']:>8.4f} {r['duo_nll']:>8.4f} {r['mean_w_l']:>9.4f}   "
-              f"{r['large_acc']:>9.4f} {r['small_acc']:>9.4f}")
+              f"{r['duo_acc']:>8.4f} {r['duo_nll']:>8.4f} {r['duo_ece']:>8.4f} {r['duo_entropy']:>8.4f} "
+              f"{r['mean_w_l']:>9.4f}   {r['large_acc']:>9.4f} {r['small_acc']:>9.4f}")
 
 
 def main():
@@ -308,7 +338,7 @@ def main():
                               "Section-5 combination. Omit for T_l=T_s=1.0 (not recommended -- "
                               "must be a checkpoint fit for THIS duo.")
     parser.add_argument("--betas", type=float, nargs="+",
-                         default=[0.0, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0])
+                         default=[0.0, 0.001, 0.01, 0.1, 0.5, 0.75, 1.0])
     parser.add_argument("--pools", type=str, nargs="+", default=["log", "linear"],
                          choices=["log", "linear"])
     parser.add_argument("--filter_kinds", type=str, nargs="+",
@@ -340,14 +370,21 @@ def main():
                          help="Print the diagnostic and exit before running the (expensive) "
                               "full sweep. Implies --diagnose.")
     parser.add_argument("--use_wandb", action="store_true",
-                         help="Log the full sweep as one wandb.Table (all rows, every "
+                         help="Log the sweep as one wandb.Table (all rows, every "
                               "_TABLE_COLUMNS field) to the proxy-weighted-duo-calibration "
-                              "project — click any column header in the table UI to sort by "
-                              "it, rather than being limited to --sort_by's one ranking.")
+                              "project, built and pushed incrementally (one new table version "
+                              "per config, including the fixed_ts/coca_ts baseline rows) so you "
+                              "can watch it fill in live rather than only seeing it once the "
+                              "whole sweep finishes — click any column header in the table UI "
+                              "to sort by it, rather than being limited to --sort_by's one ranking.")
     parser.add_argument("--wandb_project", type=str, default="proxy-weighted-duo-calibration")
     parser.add_argument("--wandb_group", type=str, default=None,
                          help="Defaults to a timestamp. Always prefixed with the duo's model "
                               "names so two duos' sweeps can never mix in the same wandb group.")
+    parser.add_argument("--run_baselines", action="store_true",
+                         help="Run the fixed_ts/coca_ts baseline rows (see _baseline_accuracy) "
+                              "even if --diagnose_only is set, so you can see where the "
+                              "existing calibrators land relative to the raw gap signal.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -374,56 +411,89 @@ def main():
     ) / len(streams)
     print(f"\nSingle-model baselines (macro-avg over {len(streams)} eval streams): "
           f"large={large_acc:.4f}  small={small_acc:.4f}")
-    ceilings = {}
-    for pbs in proxy_batch_sizes:
-        ceilings[pbs] = _hard_selection_ceiling(streams, pbs)
-        print(f"Hard-selection ceiling @ proxy_batch_size={pbs}: {ceilings[pbs]:.4f}  "
-              f"(picks whichever model is actually more accurate on each {pbs}-sample chunk; "
-              f"no gate at that granularity can beat this)")
+    if args.run_baselines:
+        print("Running baselines...")
+        fixed_ts_baseline = _baseline_accuracy(streams, base_ts) if base_ts is not None else None
+        coca = JointCoca(num_steps=10, lr=5e-2, chunk_size=cfg["BS"])
+        coca_baseline = _baseline_accuracy(streams, coca)
+    else:
+        print("Skipping baselines (--run_baselines to enable).")
+        fixed_ts_baseline = None
+        coca_baseline = None
 
     if args.diagnose or args.diagnose_only:
-        _diagnose_signal(streams, proxy_batch_sizes)
+        _diagnose_signal(streams, proxy_batch_sizes, fixed_ts_baseline, coca_baseline)
         if args.diagnose_only:
             return
 
-    rows = []
+    rows: list[dict] = []
+    run = None
+    table = None
+    group = None
+    if args.use_wandb:
+        import wandb
+        from datetime import datetime
+        duo_tag = f"{cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']}"
+        group = f"{duo_tag}__{args.wandb_group or datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        run = wandb.init(
+            project=args.wandb_project, group=group, name=f"gate_calibration_oracle_{duo_tag}",
+            job_type="gate_calibration_oracle", tags=[cfg["LARGE"]["NAME"], cfg["SMALL"]["NAME"]],
+        )
+        run.summary["large_acc"] = large_acc
+        run.summary["small_acc"] = small_acc
+        table = wandb.Table(columns=_TABLE_COLUMNS, log_mode="MUTABLE")
+
+    def _add_row(row: dict) -> None:
+        """Append to rows and, if --use_wandb, push an updated table version
+        right away -- so the wandb UI fills in row-by-row over the course of
+        the sweep instead of only appearing once everything finishes."""
+        rows.append(row)
+        if table is not None:
+            table.add_data(*[row[c] for c in _TABLE_COLUMNS])
+            run.log({"gate_calibration_oracle": table})
+
     filter_kwargs = {"alpha": args.ema_alpha, "q": args.kalman_q, "r": args.kalman_r}
-    for pbs in proxy_batch_sizes:
-        for filter_kind in args.filter_kinds:
-            for pool in args.pools:
-                for beta in args.betas:
-                    result = _run_config(
-                        streams, base_ts, beta, pool, filter_kind, filter_kwargs, pbs, cfg["BS"],
-                    )
-                    rows.append({
-                        "beta": beta, "pool": pool, "filter_kind": filter_kind, "proxy_batch_size": pbs,
-                        "duo_acc": result["duo_acc"], "duo_nll": result["duo_nll"],
-                        "mean_w_l": result["mean_w_l"],
-                        "large_acc": large_acc, "small_acc": small_acc,
-                    })
+    configs = list(itertools.product(proxy_batch_sizes, args.filter_kinds, args.pools, args.betas))
+    total = len(configs)
+    for i, (pbs, filter_kind, pool, beta) in enumerate(configs, start=1):
+        print(f"[{i}/{total}] pbs={pbs} filter={filter_kind} pool={pool} beta={beta}", end="  ", flush=True)
+        result = _run_config(
+            streams, base_ts, beta, pool, filter_kind, filter_kwargs, pbs, cfg["BS"],
+        )
+        print(f"-> duo_acc={result['duo_acc']:.4f} duo_nll={result['duo_nll']:.4f} "
+              f"duo_ece={result['duo_ece']:.4f} duo_entropy={result['duo_entropy']:.4f} "
+              f"mean_w_l={result['mean_w_l']:.4f}", flush=True)
+        _add_row({
+            "beta": beta, "pool": pool, "filter_kind": filter_kind, "proxy_batch_size": pbs,
+            "duo_acc": result["duo_acc"], "duo_nll": result["duo_nll"],
+            "duo_ece": result["duo_ece"], "duo_entropy": result["duo_entropy"],
+            "mean_w_l": result["mean_w_l"],
+            "large_acc": large_acc, "small_acc": small_acc,
+        })
 
     # Baseline rows (no gate at all) folded into the SAME table so they sort
     # alongside the oracle-gate sweep — beta/pool/proxy_batch_size don't apply
     # to these, filled with sentinels (nan / -1) rather than a separate
     # "config" column, to keep the schema/CSV/wandb Table unchanged.
-    if base_ts is not None:
-        b = _baseline_accuracy(streams, base_ts)
-        rows.append({
+    if fixed_ts_baseline is not None:
+        _add_row({
             "beta": float("nan"), "pool": "-", "filter_kind": "fixed_ts", "proxy_batch_size": -1,
-            "duo_acc": b["duo_acc"], "duo_nll": b["duo_nll"], "mean_w_l": float("nan"),
-            "large_acc": large_acc, "small_acc": small_acc,
+            "duo_acc": fixed_ts_baseline["duo_acc"], "duo_nll": fixed_ts_baseline["duo_nll"],
+            "duo_ece": fixed_ts_baseline["duo_ece"], "duo_entropy": fixed_ts_baseline["duo_entropy"],
+            "mean_w_l": float("nan"), "large_acc": large_acc, "small_acc": small_acc,
         })
     else:
         print("Skipping fixed_ts baseline row: no --fixed_ts_config given.")
 
-    from src.calibrators.joint_coca import JointCoca
-    coca = JointCoca(num_steps=10, lr=5e-2, chunk_size=cfg["BS"])
-    c = _baseline_accuracy(streams, coca)
-    rows.append({
-        "beta": float("nan"), "pool": "-", "filter_kind": "coca_ts", "proxy_batch_size": -1,
-        "duo_acc": c["duo_acc"], "duo_nll": c["duo_nll"], "mean_w_l": float("nan"),
-        "large_acc": large_acc, "small_acc": small_acc,
-    })
+    if coca_baseline is not None:
+        _add_row({
+            "beta": float("nan"), "pool": "-", "filter_kind": "coca_ts", "proxy_batch_size": -1,
+            "duo_acc": coca_baseline["duo_acc"], "duo_nll": coca_baseline["duo_nll"],
+            "duo_ece": coca_baseline["duo_ece"], "duo_entropy": coca_baseline["duo_entropy"],
+            "mean_w_l": float("nan"), "large_acc": large_acc, "small_acc": small_acc,
+        })
+    else:
+        print("Skipping coca_ts baseline row: --run_baselines not set.")
 
     rows.sort(key=lambda r: r[args.sort_by], reverse=True)
     _print_table(rows)
@@ -442,26 +512,11 @@ def main():
             writer.writerows(rows)
         print(f"\nWrote {len(rows)} rows to {path}")
 
-    if args.use_wandb:
-        import wandb
-        from datetime import datetime
-        duo_tag = f"{cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']}"
-        group = f"{duo_tag}__{args.wandb_group or datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        run = wandb.init(
-            project=args.wandb_project, group=group, name=f"gate_calibration_oracle_{duo_tag}",
-            job_type="gate_calibration_oracle", tags=[cfg["LARGE"]["NAME"], cfg["SMALL"]["NAME"]],
-        )
-        run.summary["large_acc"] = large_acc
-        run.summary["small_acc"] = small_acc
-        for pbs, ceiling in ceilings.items():
-            run.summary[f"hard_selection_ceiling/pbs_{pbs}"] = ceiling
-        table = wandb.Table(columns=_TABLE_COLUMNS)
-        for r in rows:
-            table.add_data(*[r[c] for c in _TABLE_COLUMNS])
-        run.log({"gate_calibration_oracle": table})
+    if run is not None:
         run.finish()
         print(f"\nLogged {len(rows)} rows to wandb project '{args.wandb_project}' "
-              f"(group='{group}') — click any column header in the table UI to sort by it.")
+              f"(group='{group}') — click any column header in the table UI to sort by it "
+              f"(table was built and pushed incrementally, one version per config).")
 
 
 if __name__ == "__main__":
