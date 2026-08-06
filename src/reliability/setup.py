@@ -233,7 +233,9 @@ def fit_beta(
     from src.utils.data import load_imagenetC
 
     if betas is None:
-        betas = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+        betas = [0.0, 0.0001, 0.001, 0.01, 0.1, 0.5, 1.0]
+
+    print(f"[fit_beta] grid-searching beta over {len(betas)} candidates: {betas}")
 
     corruptions = config["CALIBRATOR"]["CORRUPTIONS"]
     severities = config["CALIBRATOR"]["SEVERITIES"]
@@ -242,12 +244,15 @@ def fit_beta(
 
     cached = []  # (x_l, x_s, z_l, z_s, labels), one entry per dev batch
     for corruption in corruptions:
-        calibrator.set_corruption(corruption)
         loader = load_imagenetC(
             config["TEST_DIR"], severities=severities, corruption_types=[corruption],
             device=device, batch_size=config["BS"], num_workers=config["WORKERS"],
             num_samples=num_samples, seed=seed,
         )
+        # total_samples lets the calibrator flush a trailing proxy-batch
+        # remainder instead of leaving it stale (see
+        # JointProxyWeighted._maybe_update_gate).
+        calibrator.set_corruption(corruption, total_samples=len(loader.dataset))
         for imgs, labels in loader:
             xl = torch.stack([large_preprocess(img) for img in imgs]).to(device)
             xs = torch.stack([small_preprocess(img) for img in imgs]).to(device)

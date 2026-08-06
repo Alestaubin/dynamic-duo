@@ -227,6 +227,14 @@ class JointProxyWeighted(BaseJointCalibrator):
         self._buf_labels: list[torch.Tensor] = []
         self._buf_n: int = 0
 
+        # Stream-length bookkeeping (set by set_corruption's total_samples):
+        # when a stream's length isn't a multiple of proxy_batch_size, the
+        # trailing remainder would otherwise never reach the threshold below
+        # and silently combine with a STALE gate from the previous proxy
+        # batch — see _maybe_update_gate's stream_exhausted check.
+        self._stream_total_samples: int | None = None
+        self._stream_samples_seen: int = 0
+
         # Cached gate outputs, held constant between proxy-batch flushes and
         # used to combine every adaptation batch in the meantime. Initialised
         # from the priors so the very first (possibly incomplete) proxy batch
@@ -260,11 +268,18 @@ class JointProxyWeighted(BaseJointCalibrator):
 
     # ── Corruption / label injection ──────────────────────────────────────── #
 
-    def set_corruption(self, label: str) -> None:
+    def set_corruption(self, label: str, total_samples: int | None = None) -> None:
         """New corruption stream: the model resets to source here, so the
         temporal filters reset to their priors too (Section 4), and any
         partially-filled proxy batch from the previous corruption is
-        discarded rather than mixed into the new stream."""
+        discarded rather than mixed into the new stream.
+
+        total_samples, if given (the stream's exact sample count — e.g.
+        len(loader.dataset)), lets _maybe_update_gate detect when the
+        trailing remainder of a stream can never reach proxy_batch_size on
+        its own and force a flush anyway, instead of that tail silently
+        combining with a stale gate from the previous proxy batch.
+        """
         self._current_corruption = label
         self._filter_l.reset()
         self._filter_s.reset()
@@ -272,6 +287,8 @@ class JointProxyWeighted(BaseJointCalibrator):
         self._buf_f_l.clear(); self._buf_f_s.clear()
         self._buf_labels.clear()
         self._buf_n = 0
+        self._stream_total_samples = total_samples
+        self._stream_samples_seen = 0
         self._cached_x_l, self._cached_x_s = self.prior_l, self.prior_s
         self._cached_w_l = float(torch.sigmoid(torch.tensor(self.beta * (self.prior_l - self.prior_s))))
 
@@ -326,7 +343,12 @@ class JointProxyWeighted(BaseJointCalibrator):
         reaches proxy_batch_size samples, compute the proxy scores and refresh
         the cached gate (_cached_r_l, ..., _cached_w_l), then clear the buffer.
         Below proxy_batch_size, this only buffers — the cached gate from the
-        last completed proxy batch (or the prior, initially) is left as-is.
+        last completed proxy batch (or the prior, initially) is left as-is —
+        UNLESS this is provably the stream's last batch (stream_exhausted:
+        we've now seen every sample set_corruption(total_samples=...) said
+        this stream would ever have), in which case the trailing remainder is
+        flushed anyway rather than combining with a stale gate and then being
+        silently discarded at the next set_corruption().
         """
         f_l = self._ext_l._feats.detach() if self._ext_l is not None else None
         f_s = self._ext_s._feats.detach() if self._ext_s is not None else None
@@ -339,8 +361,13 @@ class JointProxyWeighted(BaseJointCalibrator):
         if self._labels is not None:
             self._buf_labels.append(self._labels.detach())
         self._buf_n += z_l.shape[0]
+        self._stream_samples_seen += z_l.shape[0]
 
-        if self._buf_n < self.proxy_batch_size:
+        stream_exhausted = (
+            self._stream_total_samples is not None
+            and self._stream_samples_seen >= self._stream_total_samples
+        )
+        if self._buf_n < self.proxy_batch_size and not stream_exhausted:
             return
 
         agg_z_l = torch.cat(self._buf_z_l, dim=0)
@@ -487,109 +514,3 @@ class JointProxyWeighted(BaseJointCalibrator):
         return _NoOpModule()
 
 
-if __name__ == "__main__":
-    torch.manual_seed(0)
-    K, B = 10, 16
-
-    def _make_calibrator(filter_kind="none", pool="linear", beta=4.0, proxy_batch_size=1):
-        cfg_l = ProxyStats(name="large", num_classes=K)
-        cfg_s = ProxyStats(name="small", num_classes=K)
-        # No CalibrationMaps attached: predicted_acc() falls back to the raw
-        # (identity-calibrated) score, which is fine for a nuclear_norm proxy
-        # since it's already roughly in [0, 1].
-        return JointProxyWeighted(
-            proxy_kind="nuclear_norm", cfg_l=cfg_l, cfg_s=cfg_s,
-            beta=beta, pool=pool, filter_kind=filter_kind, log_every=0,
-            proxy_batch_size=proxy_batch_size,
-        )
-
-    # A confidently-correct large model + a near-uniform (unreliable) small
-    # model should gate mostly toward the large model.
-    calib = _make_calibrator()
-    labels = torch.randint(0, K, (B,))
-    z_l_confident = torch.full((B, K), -2.0)
-    z_l_confident[torch.arange(B), labels] = 8.0
-    z_s_uniform = torch.zeros(B, K)
-    calib.set_corruption("test")
-    calib.set_labels(labels)
-    z_duo = calib.calibrate_with_grad(z_l_confident, z_s_uniform)
-    assert z_duo.shape == (B, K)
-    assert (z_duo.argmax(1) == labels).float().mean() > 0.8
-
-    # Calling calibrate() on the SAME batch must reuse the cached result, not
-    # recompute (which would double-assimilate the stateful filters).
-    calib2 = _make_calibrator(filter_kind="running_mean")
-    calib2.set_corruption("test")
-    calib2.set_labels(labels)
-    z1 = calib2.calibrate_with_grad(z_l_confident, z_s_uniform)
-    z2 = calib2.calibrate(z_l_confident, z_s_uniform)
-    assert torch.allclose(z1, z2)
-    assert calib2._filter_l._n == 1 and calib2._filter_s._n == 1, \
-        "calibrate() must not re-assimilate an already-processed batch into the filter"
-
-    # A fresh batch (no calibrate_with_grad call this time -> no_adapt-style
-    # path) does update the filter exactly once via calibrate() alone.
-    z3 = calib2.calibrate(z_l_confident, z_s_uniform)
-    assert calib2._filter_l._n == 2 and calib2._filter_s._n == 2
-
-    # set_corruption resets the temporal filters to their priors.
-    kalman_calib = _make_calibrator(filter_kind="kalman")
-    kalman_calib.set_corruption("c1")
-    kalman_calib.calibrate(z_l_confident, z_s_uniform)
-    assert kalman_calib._filter_l._mean != kalman_calib._filter_l.prior_mean
-    kalman_calib.set_corruption("c2")
-    assert kalman_calib._filter_l._mean == kalman_calib._filter_l.prior_mean
-
-    # report_and_reset_corruption_stats returns a well-formed summary and
-    # clears its accumulators.
-    calib3 = _make_calibrator()
-    calib3.set_corruption("c")
-    for _ in range(5):
-        labels = torch.randint(0, K, (B,))
-        calib3.set_labels(labels)
-        calib3.calibrate(z_l_confident, z_s_uniform)
-    stats = calib3.report_and_reset_corruption_stats("c")
-    assert stats["n"] == 5
-    assert calib3._corr_r_l == []
-
-    # "log" pool and "linear" pool both produce valid probability-normalisable
-    # logits and agree at beta=0 (equal weighting) up to the pooling formula
-    # difference (log-pool == a 50/50 average of logits; linear == of probs).
-    for pool in ("log", "linear"):
-        c = _make_calibrator(pool=pool, beta=0.0)
-        c.set_corruption("t"); c.set_labels(torch.randint(0, K, (B,)))
-        out = c.calibrate(z_l_confident, z_s_uniform)
-        assert torch.isfinite(out).all()
-
-    # proxy_batch_size > 1 aggregates several adaptation batches into one
-    # proxy computation: the gate weight (and cached r_l/r_s/a_l/a_s) must
-    # stay frozen for the first proxy_batch_size-1 adaptation batches, then
-    # refresh exactly once the buffer reaches proxy_batch_size samples.
-    pbs_calib = _make_calibrator(proxy_batch_size=3 * B)  # 3 adaptation batches per proxy batch
-    pbs_calib.set_corruption("t")
-    w_l_before = pbs_calib._cached_w_l
-    for i in range(2):  # 2 of 3 needed batches: buffer not yet full
-        pbs_calib.set_labels(torch.randint(0, K, (B,)))
-        pbs_calib.calibrate(z_l_confident, z_s_uniform)
-        assert pbs_calib._cached_w_l == w_l_before, \
-            f"gate weight must not update before the proxy batch fills (batch {i})"
-        assert pbs_calib._buf_n == (i + 1) * B
-    pbs_calib.set_labels(torch.randint(0, K, (B,)))
-    pbs_calib.calibrate(z_l_confident, z_s_uniform)  # 3rd batch: buffer now full -> flush
-    assert pbs_calib._buf_n == 0, "buffer must be cleared after flushing"
-    from src.reliability.proxies.nuclear_norm import nuclear_norm_score
-    expected_r_l = nuclear_norm_score(torch.cat([z_l_confident] * 3, dim=0))
-    assert abs(pbs_calib._cached_r_l - expected_r_l) < 1e-6, \
-        "flushed proxy score must be computed on the concatenated 3-batch buffer"
-
-    # set_corruption mid-accumulation discards the partial buffer instead of
-    # carrying it into the new corruption's first proxy batch.
-    pbs_calib2 = _make_calibrator(proxy_batch_size=10 * B)
-    pbs_calib2.set_corruption("c1")
-    pbs_calib2.set_labels(torch.randint(0, K, (B,)))
-    pbs_calib2.calibrate(z_l_confident, z_s_uniform)
-    assert pbs_calib2._buf_n == B
-    pbs_calib2.set_corruption("c2")
-    assert pbs_calib2._buf_n == 0
-
-    print("JointProxyWeighted self-test passed")

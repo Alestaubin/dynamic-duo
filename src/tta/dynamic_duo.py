@@ -324,19 +324,29 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
     )
     return dynamic_duo
 
-def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
+def run_duo(duo, data_loader, wandb_run=None, wandb_prefix="", on_batch=None):
     """
     Run a forward pass through the DynamicDuo on the given data loader.
     Returns a dict of {model_name: probs} and labels.
+
+    on_batch(batch_idx, wandb_prefix, duo, outputs, z_large, z_small, labels),
+    if given, is called right after each batch's forward+adapt — an
+    extension point for callers that need per-batch access (e.g.
+    compare_calibrators.py's --verbose, which compares the current
+    calibrator against a fixed_ts reference batch by batch) without
+    duplicating this loop.
     """
     all_duo, all_large, all_small = [], [], []
     all_labels = []
-    for imgs, labels in tqdm(data_loader, desc="run"):
+    for batch_idx, (imgs, labels) in enumerate(tqdm(data_loader, desc="run")):
         outputs, z_large, z_small = duo(imgs, labels=labels)
         all_duo.append(outputs.detach().cpu())
         all_large.append(z_large.detach().cpu())
         all_small.append(z_small.detach().cpu())
         all_labels.append(labels.cpu())
+
+        if on_batch is not None:
+            on_batch(batch_idx, wandb_prefix, duo, outputs, z_large, z_small, labels)
 
         if wandb_run is not None:
             log_dict = {}
@@ -377,7 +387,8 @@ def collect_logits(large, large_preprocess, small, small_preprocess, data_loader
 
 
 def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None,
-                          use_wandb=False, group=None, run_name=None, on_corruption_start=None):
+                          use_wandb=False, group=None, run_name=None, on_corruption_start=None,
+                          on_batch=None):
     """Runs duo over cfg['EVAL']'s corruptions/severities; returns results_rows
     (one dict per corruption/severity, plus a final "average" row).
 
@@ -391,6 +402,10 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
     per stream right before duo.reset() — an extension point for callers
     that need to know corruption boundaries without re-implementing this
     loop (e.g. a logits cache keyed per corruption/severity).
+
+    on_batch, if given, is passed straight through to run_duo (see its
+    docstring) — an extension point for per-batch diagnostics (e.g.
+    compare_calibrators.py's --verbose).
     """
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
@@ -480,11 +495,16 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                     f"Oracle TS fitted | Tl={cal.Tl.item():.4f}  Ts={cal.Ts.item():.4f}"
                 )
 
-            if hasattr(duo.joint_calibrator, "set_corruption"):
-                duo.joint_calibrator.set_corruption(f"{corruption_type}/s{severity}")
-
             loader = load_imagenetC(cfg["TEST_DIR"], **loader_kwargs)
-            probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
+            if hasattr(duo.joint_calibrator, "set_corruption"):
+                # total_samples=len(loader.dataset) lets the calibrator flush
+                # a trailing proxy-batch remainder instead of leaving it
+                # stale (see JointProxyWeighted._maybe_update_gate).
+                duo.joint_calibrator.set_corruption(
+                    f"{corruption_type}/s{severity}", total_samples=len(loader.dataset)
+                )
+
+            probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix, on_batch=on_batch)
             metrics_by_model = {name: get_metrics_dict(p, labels) for name, p in probs_dict.items()}
             # Average entropy per model for this corruption: run_duo already
             # accumulates it batch-by-batch in duo._diag (softmax_entropy),

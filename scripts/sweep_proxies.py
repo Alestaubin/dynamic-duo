@@ -70,12 +70,14 @@ from __future__ import annotations
 
 import argparse
 import csv as csv_module
+import time
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
 from scipy.stats import pearsonr, spearmanr
+from tqdm import tqdm
 
 from src.utils.data import load_config, load_imagenetC
 from src.utils.model import get_model
@@ -92,7 +94,7 @@ _TABLE_COLUMNS = [
     "sel_acc", "sel_correct", "sel_total",
     "bal_sel_acc", "sel_acc_large_better", "sel_acc_small_better",
     "n_large_better", "n_small_better",
-    "gap_bias", "gap_slope", "gap_corr", "gap_spearman",
+    "gap_bias", "gap_slope", "gap_pearson", "gap_spearman",
     "l_r2", "l_pearson_r", "l_spearman_rho",
     "s_r2", "s_pearson_r", "s_spearman_rho",
 ]
@@ -185,7 +187,7 @@ def _gap_stats(cal_l, cal_s, acc_l, acc_s) -> dict:
     """
     nan_result = {
         "gap_bias": float("nan"), "gap_slope": float("nan"),
-        "gap_corr": float("nan"), "gap_spearman": float("nan"),
+        "gap_pearson": float("nan"), "gap_spearman": float("nan"),
     }
     if len(cal_l) < 3:
         return nan_result
@@ -198,7 +200,7 @@ def _gap_stats(cal_l, cal_s, acc_l, acc_s) -> dict:
     spearman_corr, _ = spearmanr(score_gap, acc_gap)
     return {
         "gap_bias": float(bias), "gap_slope": float(slope),
-        "gap_corr": float(pearson_corr), "gap_spearman": float(spearman_corr),
+        "gap_pearson": float(pearson_corr), "gap_spearman": float(spearman_corr),
     }
 
 
@@ -212,15 +214,25 @@ def _records_from_raw(cfg_l, cfg_s, z_l, z_s, f_l, f_s, labels, batch_size, corr
     have seen live — see _chunks). Always rescored fresh against the CURRENT
     cfg_l/cfg_s: a cached record must never be reused across runs that fit
     different proxies, or a newly-requested proxy_kind would be silently
-    missing from a stale record's raw_l/raw_s dict."""
+    missing from a stale record's raw_l/raw_s dict.
+
+    This is the actually-expensive step, NOT the sklearn fits in
+    fit_calibration_maps: make_record -> raw_proxies() scores EVERY fitted
+    proxy on cfg_l/cfg_s (see ProxyStats.proxies = build_all()), regardless of
+    which proxy_kinds the caller asked for — so if cot/atc/prototype were
+    source-fitted, every chunk here pays cot's O(batch_size^3) Hungarian
+    assignment and nuclear_norm's SVD. tqdm makes that visible instead of a
+    silent multi-minute list comprehension.
+    """
     n = z_l.shape[0]
+    chunks = _chunks(n, batch_size)
     return [
         make_record(
             cfg_l, cfg_s,
             z_l[sl], z_s[sl], f_l[sl], f_s[sl], labels[sl],
             corruption, severity,
         )
-        for sl in _chunks(n, batch_size)
+        for sl in tqdm(chunks, desc=f"Scoring calibration records ({corruption})")
     ]
 
 
@@ -280,9 +292,11 @@ def main():
                         help="Defaults to a timestamp. Always prefixed with the duo's model "
                              "names (see duo_tag below) so two duos' sweeps can never mix in "
                              "the same wandb group.")
+    parser.add_argument("--device", type=str, default=None,
+                        help="torch device for model loading, source-fitting, AND the Sweep")
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     config = load_config(args.config)
@@ -374,15 +388,24 @@ def main():
             stream_cache_dir, calib_key, _collect_calib,
             use_cache=args.use_cache, overwrite_cache=args.overwrite_cache,
         )
+        # load_or_collect_stream always hands back CPU tensors regardless of
+        # --device (see the eval_data move below) — move once here too, so
+        # _records_from_raw's raw_proxies() calls (nuclear_norm SVD,
+        # prototype matmuls) run on-device instead of CPU.
+        if device.type != "cpu":
+            z_l, z_s, f_l, f_s, labels = (t.to(device) for t in (z_l, z_s, f_l, f_s, labels))
+        t0 = time.time()
         records = _records_from_raw(cfg_l, cfg_s, z_l, z_s, f_l, f_s, labels, config["BS"], "mixed", 0)
-        print(f"Collected {len(records)} calibration records.")
+        print(f"Collected {len(records)} calibration records in {time.time() - t0:.1f}s.")
 
         fitted_maps: dict[tuple[str, str], CalibrationMaps] = {}
-        for pk in args.proxy_kinds:
-            for cm in args.calib_methods:
-                fitted_maps[(pk, cm)] = fit_calibration_maps(
-                    records, pk, cfg_l.name, cfg_s.name, method=cm,
-                )
+        map_combos = [(pk, cm) for pk in args.proxy_kinds for cm in args.calib_methods]
+        t0 = time.time()
+        for pk, cm in tqdm(map_combos, desc="Fitting calibration maps (proxy_kind, calib_method)"):
+            fitted_maps[(pk, cm)] = fit_calibration_maps(
+                records, pk, cfg_l.name, cfg_s.name, method=cm,
+            )
+        print(f"Fitted {len(map_combos)} calibration maps in {time.time() - t0:.1f}s.")
 
         # --- Phase C: one pass over eval data per (corruption, severity),
         # cached at sample granularity so every proxy_batch_size can re-chunk
@@ -409,41 +432,60 @@ def main():
         ext_l.remove()
         ext_s.remove()
 
-    # --- Sweep: cheap in-memory recomputation from the two cached passes. ---
+    # collect_stream/load_or_collect_stream always hand back CPU tensors
+    # (see src/utils/stream_cache.py — cached to disk that way regardless of
+    # --device), so move each stream onto the target device ONCE here rather
+    # than per chunk inside the (proxy_kind, proxy_batch_size) sweep below —
+    # every score() call in the Sweep phase then runs on-device for free via
+    # plain slicing, no repeated host<->device transfer per chunk per combo.
+    if device.type != "cpu":
+        eval_data = {
+            key: tuple(t.to(device) for t in tensors)
+            for key, tensors in eval_data.items()
+        }
+
+    # --- Sweep: cheap in-memory recomputation from the two cached passes,
+    # EXCEPT proxy_kind='cot' (Hungarian assignment, O(proxy_batch_size^3)
+    # per chunk, scipy on CPU) and 'nuclear_norm' (SVD per chunk, also CPU),
+    # whose per-chunk score() cost grows sharply with proxy_batch_size — a
+    # tqdm + per-combo timing over (proxy_kind, proxy_batch_size), not over
+    # every chunk, keeps this visible without flooding the log. ---
     rows = []
-    for pk in args.proxy_kinds:
-        for pbs in args.proxy_batch_sizes:
-            raw = []  # (r_l, r_s, acc_l, acc_s) per proxy-batch chunk, across all eval streams
-            for (zl, zs, fl, fs, labels) in eval_data.values():
-                n = zl.shape[0]
-                for sl in _chunks(n, pbs):
-                    z_l_c, z_s_c, f_l_c, f_s_c, labels_c = zl[sl], zs[sl], fl[sl], fs[sl], labels[sl]
-                    r_l = cfg_l.score(pk, z_l_c, f_l_c)
-                    r_s = cfg_s.score(pk, z_s_c, f_s_c)
-                    acc_l = float((z_l_c.argmax(1) == labels_c).float().mean())
-                    acc_s = float((z_s_c.argmax(1) == labels_c).float().mean())
-                    raw.append((r_l, r_s, acc_l, acc_s))
+    combos = [(pk, pbs) for pk in args.proxy_kinds for pbs in args.proxy_batch_sizes]
+    for pk, pbs in tqdm(combos, desc="Sweep (proxy_kind, proxy_batch_size)"):
+        t0 = time.time()
+        raw = []  # (r_l, r_s, acc_l, acc_s) per proxy-batch chunk, across all eval streams
+        for (zl, zs, fl, fs, labels) in eval_data.values():
+            n = zl.shape[0]
+            for sl in _chunks(n, pbs):
+                z_l_c, z_s_c, f_l_c, f_s_c, labels_c = zl[sl], zs[sl], fl[sl], fs[sl], labels[sl]
+                r_l = cfg_l.score(pk, z_l_c, f_l_c)
+                r_s = cfg_s.score(pk, z_s_c, f_s_c)
+                acc_l = float((z_l_c.argmax(1) == labels_c).float().mean())
+                acc_s = float((z_s_c.argmax(1) == labels_c).float().mean())
+                raw.append((r_l, r_s, acc_l, acc_s))
+        print(f"  [{pk}, pbs={pbs}] raw scoring over {len(raw)} chunks took {time.time() - t0:.1f}s")
 
-            for cm in args.calib_methods:
-                maps = fitted_maps[(pk, cm)]
-                cal_l = [maps.predict_l(pk, r_l) for r_l, r_s, acc_l, acc_s in raw]
-                cal_s = [maps.predict_s(pk, r_s) for r_l, r_s, acc_l, acc_s in raw]
-                acc_l_list = [acc_l for r_l, r_s, acc_l, acc_s in raw]
-                acc_s_list = [acc_s for r_l, r_s, acc_l, acc_s in raw]
+        for cm in args.calib_methods:
+            maps = fitted_maps[(pk, cm)]
+            cal_l = [maps.predict_l(pk, r_l) for r_l, r_s, acc_l, acc_s in raw]
+            cal_s = [maps.predict_s(pk, r_s) for r_l, r_s, acc_l, acc_s in raw]
+            acc_l_list = [acc_l for r_l, r_s, acc_l, acc_s in raw]
+            acc_s_list = [acc_s for r_l, r_s, acc_l, acc_s in raw]
 
-                sel_acc, sel_correct, sel_total = _selection_accuracy(cal_l, cal_s, acc_l_list, acc_s_list)
-                bal_stats = _balanced_selection_accuracy(cal_l, cal_s, acc_l_list, acc_s_list)
-                gap_stats = _gap_stats(cal_l, cal_s, acc_l_list, acc_s_list)
-                l_stats = _corr_stats(cal_l, acc_l_list)
-                s_stats = _corr_stats(cal_s, acc_s_list)
-                rows.append({
-                    "proxy_kind": pk, "calib_method": cm, "proxy_batch_size": pbs, "n": len(raw),
-                    "sel_acc": sel_acc, "sel_correct": sel_correct, "sel_total": sel_total,
-                    **bal_stats,
-                    **gap_stats,
-                    "l_r2": l_stats["r2"], "l_pearson_r": l_stats["pearson_r"], "l_spearman_rho": l_stats["spearman_rho"],
-                    "s_r2": s_stats["r2"], "s_pearson_r": s_stats["pearson_r"], "s_spearman_rho": s_stats["spearman_rho"],
-                })
+            sel_acc, sel_correct, sel_total = _selection_accuracy(cal_l, cal_s, acc_l_list, acc_s_list)
+            bal_stats = _balanced_selection_accuracy(cal_l, cal_s, acc_l_list, acc_s_list)
+            gap_stats = _gap_stats(cal_l, cal_s, acc_l_list, acc_s_list)
+            l_stats = _corr_stats(cal_l, acc_l_list)
+            s_stats = _corr_stats(cal_s, acc_s_list)
+            rows.append({
+                "proxy_kind": pk, "calib_method": cm, "proxy_batch_size": pbs, "n": len(raw),
+                "sel_acc": sel_acc, "sel_correct": sel_correct, "sel_total": sel_total,
+                **bal_stats,
+                **gap_stats,
+                "l_r2": l_stats["r2"], "l_pearson_r": l_stats["pearson_r"], "l_spearman_rho": l_stats["spearman_rho"],
+                "s_r2": s_stats["r2"], "s_pearson_r": s_stats["pearson_r"], "s_spearman_rho": s_stats["spearman_rho"],
+            })
 
     rows.sort(key=lambda r: (r[args.sort_by] if r[args.sort_by] == r[args.sort_by] else -1), reverse=True)
 

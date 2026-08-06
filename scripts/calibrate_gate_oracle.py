@@ -61,6 +61,29 @@ from both models that a hard per-chunk switch structurally cannot, even
 with perfect oracle labels. Removed to avoid the false impression of a
 ceiling.)
 
+--optimal_w: an even tighter ceiling than the beta sweep
+--------------------------------------------------------
+The beta sweep above still constrains w_l to the PARAMETERIZED FORM
+sigmoid(beta * (x_l - x_s)) -- it asks "what's the best beta", not "what's
+the best possible w_l". --optimal_w (see src.calibrators.
+joint_optimal_w_oracle.optimal_w_nll) removes that constraint: for every
+adaptation batch it directly solves for the scalar
+w_l in [0, 1] that minimizes THAT batch's own NLL, via a bounded 1-D
+optimizer. This is exact, not a heuristic: for fixed T_l/T_s, z_duo(w_l) is
+AFFINE in w_l under both pool modes (log: w_l*(z_l/T_l)+(1-w_l)*(z_s/T_s);
+linear: same affine combination inside softmax's argument), and cross-
+entropy is convex in its logit/prob argument, so NLL(w_l) is provably
+convex on [0, 1] -- a bounded scalar optimizer is guaranteed to find the
+GLOBAL optimum, no local-minima risk. Any gap between --optimal_w's ceiling
+and the beta sweep's best row is attributable to the sigmoid FORM itself
+being a worse fit than the true per-batch optimum -- a THIRD failure mode
+alongside Stage 1 (proxy imperfection) and Stage 2's beta/pool/filter
+choices. Like proxy_kind='oracle', this cheats by construction (solves
+using the batch's own test labels) -- an upper-bound diagnostic only, never
+a deployable method. Keeps T_l/T_s fixed from the same base_ts as
+everything else (never re-optimized here), so it isolates the gating
+ceiling specifically, not a re-calibrated one.
+
 Usage
 -----
 python scripts/calibrate_gate_oracle.py --config cfgs/dynamic_duo_config.yaml \
@@ -71,6 +94,12 @@ python scripts/calibrate_gate_oracle.py --config cfgs/dynamic_duo_config.yaml \
 # helps, beyond the default (one adaptation batch per gate refresh):
 python scripts/calibrate_gate_oracle.py --config cfgs/dynamic_duo_config.yaml \
     --proxy_batch_sizes 128 512 1024 --csv_path out/gate_calibration_oracle.csv
+
+# Add the optimal-w-per-batch ceiling row (one per --pools value) alongside
+# the beta sweep and fixed_ts/coca_ts baselines:
+python scripts/calibrate_gate_oracle.py --config cfgs/dynamic_duo_config.yaml \
+    --fixed_ts_config checkpoints/fixed_ts/default --run_baselines --optimal_w \
+    --csv_path out/gate_calibration_oracle.csv
 """
 
 from __future__ import annotations
@@ -91,12 +120,13 @@ from src.utils.stream_cache import duo_cache_dir, stream_key, collect_stream, lo
 from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_proxy_weighted import JointProxyWeighted
+from src.calibrators.joint_optimal_w_oracle import combine as _combine, optimal_w_nll as _optimal_w_nll
 from src.reliability.proxies.stats import ProxyStats, FeatureExtractor
 from src.reliability.calibration.logit import to_logit
 
 _TABLE_COLUMNS = [
     "beta", "pool", "filter_kind", "proxy_batch_size",
-    "duo_acc", "duo_nll", "duo_ece", "duo_entropy", "mean_w_l", "large_acc", "small_acc",
+    "duo_acc", "duo_nll", "duo_ece", "duo_entropy", "mean_w_l", "std_w_l", "large_acc", "small_acc",
 ]
 
 
@@ -247,8 +277,11 @@ def _run_config(streams, base_ts, beta, pool, filter_kind, filter_kwargs, proxy_
 
     per_stream_rows = []
     for (corruption, severity), (z_l, z_s, labels) in streams.items():
-        calibrator.set_corruption(f"{corruption}/s{severity}")
         n = z_l.shape[0]
+        # total_samples lets the calibrator flush a trailing proxy-batch
+        # remainder instead of leaving it stale (see
+        # JointProxyWeighted._maybe_update_gate).
+        calibrator.set_corruption(f"{corruption}/s{severity}", total_samples=n)
         correct, nll_sum, entropy_sum, w_l_sum, total = 0.0, 0.0, 0.0, 0.0, 0
         z_duo_chunks = []
         for start in range(0, n, batch_size):
@@ -278,6 +311,61 @@ def _run_config(streams, base_ts, beta, pool, filter_kind, filter_kwargs, proxy_
         "mean_w_l": sum(r["mean_w_l"] for r in per_stream_rows) / n_streams,
         "duo_entropy": sum(r["entropy"] for r in per_stream_rows) / n_streams,
         "duo_ece": sum(r["ece"] for r in per_stream_rows) / n_streams,
+    }
+
+
+@torch.no_grad()
+def _optimal_weight_accuracy(streams: dict, base_ts, pool: str, batch_size: int) -> dict:
+    """Per-batch ceiling: chunk each stream by the adaptation batch_size (no
+    proxy-batch aggregation -- this tests the pure per-batch mixing ceiling,
+    not the aggregation/filter stage) and solve _optimal_w_nll (see
+    src.calibrators.joint_optimal_w_oracle) fresh for every batch, instead
+    of routing through JointProxyWeighted's gate at all. Same
+    per-stream-macro-average convention as _run_config/_baseline_accuracy,
+    so directly comparable in the same table. Also
+    reports std_w_l (across every batch, pooled over all streams): a
+    near-zero std here would say the optimum barely moves batch to batch
+    (a near-constant w_l might already be close to optimal, hard-selection-
+    ceiling style); a wide std says the ceiling genuinely needs to react
+    per batch, which the sigmoid gate is at least structurally able to do.
+    """
+    T_l = float(base_ts.Tl.item()) if base_ts is not None else 1.0
+    T_s = float(base_ts.Ts.item()) if base_ts is not None else 1.0
+
+    per_stream_rows = []
+    all_w_l: list[float] = []
+    for (z_l, z_s, labels) in streams.values():
+        n = z_l.shape[0]
+        correct, nll_sum, entropy_sum, w_l_sum, total = 0.0, 0.0, 0.0, 0.0, 0
+        z_duo_chunks = []
+        for start in range(0, n, batch_size):
+            sl = slice(start, min(start + batch_size, n))
+            zl_b, zs_b, y_b = z_l[sl], z_s[sl], labels[sl]
+            w_l, _ = _optimal_w_nll(zl_b, zs_b, y_b, T_l, T_s, pool)
+            z_duo = _combine(zl_b, zs_b, w_l, T_l, T_s, pool)
+            bs = sl.stop - sl.start
+            correct += float((z_duo.argmax(1) == y_b).float().sum())
+            nll_sum += float(F.cross_entropy(z_duo, y_b, reduction="sum"))
+            entropy_sum += float(softmax_entropy(z_duo).sum())
+            w_l_sum += w_l * bs
+            total += bs
+            all_w_l.append(w_l)
+            z_duo_chunks.append(z_duo)
+        probs = F.softmax(torch.cat(z_duo_chunks, dim=0), dim=1).numpy()
+        ece = cal.get_ece(probs, labels.numpy(), num_bins=15)
+        per_stream_rows.append({
+            "acc": correct / total, "nll": nll_sum / total, "mean_w_l": w_l_sum / total,
+            "entropy": entropy_sum / total, "ece": ece,
+        })
+
+    n_streams = len(per_stream_rows)
+    return {
+        "duo_acc": sum(r["acc"] for r in per_stream_rows) / n_streams,
+        "duo_nll": sum(r["nll"] for r in per_stream_rows) / n_streams,
+        "mean_w_l": sum(r["mean_w_l"] for r in per_stream_rows) / n_streams,
+        "duo_entropy": sum(r["entropy"] for r in per_stream_rows) / n_streams,
+        "duo_ece": sum(r["ece"] for r in per_stream_rows) / n_streams,
+        "std_w_l": float(torch.tensor(all_w_l).std()) if len(all_w_l) > 1 else float("nan"),
     }
 
 
@@ -316,14 +404,14 @@ def _baseline_accuracy(streams: dict, calibrator) -> dict:
 
 def _print_table(rows: list[dict]) -> None:
     header = (f"{'beta':>6} {'pool':<7} {'filter':<13} {'pbs':>5}  "
-              f"{'duo_acc':>8} {'duo_nll':>8} {'duo_ece':>8} {'duo_ent':>8} {'mean_w_l':>9}   "
+              f"{'duo_acc':>8} {'duo_nll':>8} {'duo_ece':>8} {'duo_ent':>8} {'mean_w_l':>9} {'std_w_l':>8}   "
               f"{'large_acc':>9} {'small_acc':>9}")
     print("\n" + header)
     print("-" * len(header))
     for r in rows:
         print(f"{r['beta']:>6.2f} {r['pool']:<7} {r['filter_kind']:<13} {r['proxy_batch_size']:>5}  "
               f"{r['duo_acc']:>8.4f} {r['duo_nll']:>8.4f} {r['duo_ece']:>8.4f} {r['duo_entropy']:>8.4f} "
-              f"{r['mean_w_l']:>9.4f}   {r['large_acc']:>9.4f} {r['small_acc']:>9.4f}")
+              f"{r['mean_w_l']:>9.4f} {r['std_w_l']:>8.4f}   {r['large_acc']:>9.4f} {r['small_acc']:>9.4f}")
 
 
 def main():
@@ -385,6 +473,14 @@ def main():
                          help="Run the fixed_ts/coca_ts baseline rows (see _baseline_accuracy) "
                               "even if --diagnose_only is set, so you can see where the "
                               "existing calibrators land relative to the raw gap signal.")
+    parser.add_argument("--optimal_w", action="store_true",
+                         help="Add one row per --pools value: the optimal-w-per-batch oracle "
+                              "ceiling (see _optimal_weight_accuracy and the module docstring's "
+                              "'--optimal_w' section) -- solves for the exact NLL-minimizing "
+                              "w_l per adaptation batch directly, unconstrained by the "
+                              "sigmoid(beta*(x_l-x_s)) form the rest of this script sweeps, "
+                              "isolating whether that form itself (not just its beta) is "
+                              "leaving accuracy/NLL on the table.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -467,7 +563,7 @@ def main():
             "beta": beta, "pool": pool, "filter_kind": filter_kind, "proxy_batch_size": pbs,
             "duo_acc": result["duo_acc"], "duo_nll": result["duo_nll"],
             "duo_ece": result["duo_ece"], "duo_entropy": result["duo_entropy"],
-            "mean_w_l": result["mean_w_l"],
+            "mean_w_l": result["mean_w_l"], "std_w_l": float("nan"),
             "large_acc": large_acc, "small_acc": small_acc,
         })
 
@@ -480,7 +576,7 @@ def main():
             "beta": float("nan"), "pool": "-", "filter_kind": "fixed_ts", "proxy_batch_size": -1,
             "duo_acc": fixed_ts_baseline["duo_acc"], "duo_nll": fixed_ts_baseline["duo_nll"],
             "duo_ece": fixed_ts_baseline["duo_ece"], "duo_entropy": fixed_ts_baseline["duo_entropy"],
-            "mean_w_l": float("nan"), "large_acc": large_acc, "small_acc": small_acc,
+            "mean_w_l": float("nan"), "std_w_l": float("nan"), "large_acc": large_acc, "small_acc": small_acc,
         })
     else:
         print("Skipping fixed_ts baseline row: no --fixed_ts_config given.")
@@ -490,10 +586,27 @@ def main():
             "beta": float("nan"), "pool": "-", "filter_kind": "coca_ts", "proxy_batch_size": -1,
             "duo_acc": coca_baseline["duo_acc"], "duo_nll": coca_baseline["duo_nll"],
             "duo_ece": coca_baseline["duo_ece"], "duo_entropy": coca_baseline["duo_entropy"],
-            "mean_w_l": float("nan"), "large_acc": large_acc, "small_acc": small_acc,
+            "mean_w_l": float("nan"), "std_w_l": float("nan"), "large_acc": large_acc, "small_acc": small_acc,
         })
     else:
         print("Skipping coca_ts baseline row: --run_baselines not set.")
+
+    if args.optimal_w:
+        print("Running optimal-w-per-batch oracle ceiling...")
+        for pool in args.pools:
+            opt = _optimal_weight_accuracy(streams, base_ts, pool, cfg["BS"])
+            print(f"[optimal_w pool={pool}] duo_acc={opt['duo_acc']:.4f} duo_nll={opt['duo_nll']:.4f} "
+                  f"duo_ece={opt['duo_ece']:.4f} duo_entropy={opt['duo_entropy']:.4f} "
+                  f"mean_w_l={opt['mean_w_l']:.4f} std_w_l={opt['std_w_l']:.4f}")
+            _add_row({
+                "beta": float("nan"), "pool": pool, "filter_kind": "optimal_w", "proxy_batch_size": -1,
+                "duo_acc": opt["duo_acc"], "duo_nll": opt["duo_nll"],
+                "duo_ece": opt["duo_ece"], "duo_entropy": opt["duo_entropy"],
+                "mean_w_l": opt["mean_w_l"], "std_w_l": opt["std_w_l"],
+                "large_acc": large_acc, "small_acc": small_acc,
+            })
+    else:
+        print("Skipping optimal-w-per-batch oracle ceiling (--optimal_w to enable).")
 
     rows.sort(key=lambda r: r[args.sort_by], reverse=True)
     _print_table(rows)

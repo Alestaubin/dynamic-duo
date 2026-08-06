@@ -71,9 +71,11 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import wandb
 
 from src.tta.dynamic_duo import setup_duo, evaluate_dynamic_duo
+from src.tta.tent import softmax_entropy
 from src.utils.model import get_model
 from src.utils.data import load_config, load_imagenetC
 from src.utils.stream_cache import DuoStreamCache, duo_cache_dir
@@ -209,6 +211,21 @@ def main():
     parser.add_argument("--overwrite_cache", action="store_true",
                         help="With --use_cache, always recompute and overwrite any existing "
                              "cache entries instead of reusing them.")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Print one line per batch: the current run_cfg's calibrator "
+                             "accuracy/NLL (already tracked in duo._diag, free) alongside a "
+                             "fixed_ts reference (--fixed_ts_reference) recomputed fresh on "
+                             "the SAME batch's z_large/z_small every time (a plain temperature "
+                             "scale + combine — super cheap, no adaptation) — so you can watch "
+                             "in real time whether the technique under test is actually beating "
+                             "the simplest baseline batch by batch, not just in the final "
+                             "corruption average.")
+    parser.add_argument("--fixed_ts_reference", type=str, default="checkpoints/fixed_ts/default",
+                        help="JointFixedTS checkpoint used ONLY for the --verbose per-batch "
+                             "reference comparison — independent of whatever fixed_ts_config "
+                             "(if any) a given run_cfg uses for its own calibrator, so every "
+                             "run_cfg (including calibration_mode='fixed_ts' itself) is "
+                             "compared against the SAME fixed baseline.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -237,6 +254,15 @@ def main():
         missing = wanted - {c["name"] for c in run_configs}
         if missing:
             parser.error(f"Unknown run name(s) in --only: {sorted(missing)}")
+
+    # Loaded ONCE, reused as the --verbose per-batch reference for every
+    # run_cfg — frozen (a plain temperature scale + combine, no state to
+    # mutate), so unlike large_model/small_model it's safe to share.
+    ts_reference = None
+    if args.verbose:
+        ts_reference = JointFixedTS.load(args.fixed_ts_reference)
+        for p in ts_reference.parameters():
+            p.requires_grad_(False)
 
     summary_rows = []
     for run_cfg in run_configs:
@@ -295,11 +321,27 @@ def main():
                     )
                 stream_cache_ctrl.set_stream(f"{corruption}_s{severity}", _loader_factory)
 
+        def _on_batch(batch_idx, prefix, duo, outputs, z_large, z_small, labels):
+            d = duo._diag["duo"]
+            with torch.no_grad():
+                z_ref = ts_reference.calibrate(z_large, z_small)
+                labels_ref = labels.to(z_ref.device)
+                ref_acc = float((z_ref.argmax(1) == labels_ref).float().mean())
+                ref_nll = float(F.cross_entropy(z_ref, labels_ref, reduction="mean"))
+                ref_ent = float(softmax_entropy(z_ref).mean())
+            print(
+                f"[{prefix}batch {batch_idx}] {run_cfg['name']}: "
+                f"acc={d['acc_last']:.4f} nll={d['nll_last']:.4f} ent={d['ent_last']:.4f}"
+                f"  |  fixed_ts ref: acc={ref_acc:.4f} nll={ref_nll:.4f} ent={ref_ent:.4f}"
+                f"  |  Δacc={d['acc_last'] - ref_acc:+.4f} Δnll={d['nll_last'] - ref_nll:+.4f}"
+            )
+
         results_rows = evaluate_dynamic_duo(
             duo, config, wandb_project=args.wandb_project,
             num_samples=args.num_samples, seed=args.seed,
-            use_wandb=True, group=group, run_name=run_cfg["name"],
+            use_wandb=True, group=group, run_name=f"{run_cfg['name']}__{args.mode}",
             on_corruption_start=_on_corruption_start,
+            on_batch=_on_batch if args.verbose else None,
         )
         if stream_cache_ctrl is not None:
             stream_cache_ctrl.finish()
