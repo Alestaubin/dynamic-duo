@@ -5,7 +5,7 @@ Isolates the SECOND half of filtered-proxy soft weighting -- the gate
 
     w_l = sigmoid(beta * (x_l - x_s))
 
-plus the combination (log/linear pooling) -- from the FIRST half (proxy
+plus the combination -- from the FIRST half (proxy
 score -> calibration -> temporal filter), by driving the gate with the
 ORACLE proxy_kind (src/reliability/proxies/oracle.py): the model's literal
 per-batch accuracy, read straight from labels instead of estimated from a
@@ -19,7 +19,7 @@ the complementary question: "given a PERFECT reliability signal, what is the
 best this gate + combination mechanism can possibly do" (Stage 2's ceiling).
 Any gap between this oracle ceiling and the real proxy_weighted numbers from
 compare_calibrators.py / sweep_proxies.py is attributable to Stage 1 (the
-proxy itself is imperfect), not Stage 2 (the gate/pool math) -- those two
+proxy itself is imperfect), not Stage 2 (the gate math) -- those two
 failure modes need completely different fixes, so it matters which one
 you're actually looking at.
 
@@ -35,7 +35,7 @@ noise, not batch noise -- and vice versa.
 
 Design
 ------
-Every (beta, pool, filter_kind, proxy_batch_size) combination in the sweep
+Every (beta, filter_kind, proxy_batch_size) combination in the sweep
 sees IDENTICAL model logits: mode=no_adapt means frozen models with pure
 batch-stat BatchNorm (see CLAUDE.md's TENT gotcha -- with track_running_stats
 disabled, a batch's output depends only on that batch's own composition,
@@ -69,20 +69,19 @@ the best possible w_l". --optimal_w (see src.calibrators.
 joint_optimal_w_oracle.optimal_w_nll) removes that constraint: for every
 adaptation batch it directly solves for the scalar
 w_l in [0, 1] that minimizes THAT batch's own NLL, via a bounded 1-D
-optimizer. This is exact, not a heuristic: for fixed T_l/T_s, z_duo(w_l) is
-AFFINE in w_l under both pool modes (log: w_l*(z_l/T_l)+(1-w_l)*(z_s/T_s);
-linear: same affine combination inside softmax's argument), and cross-
-entropy is convex in its logit/prob argument, so NLL(w_l) is provably
-convex on [0, 1] -- a bounded scalar optimizer is guaranteed to find the
-GLOBAL optimum, no local-minima risk. Any gap between --optimal_w's ceiling
-and the beta sweep's best row is attributable to the sigmoid FORM itself
-being a worse fit than the true per-batch optimum -- a THIRD failure mode
-alongside Stage 1 (proxy imperfection) and Stage 2's beta/pool/filter
-choices. Like proxy_kind='oracle', this cheats by construction (solves
-using the batch's own test labels) -- an upper-bound diagnostic only, never
-a deployable method. Keeps T_l/T_s fixed from the same base_ts as
-everything else (never re-optimized here), so it isolates the gating
-ceiling specifically, not a re-calibrated one.
+optimizer. This is exact, not a heuristic: for fixed T_l/T_s,
+z_duo(w_l) = w_l*(z_l/T_l)+(1-w_l)*(z_s/T_s) is AFFINE in w_l, and cross-
+entropy is convex in its logit argument, so NLL(w_l) is provably convex on
+[0, 1] -- a bounded scalar optimizer is guaranteed to find the GLOBAL
+optimum, no local-minima risk. Any gap between --optimal_w's ceiling and
+the beta sweep's best row is attributable to the sigmoid FORM itself being
+a worse fit than the true per-batch optimum -- a THIRD failure mode
+alongside Stage 1 (proxy imperfection) and Stage 2's beta/filter choices.
+Like proxy_kind='oracle', this cheats by construction (solves using the
+batch's own test labels) -- an upper-bound diagnostic only, never a
+deployable method. Keeps T_l/T_s fixed from the same base_ts as everything
+else (never re-optimized here), so it isolates the gating ceiling
+specifically, not a re-calibrated one.
 
 Usage
 -----
@@ -95,8 +94,8 @@ python scripts/calibrate_gate_oracle.py --config cfgs/dynamic_duo_config.yaml \
 python scripts/calibrate_gate_oracle.py --config cfgs/dynamic_duo_config.yaml \
     --proxy_batch_sizes 128 512 1024 --csv_path out/gate_calibration_oracle.csv
 
-# Add the optimal-w-per-batch ceiling row (one per --pools value) alongside
-# the beta sweep and fixed_ts/coca_ts baselines:
+# Add the optimal-w-per-batch ceiling row alongside the beta sweep and
+# fixed_ts/coca_ts baselines:
 python scripts/calibrate_gate_oracle.py --config cfgs/dynamic_duo_config.yaml \
     --fixed_ts_config checkpoints/fixed_ts/default --run_baselines --optimal_w \
     --csv_path out/gate_calibration_oracle.csv
@@ -125,7 +124,7 @@ from src.reliability.proxies.stats import ProxyStats, FeatureExtractor
 from src.reliability.calibration.logit import to_logit
 
 _TABLE_COLUMNS = [
-    "beta", "pool", "filter_kind", "proxy_batch_size",
+    "beta", "filter_kind", "proxy_batch_size",
     "duo_acc", "duo_nll", "duo_ece", "duo_entropy", "mean_w_l", "std_w_l", "large_acc", "small_acc",
 ]
 
@@ -205,7 +204,7 @@ def _diagnose_signal(
     alongside purely for reference -- they cost nothing extra to show here
     since main() already needs them for the full sweep's baseline rows, and
     having them next to the raw gap stats means --diagnose_only alone (which
-    returns before the expensive beta/pool/filter sweep) still tells you
+    returns before the expensive beta/filter sweep) still tells you
     where the existing calibrators land, not just the raw signal quality.
     """
     print(f"\n{'=' * 100}\nDIAGNOSTIC: raw oracle accuracy gap (acc_l - acc_s), before any "
@@ -251,8 +250,8 @@ def _diagnose_signal(
               f"(<<1 means chunk noise likely swamps the true gap at this pbs)\n")
 
 
-def _run_config(streams, base_ts, beta, pool, filter_kind, filter_kwargs, proxy_batch_size, batch_size):
-    """Replay one (beta, pool, filter_kind, proxy_batch_size) config across all
+def _run_config(streams, base_ts, beta, filter_kind, filter_kwargs, proxy_batch_size, batch_size):
+    """Replay one (beta, filter_kind, proxy_batch_size) config across all
     cached eval streams, adaptation-batch by adaptation-batch, through the
     REAL JointProxyWeighted gate/combine logic (proxy_kind='oracle'). Uses
     the calibrator's private _forward() directly (bypassing calibrate() /
@@ -270,7 +269,7 @@ def _run_config(streams, base_ts, beta, pool, filter_kind, filter_kwargs, proxy_
     cfg_s = ProxyStats(name="small", num_classes=1000)
     calibrator = JointProxyWeighted(
         proxy_kind="oracle", cfg_l=cfg_l, cfg_s=cfg_s,
-        beta=beta, pool=pool, filter_kind=filter_kind, filter_kwargs=filter_kwargs,
+        beta=beta, filter_kind=filter_kind, filter_kwargs=filter_kwargs,
         prior_l=to_logit(0.5), prior_s=to_logit(0.5),
         base_ts=base_ts, proxy_batch_size=proxy_batch_size, log_every=0,
     )
@@ -315,7 +314,7 @@ def _run_config(streams, base_ts, beta, pool, filter_kind, filter_kwargs, proxy_
 
 
 @torch.no_grad()
-def _optimal_weight_accuracy(streams: dict, base_ts, pool: str, batch_size: int) -> dict:
+def _optimal_weight_accuracy(streams: dict, base_ts, batch_size: int) -> dict:
     """Per-batch ceiling: chunk each stream by the adaptation batch_size (no
     proxy-batch aggregation -- this tests the pure per-batch mixing ceiling,
     not the aggregation/filter stage) and solve _optimal_w_nll (see
@@ -341,8 +340,8 @@ def _optimal_weight_accuracy(streams: dict, base_ts, pool: str, batch_size: int)
         for start in range(0, n, batch_size):
             sl = slice(start, min(start + batch_size, n))
             zl_b, zs_b, y_b = z_l[sl], z_s[sl], labels[sl]
-            w_l, _ = _optimal_w_nll(zl_b, zs_b, y_b, T_l, T_s, pool)
-            z_duo = _combine(zl_b, zs_b, w_l, T_l, T_s, pool)
+            w_l, _ = _optimal_w_nll(zl_b, zs_b, y_b, T_l, T_s)
+            z_duo = _combine(zl_b, zs_b, w_l, T_l, T_s)
             bs = sl.stop - sl.start
             correct += float((z_duo.argmax(1) == y_b).float().sum())
             nll_sum += float(F.cross_entropy(z_duo, y_b, reduction="sum"))
@@ -403,13 +402,13 @@ def _baseline_accuracy(streams: dict, calibrator) -> dict:
 
 
 def _print_table(rows: list[dict]) -> None:
-    header = (f"{'beta':>6} {'pool':<7} {'filter':<13} {'pbs':>5}  "
+    header = (f"{'beta':>6} {'filter':<13} {'pbs':>5}  "
               f"{'duo_acc':>8} {'duo_nll':>8} {'duo_ece':>8} {'duo_ent':>8} {'mean_w_l':>9} {'std_w_l':>8}   "
               f"{'large_acc':>9} {'small_acc':>9}")
     print("\n" + header)
     print("-" * len(header))
     for r in rows:
-        print(f"{r['beta']:>6.2f} {r['pool']:<7} {r['filter_kind']:<13} {r['proxy_batch_size']:>5}  "
+        print(f"{r['beta']:>6.2f} {r['filter_kind']:<13} {r['proxy_batch_size']:>5}  "
               f"{r['duo_acc']:>8.4f} {r['duo_nll']:>8.4f} {r['duo_ece']:>8.4f} {r['duo_entropy']:>8.4f} "
               f"{r['mean_w_l']:>9.4f} {r['std_w_l']:>8.4f}   {r['large_acc']:>9.4f} {r['small_acc']:>9.4f}")
 
@@ -427,8 +426,6 @@ def main():
                               "must be a checkpoint fit for THIS duo.")
     parser.add_argument("--betas", type=float, nargs="+",
                          default=[0.0, 0.001, 0.01, 0.1, 0.5, 0.75, 1.0])
-    parser.add_argument("--pools", type=str, nargs="+", default=["log", "linear"],
-                         choices=["log", "linear"])
     parser.add_argument("--filter_kinds", type=str, nargs="+",
                          default=["none", "running_mean", "ema", "kalman"],
                          choices=["none", "running_mean", "ema", "kalman"])
@@ -474,8 +471,8 @@ def main():
                               "even if --diagnose_only is set, so you can see where the "
                               "existing calibrators land relative to the raw gap signal.")
     parser.add_argument("--optimal_w", action="store_true",
-                         help="Add one row per --pools value: the optimal-w-per-batch oracle "
-                              "ceiling (see _optimal_weight_accuracy and the module docstring's "
+                         help="Add the optimal-w-per-batch oracle ceiling row (see "
+                              "_optimal_weight_accuracy and the module docstring's "
                               "'--optimal_w' section) -- solves for the exact NLL-minimizing "
                               "w_l per adaptation batch directly, unconstrained by the "
                               "sigmoid(beta*(x_l-x_s)) form the rest of this script sweeps, "
@@ -549,18 +546,18 @@ def main():
             run.log({"gate_calibration_oracle": table})
 
     filter_kwargs = {"alpha": args.ema_alpha, "q": args.kalman_q, "r": args.kalman_r}
-    configs = list(itertools.product(proxy_batch_sizes, args.filter_kinds, args.pools, args.betas))
+    configs = list(itertools.product(proxy_batch_sizes, args.filter_kinds, args.betas))
     total = len(configs)
-    for i, (pbs, filter_kind, pool, beta) in enumerate(configs, start=1):
-        print(f"[{i}/{total}] pbs={pbs} filter={filter_kind} pool={pool} beta={beta}", end="  ", flush=True)
+    for i, (pbs, filter_kind, beta) in enumerate(configs, start=1):
+        print(f"[{i}/{total}] pbs={pbs} filter={filter_kind} beta={beta}", end="  ", flush=True)
         result = _run_config(
-            streams, base_ts, beta, pool, filter_kind, filter_kwargs, pbs, cfg["BS"],
+            streams, base_ts, beta, filter_kind, filter_kwargs, pbs, cfg["BS"],
         )
         print(f"-> duo_acc={result['duo_acc']:.4f} duo_nll={result['duo_nll']:.4f} "
               f"duo_ece={result['duo_ece']:.4f} duo_entropy={result['duo_entropy']:.4f} "
               f"mean_w_l={result['mean_w_l']:.4f}", flush=True)
         _add_row({
-            "beta": beta, "pool": pool, "filter_kind": filter_kind, "proxy_batch_size": pbs,
+            "beta": beta, "filter_kind": filter_kind, "proxy_batch_size": pbs,
             "duo_acc": result["duo_acc"], "duo_nll": result["duo_nll"],
             "duo_ece": result["duo_ece"], "duo_entropy": result["duo_entropy"],
             "mean_w_l": result["mean_w_l"], "std_w_l": float("nan"),
@@ -568,12 +565,12 @@ def main():
         })
 
     # Baseline rows (no gate at all) folded into the SAME table so they sort
-    # alongside the oracle-gate sweep — beta/pool/proxy_batch_size don't apply
+    # alongside the oracle-gate sweep — beta/proxy_batch_size don't apply
     # to these, filled with sentinels (nan / -1) rather than a separate
     # "config" column, to keep the schema/CSV/wandb Table unchanged.
     if fixed_ts_baseline is not None:
         _add_row({
-            "beta": float("nan"), "pool": "-", "filter_kind": "fixed_ts", "proxy_batch_size": -1,
+            "beta": float("nan"), "filter_kind": "fixed_ts", "proxy_batch_size": -1,
             "duo_acc": fixed_ts_baseline["duo_acc"], "duo_nll": fixed_ts_baseline["duo_nll"],
             "duo_ece": fixed_ts_baseline["duo_ece"], "duo_entropy": fixed_ts_baseline["duo_entropy"],
             "mean_w_l": float("nan"), "std_w_l": float("nan"), "large_acc": large_acc, "small_acc": small_acc,
@@ -583,7 +580,7 @@ def main():
 
     if coca_baseline is not None:
         _add_row({
-            "beta": float("nan"), "pool": "-", "filter_kind": "coca_ts", "proxy_batch_size": -1,
+            "beta": float("nan"), "filter_kind": "coca_ts", "proxy_batch_size": -1,
             "duo_acc": coca_baseline["duo_acc"], "duo_nll": coca_baseline["duo_nll"],
             "duo_ece": coca_baseline["duo_ece"], "duo_entropy": coca_baseline["duo_entropy"],
             "mean_w_l": float("nan"), "std_w_l": float("nan"), "large_acc": large_acc, "small_acc": small_acc,
@@ -593,18 +590,17 @@ def main():
 
     if args.optimal_w:
         print("Running optimal-w-per-batch oracle ceiling...")
-        for pool in args.pools:
-            opt = _optimal_weight_accuracy(streams, base_ts, pool, cfg["BS"])
-            print(f"[optimal_w pool={pool}] duo_acc={opt['duo_acc']:.4f} duo_nll={opt['duo_nll']:.4f} "
-                  f"duo_ece={opt['duo_ece']:.4f} duo_entropy={opt['duo_entropy']:.4f} "
-                  f"mean_w_l={opt['mean_w_l']:.4f} std_w_l={opt['std_w_l']:.4f}")
-            _add_row({
-                "beta": float("nan"), "pool": pool, "filter_kind": "optimal_w", "proxy_batch_size": -1,
-                "duo_acc": opt["duo_acc"], "duo_nll": opt["duo_nll"],
-                "duo_ece": opt["duo_ece"], "duo_entropy": opt["duo_entropy"],
-                "mean_w_l": opt["mean_w_l"], "std_w_l": opt["std_w_l"],
-                "large_acc": large_acc, "small_acc": small_acc,
-            })
+        opt = _optimal_weight_accuracy(streams, base_ts, cfg["BS"])
+        print(f"[optimal_w] duo_acc={opt['duo_acc']:.4f} duo_nll={opt['duo_nll']:.4f} "
+              f"duo_ece={opt['duo_ece']:.4f} duo_entropy={opt['duo_entropy']:.4f} "
+              f"mean_w_l={opt['mean_w_l']:.4f} std_w_l={opt['std_w_l']:.4f}")
+        _add_row({
+            "beta": float("nan"), "filter_kind": "optimal_w", "proxy_batch_size": -1,
+            "duo_acc": opt["duo_acc"], "duo_nll": opt["duo_nll"],
+            "duo_ece": opt["duo_ece"], "duo_entropy": opt["duo_entropy"],
+            "mean_w_l": opt["mean_w_l"], "std_w_l": opt["std_w_l"],
+            "large_acc": large_acc, "small_acc": small_acc,
+        })
     else:
         print("Skipping optimal-w-per-batch oracle ceiling (--optimal_w to enable).")
 
@@ -612,7 +608,7 @@ def main():
     _print_table(rows)
 
     best = rows[0]
-    print(f"\nBest config: beta={best['beta']} pool={best['pool']} filter={best['filter_kind']} "
+    print(f"\nBest config: beta={best['beta']} filter={best['filter_kind']} "
           f"proxy_batch_size={best['proxy_batch_size']} -> duo_acc={best['duo_acc']:.4f} "
           f"(vs large={large_acc:.4f} small={small_acc:.4f})")
 

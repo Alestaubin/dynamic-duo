@@ -21,7 +21,6 @@
         "proxy_batch_size": 512,
         "filter_kind": "ema",
         "filter_kwargs": {"alpha": 0.5},
-        "pool": "linear",
         "fit_beta": true,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     },
@@ -33,7 +32,6 @@
         "proxy_batch_size": 512,
         "filter_kind": "ema",
         "filter_kwargs": {"alpha": 0.5},
-        "pool": "linear",
         "fit_beta": true,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     }

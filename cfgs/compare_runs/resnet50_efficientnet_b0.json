@@ -17,7 +17,6 @@
         "proxy_batch_size": 1024,
         "filter_kind": "ema",
         "filter_kwargs": {"alpha": 0.5},
-        "pool": "linear",
         "fit_beta": true
     },
     {
@@ -29,7 +28,6 @@
         "proxy_batch_size": 1024,
         "filter_kind": "ema",
         "filter_kwargs": {"alpha": 0.5},
-        "pool": "linear",
         "fit_beta": true
     },
     {
@@ -42,7 +40,6 @@
         "proxy_batch_size": 1024,
         "filter_kind": "ema",
         "filter_kwargs": {"alpha": 0.5},
-        "pool": "linear",
         "fit_beta": true
     }
 ]

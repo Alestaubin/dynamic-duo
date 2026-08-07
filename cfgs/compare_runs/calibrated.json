@@ -1,13 +1,7 @@
 [
     {
-        "name": "fixed_ts",
-        "calibration_mode": "fixed_ts",
-        "fixed_ts_config": "checkpoints/fixed_ts/default"
-    },
-    {
         "name": "optimal_w_oracle",
         "calibration_mode": "optimal_w_oracle",
-        "pool": "log",
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     },
     {
@@ -17,7 +11,6 @@
         "calib_map": null,
         "proxy_batch_size": 128,
         "filter_kind": "none",
-        "pool": "log",
         "fit_beta": false,
         "beta" : 5.0,
         "fixed_ts_config": "checkpoints/fixed_ts/default"

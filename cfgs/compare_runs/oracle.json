@@ -20,7 +20,6 @@
         "calib_method": "identity",
         "proxy_batch_size": 128,
         "filter_kind": "none",
-        "pool": "linear",
         "fit_beta": true,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     },
@@ -32,7 +31,6 @@
         "proxy_batch_size": 128,
         "filter_kind": "ema",
         "filter_kwargs": {"alpha": 0.5},
-        "pool": "linear",
         "fit_beta": true,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     }

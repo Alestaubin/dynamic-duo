@@ -136,7 +136,6 @@ def build_proxy_weighted_calibrator(
     filter_kind: str,
     filter_kwargs: dict | None,
     beta: float,
-    pool: str,
     prior_l: float,
     prior_s: float,
     base_ts,
@@ -201,7 +200,6 @@ def build_proxy_weighted_calibrator(
         cfg_l=cfg_l,
         cfg_s=cfg_s,
         beta=beta,
-        pool=pool,
         filter_kind=filter_kind,
         filter_kwargs=filter_kwargs,
         prior_l=to_logit(prior_l),
@@ -269,11 +267,7 @@ def fit_beta(
         for x_l, x_s, zl, zs, labels in cached:
             w_l = 1.0 / (1.0 + math.exp(-candidate * (x_l - x_s)))
             w_s = 1.0 - w_l
-            if calibrator.pool == "log":
-                z_duo = w_l * (zl / T_l) + w_s * (zs / T_s)
-            else:
-                p_duo = w_l * F.softmax(zl / T_l, dim=1) + w_s * F.softmax(zs / T_s, dim=1)
-                z_duo = torch.log(p_duo.clamp(min=1e-8))
+            z_duo = w_l * (zl / T_l) + w_s * (zs / T_s)
             total_nll += F.cross_entropy(z_duo, labels, reduction="sum").item()
             n += len(labels)
         avg_nll = total_nll / n

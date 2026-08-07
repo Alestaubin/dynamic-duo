@@ -38,7 +38,7 @@ python scripts/run_dynamic_duo.py \
     --calib_map resnet50_vitb16_dev \
     --calib_method isotonic \
     --filter kalman --kalman_q 1e-3 --kalman_r 1e-1 \
-    --gate_beta 4.0 --pool linear \
+    --gate_beta 4.0 \
     --seed 0
 """
 
@@ -107,9 +107,6 @@ if __name__ == "__main__":
                         help="Kalman observation noise (--filter kalman).")
     parser.add_argument("--gate_beta", type=float, default=4.0,
                         help="Section-5 gate sharpness: w_l = sigmoid(beta * gap).")
-    parser.add_argument("--pool", type=str, default="linear", choices=["log", "linear"],
-                        help="Section-5 combination: 'log' (product-of-experts) or "
-                             "'linear' (collapse-robust mixture).")
     parser.add_argument("--prior_l", type=float, default=0.5,
                         help="Large model's clean-source accuracy, used as the "
                              "ema/kalman filter's reset prior. Defaults to a neutral 0.5.")
@@ -159,7 +156,6 @@ if __name__ == "__main__":
                 filter_kind=args.filter,
                 filter_kwargs=filter_kwargs,
                 beta=args.gate_beta,
-                pool=args.pool,
                 prior_l=args.prior_l,
                 prior_s=args.prior_s,
                 base_ts=base_ts,

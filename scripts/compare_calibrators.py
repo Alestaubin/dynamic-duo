@@ -120,7 +120,7 @@ def _build_calibrator(
         return JointCoca(num_steps=10, lr=5e-2, chunk_size=run_cfg.get("coca_bs"))
     if mode == "optimal_w_oracle":
         base_ts = JointFixedTS.load(run_cfg["fixed_ts_config"]) if run_cfg.get("fixed_ts_config") else None
-        return JointOptimalWOracle(base_ts=base_ts, pool=run_cfg.get("pool", "log"))
+        return JointOptimalWOracle(base_ts=base_ts)
     if mode == "proxy_weighted":
         base_ts = JointFixedTS.load(run_cfg["fixed_ts_config"]) if run_cfg.get("fixed_ts_config") else None
         calibrator = build_proxy_weighted_calibrator(
@@ -131,7 +131,6 @@ def _build_calibrator(
             filter_kind=run_cfg.get("filter_kind", "none"),
             filter_kwargs=run_cfg.get("filter_kwargs"),
             beta=run_cfg.get("beta", 4.0),
-            pool=run_cfg.get("pool", "linear"),
             prior_l=run_cfg.get("prior_l", 0.5),
             prior_s=run_cfg.get("prior_s", 0.5),
             base_ts=base_ts,

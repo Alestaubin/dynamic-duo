@@ -31,15 +31,10 @@ Every adaptation batch (Section 5 combination) then:
   5. Combines against a frozen JointFixedTS's (T_l, T_s) prior — the proxy
      only sets the weight ratio between the two models, not their base
      scale (unidentifiable together, so T_l/T_s stay FIXED here; do not
-     also fit temperatures inside this calibrator). Two pooling modes:
-       "log"    z_duo = w_l*(z_l/T_l) + w_s*(z_s/T_s)
-                Matches the product-of-experts aggregation used elsewhere in
-                this codebase, but a single confidently-wrong (collapsed)
-                model poisons the product.
-       "linear" p_duo = w_l*softmax(z_l/T_l) + w_s*softmax(z_s/T_s)
-                z_duo = log(p_duo)
-                Degrades gracefully under model collapse: a bad model
-                contributes at most its weight, not a multiplicative penalty.
+     also fit temperatures inside this calibrator):
+       z_duo = w_l*(z_l/T_l) + w_s*(z_s/T_s)
+     Product-of-experts logit pooling, matching the aggregation used
+     elsewhere in this codebase (JointFixedTS.combine_logits).
 
 Records per-batch diagnostics and GT accuracies (when labels are injected via
 set_labels). After each corruption, report_and_reset_corruption_stats()
@@ -56,7 +51,6 @@ from typing import Literal
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from src.calibrators.base import BaseJointCalibrator, _NoOpModule
 from src.calibrators.joint_fixed_TS import JointFixedTS
@@ -70,7 +64,6 @@ from src.reliability.filters.kalman import Kalman
 
 _PROXY_KINDS = PROXY_KINDS  # "agreement" is intentionally excluded (pair-level, no r_l/r_s split)
 _FILTER_KINDS = {"none", "running_mean", "ema", "kalman"}
-_POOL_KINDS = {"log", "linear"}
 
 
 def _corr_stats(xs: list[float], ys: list[float]) -> dict:
@@ -121,7 +114,6 @@ class JointProxyWeighted(BaseJointCalibrator):
         src.reliability.calibration.maps).
     beta : gate sharpness (eq. 15). beta -> inf recovers hard anchor
         selection; beta = 0 is the equal-weight ensemble.
-    pool : "log" or "linear" (see module docstring).
     filter_kind : "none" | "running_mean" | "ema" | "kalman" (Section 4).
     filter_kwargs : filter-specific knobs — ema: {"alpha"}; kalman:
         {"q", "r", "prior_var"}.
@@ -151,7 +143,6 @@ class JointProxyWeighted(BaseJointCalibrator):
         cfg_l: ProxyStats,
         cfg_s: ProxyStats,
         beta: float = 4.0,
-        pool: Literal["log", "linear"] = "linear",
         filter_kind: Literal["none", "running_mean", "ema", "kalman"] = "kalman",
         filter_kwargs: dict | None = None,
         prior_l: float = 0.0,
@@ -165,7 +156,6 @@ class JointProxyWeighted(BaseJointCalibrator):
         super().__init__()
         assert proxy_kind in _PROXY_KINDS, \
             f"proxy_kind must be one of {sorted(_PROXY_KINDS)}, got '{proxy_kind}'"
-        assert pool in _POOL_KINDS, f"pool must be one of {_POOL_KINDS}, got '{pool}'"
         assert filter_kind in _FILTER_KINDS, \
             f"filter_kind must be one of {_FILTER_KINDS}, got '{filter_kind}'"
         assert proxy_batch_size >= 1, f"proxy_batch_size must be >= 1, got {proxy_batch_size}"
@@ -174,7 +164,6 @@ class JointProxyWeighted(BaseJointCalibrator):
         self.cfg_l = cfg_l
         self.cfg_s = cfg_s
         self.beta = beta
-        self.pool = pool
         self.filter_kind = filter_kind
         self.filter_kwargs = filter_kwargs or {}
         self.prior_l = prior_l
@@ -327,16 +316,12 @@ class JointProxyWeighted(BaseJointCalibrator):
     def _combine(self, z_l: torch.Tensor, z_s: torch.Tensor, w_l: float) -> torch.Tensor:
         """Section 5: combine THIS adaptation batch's logits at a given gate
         weight — always runs, every adaptation batch, regardless of whether
-        this batch also happened to trigger a proxy-batch gate refresh."""
+        this batch also happened to trigger a proxy-batch gate refresh.
+        Product-of-experts logit pooling (see module docstring)."""
         w_s = 1.0 - w_l
         T_l = float(self.base_ts.Tl.item()) if self.base_ts is not None else 1.0
         T_s = float(self.base_ts.Ts.item()) if self.base_ts is not None else 1.0
-
-        if self.pool == "log":
-            return w_l * (z_l / T_l) + w_s * (z_s / T_s)
-        else:  # linear
-            p_duo = w_l * F.softmax(z_l / T_l, dim=1) + w_s * F.softmax(z_s / T_s, dim=1)
-            return torch.log(p_duo.clamp(min=1e-8))
+        return w_l * (z_l / T_l) + w_s * (z_s / T_s)
 
     def _maybe_update_gate(self, z_l: torch.Tensor, z_s: torch.Tensor) -> None:
         """Buffer this adaptation batch into the running proxy batch; once it
