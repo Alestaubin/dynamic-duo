@@ -2,6 +2,7 @@
     {
         "name": "optimal_w_oracle",
         "calibration_mode": "optimal_w_oracle",
+        "proxy_batch_size": 512,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     },
     {
@@ -9,7 +10,7 @@
         "calibration_mode": "proxy_weighted",
         "proxy_kind": "oracle",
         "calib_map": null,
-        "proxy_batch_size": 128,
+        "proxy_batch_size": 512,
         "filter_kind": "none",
         "fit_beta": false,
         "beta" : 5.0,

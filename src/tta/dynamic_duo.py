@@ -405,7 +405,7 @@ def collect_logits(large, large_preprocess, small, small_preprocess, data_loader
 
 def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None,
                           use_wandb=False, group=None, run_name=None, on_corruption_start=None,
-                          on_batch=None):
+                          on_batch=None, on_corruption_end=None):
     """Runs duo over cfg['EVAL']'s corruptions/severities; returns results_rows
     (one dict per corruption/severity, plus a final "average" row).
 
@@ -423,6 +423,14 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
     on_batch, if given, is passed straight through to run_duo (see its
     docstring) — an extension point for per-batch diagnostics (e.g.
     compare_calibrators.py's --verbose).
+
+    on_corruption_end(corruption_type, severity, metrics_by_model), if given,
+    is called once per stream right after this corruption's metrics are
+    computed (metrics_by_model is the same dict this function's own
+    "duo=... large=... small=..." console line prints from) — an extension
+    point for callers that want to fold in their own per-corruption summary
+    (e.g. compare_calibrators.py comparing against a fixed_ts reference)
+    without recomputing accuracy themselves.
     """
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
@@ -544,6 +552,9 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             small_acc = metrics_by_model["small"]["accuracy"]
             print(f"{corruption_type}/s{severity}: "
                   f"duo={duo_acc:.4f}  large={large_acc:.4f}  small={small_acc:.4f}")
+
+            if on_corruption_end is not None:
+                on_corruption_end(corruption_type, severity, metrics_by_model)
 
             # Only the 4 metrics we actually plot: accuracy, ece, nll, entropy —
             # per model (duo/large/small). Everything else get_metrics_dict/

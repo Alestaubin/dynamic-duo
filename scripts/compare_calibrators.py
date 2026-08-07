@@ -57,10 +57,10 @@ Usage
     # --num_samples --seed) skip the model forward pass entirely after the
     # first one populates the cache. Directory is automatic (per duo — see
     # src.utils.stream_cache), no path to pick:
-    python scripts/compare_calibrators.py --config cfgs/dynamic_duo_config.yaml \\
-        --configs_file cfgs/compare_runs/calibrated.json \\
-        --num_samples 10000 --seed 0 --mode no_adapt \\
-        --use_cache
+    python scripts/compare_calibrators.py --config cfgs/dynamic_duo_config.yaml \
+        --configs_file cfgs/compare_runs/calibrated.json \
+        --num_samples 10000 --seed 0 --mode no_adapt \
+        --use_cache --verbose
 """
 
 from __future__ import annotations
@@ -70,6 +70,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import calibration as cal
 import torch
 import torch.nn.functional as F
 import wandb
@@ -258,16 +259,30 @@ def main():
         if missing:
             parser.error(f"Unknown run name(s) in --only: {sorted(missing)}")
 
-    # Loaded ONCE, reused as the --verbose per-batch reference for every
+    # Loaded ONCE, reused as the fixed_ts reference (both --verbose's
+    # per-batch lines and every run_cfg's per-corruption summary) for every
     # run_cfg — frozen (a plain temperature scale + combine, no state to
-    # mutate), so unlike large_model/small_model it's safe to share.
-    ts_reference = None
-    if args.verbose:
+    # mutate), so unlike large_model/small_model it's safe to share. Tolerant
+    # of a missing checkpoint (e.g. a duo other than the one --fixed_ts_
+    # reference's default was fit for) — degrades to reporting the method's
+    # own accuracy alone rather than hard-failing every run.
+    try:
         ts_reference = JointFixedTS.load(args.fixed_ts_reference)
         for p in ts_reference.parameters():
             p.requires_grad_(False)
+    except FileNotFoundError:
+        print(f"WARNING: --fixed_ts_reference={args.fixed_ts_reference!r} not found; "
+              f"skipping the fixed_ts comparison in --verbose and the per-corruption summary.")
+        ts_reference = None
 
     summary_rows = []
+    # One row per (run_cfg, corruption) with BOTH the method's own metrics
+    # AND the fixed_ts reference's, side by side — logged to wandb instead
+    # of summary_rows' per-config AVERAGE-only view, which can't show where
+    # a method actually beats/loses to the cheap baseline. See
+    # _on_corruption_end below (where each row is built) and the
+    # per-run_cfg average rows appended after the loop.
+    comparison_rows: list[dict] = []
     for run_cfg in run_configs:
         print(f"\n{'=' * 70}\n=== {run_cfg['name']} ===\n{'=' * 70}")
 
@@ -314,7 +329,23 @@ def main():
                 getattr(calibrator, "_ext_l", None), getattr(calibrator, "_ext_s", None),
             )
 
+        # Per-corruption running fixed_ts accuracy/NLL/ECE, reset at each
+        # corruption boundary (_on_corruption_start) and flushed at the next
+        # boundary (_on_corruption_end) — a plain dict rather than closure
+        # variables reassigned with `nonlocal`, since both callbacks only
+        # ever mutate it in place. probs/labels are accumulated in full
+        # (not just a running sum) because ECE bins over the WHOLE
+        # corruption's distribution — it can't be computed batch-by-batch
+        # like a sum (same reason get_metrics_dict/calibrate_gate_oracle.py
+        # only ever compute it once per full stream).
+        fts_stats = {"correct": 0, "total": 0, "nll_sum": 0.0, "probs": [], "labels": []}
+
         def _on_corruption_start(corruption, severity):
+            fts_stats["correct"] = 0
+            fts_stats["total"] = 0
+            fts_stats["nll_sum"] = 0.0
+            fts_stats["probs"] = []
+            fts_stats["labels"] = []
             if stream_cache_ctrl is not None:
                 def _loader_factory(corruption=corruption, severity=severity):
                     return load_imagenetC(
@@ -326,31 +357,76 @@ def main():
 
         def _on_batch(batch_idx, prefix, duo, outputs, z_large, z_small, labels):
             d = duo._diag["duo"]
-            with torch.no_grad():
-                z_ref = ts_reference.calibrate(z_large, z_small)
-                labels_ref = labels.to(z_ref.device)
-                ref_acc = float((z_ref.argmax(1) == labels_ref).float().mean())
-                ref_nll = float(F.cross_entropy(z_ref, labels_ref, reduction="mean"))
-                ref_ent = float(softmax_entropy(z_ref).mean())
+            ref_acc = ref_nll = ref_ent = None
+            if ts_reference is not None:
+                with torch.no_grad():
+                    z_ref = ts_reference.calibrate(z_large, z_small)
+                    labels_ref = labels.to(z_ref.device)
+                    correct = int((z_ref.argmax(1) == labels_ref).sum())
+                    batch_nll_sum = float(F.cross_entropy(z_ref, labels_ref, reduction="sum"))
+                fts_stats["correct"] += correct
+                fts_stats["total"] += labels_ref.shape[0]
+                fts_stats["nll_sum"] += batch_nll_sum
+                fts_stats["probs"].append(F.softmax(z_ref, dim=1).detach().cpu())
+                fts_stats["labels"].append(labels_ref.detach().cpu())
+                if args.verbose:
+                    ref_acc = correct / labels_ref.shape[0]
+                    ref_nll = batch_nll_sum / labels_ref.shape[0]
+                    ref_ent = float(softmax_entropy(z_ref).mean())
+            if not args.verbose:
+                return
             # last_w_l/last_nll only exist on calibrators that solve/gate a
             # per-batch mixing weight (JointOptimalWOracle, JointProxyWeighted
             # via its own console line) — getattr rather than isinstance so
             # this stays agnostic to which calibrator is under test.
             w_l = getattr(duo.joint_calibrator, "last_w_l", None)
             w_l_str = f" w_l={w_l:.4f}" if w_l is not None else ""
+            ref_str = (
+                f"  |  fixed_ts ref: acc={ref_acc:.4f} nll={ref_nll:.4f} ent={ref_ent:.4f}"
+                f"  |  Δacc={d['acc_last'] - ref_acc:+.4f} Δnll={d['nll_last'] - ref_nll:+.4f}"
+                if ref_acc is not None else ""
+            )
             print(
                 f"[{prefix}batch {batch_idx}] {run_cfg['name']}:{w_l_str} "
                 f"acc={d['acc_last']:.4f} nll={d['nll_last']:.4f} ent={d['ent_last']:.4f}"
-                f"  |  fixed_ts ref: acc={ref_acc:.4f} nll={ref_nll:.4f} ent={ref_ent:.4f}"
-                f"  |  Δacc={d['acc_last'] - ref_acc:+.4f} Δnll={d['nll_last'] - ref_nll:+.4f}"
+                f"{ref_str}"
             )
+
+        def _on_corruption_end(corruption, severity, metrics_by_model):
+            method_acc = metrics_by_model["duo"]["accuracy"]
+            method_nll = metrics_by_model["duo"]["nll"]
+            method_ece = metrics_by_model["duo"]["ece"]
+            if fts_stats["total"] > 0:
+                fts_acc = fts_stats["correct"] / fts_stats["total"]
+                fts_nll = fts_stats["nll_sum"] / fts_stats["total"]
+                fts_probs = torch.cat(fts_stats["probs"], dim=0).numpy()
+                fts_labels = torch.cat(fts_stats["labels"], dim=0).numpy()
+                fts_ece = cal.get_ece(fts_probs, fts_labels, num_bins=15)
+                print(
+                    f"[{corruption}/s{severity}] {run_cfg['name']} summary: "
+                    f"acc={method_acc:.4f} nll={method_nll:.4f} ece={method_ece:.4f}  |  "
+                    f"fixed_ts: acc={fts_acc:.4f} nll={fts_nll:.4f} ece={fts_ece:.4f}  |  "
+                    f"Δacc={method_acc - fts_acc:+.4f} Δnll={method_nll - fts_nll:+.4f} "
+                    f"Δece={method_ece - fts_ece:+.4f}"
+                )
+            else:
+                print(
+                    f"[{corruption}/s{severity}] {run_cfg['name']} summary: "
+                    f"acc={method_acc:.4f} nll={method_nll:.4f} ece={method_ece:.4f}  |  "
+                    f"fixed_ts reference unavailable"
+                )
 
         results_rows = evaluate_dynamic_duo(
             duo, config, wandb_project=args.wandb_project,
             num_samples=args.num_samples, seed=args.seed,
             use_wandb=True, group=group, run_name=f"{run_cfg['name']}__{args.mode}",
             on_corruption_start=_on_corruption_start,
-            on_batch=_on_batch if args.verbose else None,
+            # Always on now (not just --verbose): _on_batch needs to run every
+            # batch to accumulate the per-corruption fixed_ts running total
+            # that _on_corruption_end reports; --verbose only gates whether it
+            # ALSO prints a line per batch (see _on_batch's early return).
+            on_batch=_on_batch,
+            on_corruption_end=_on_corruption_end,
         )
         if stream_cache_ctrl is not None:
             stream_cache_ctrl.finish()
