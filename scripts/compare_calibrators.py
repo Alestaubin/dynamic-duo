@@ -81,6 +81,7 @@ from src.utils.data import load_config, load_imagenetC
 from src.utils.stream_cache import DuoStreamCache, duo_cache_dir
 from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.calibrators.joint_coca import JointCoca
+from src.calibrators.joint_optimal_w_oracle import JointOptimalWOracle
 from src.reliability.setup import build_proxy_weighted_calibrator, fit_beta
 
 DEFAULT_CONFIGS_FILE = "cfgs/compare_runs/default.json"
@@ -117,6 +118,9 @@ def _build_calibrator(
         return JointFixedTS()
     if mode == "coca":
         return JointCoca(num_steps=10, lr=5e-2, chunk_size=run_cfg.get("coca_bs"))
+    if mode == "optimal_w_oracle":
+        base_ts = JointFixedTS.load(run_cfg["fixed_ts_config"]) if run_cfg.get("fixed_ts_config") else None
+        return JointOptimalWOracle(base_ts=base_ts, pool=run_cfg.get("pool", "log"))
     if mode == "proxy_weighted":
         base_ts = JointFixedTS.load(run_cfg["fixed_ts_config"]) if run_cfg.get("fixed_ts_config") else None
         calibrator = build_proxy_weighted_calibrator(
@@ -329,8 +333,14 @@ def main():
                 ref_acc = float((z_ref.argmax(1) == labels_ref).float().mean())
                 ref_nll = float(F.cross_entropy(z_ref, labels_ref, reduction="mean"))
                 ref_ent = float(softmax_entropy(z_ref).mean())
+            # last_w_l/last_nll only exist on calibrators that solve/gate a
+            # per-batch mixing weight (JointOptimalWOracle, JointProxyWeighted
+            # via its own console line) — getattr rather than isinstance so
+            # this stays agnostic to which calibrator is under test.
+            w_l = getattr(duo.joint_calibrator, "last_w_l", None)
+            w_l_str = f" w_l={w_l:.4f}" if w_l is not None else ""
             print(
-                f"[{prefix}batch {batch_idx}] {run_cfg['name']}: "
+                f"[{prefix}batch {batch_idx}] {run_cfg['name']}:{w_l_str} "
                 f"acc={d['acc_last']:.4f} nll={d['nll_last']:.4f} ent={d['ent_last']:.4f}"
                 f"  |  fixed_ts ref: acc={ref_acc:.4f} nll={ref_nll:.4f} ent={ref_ent:.4f}"
                 f"  |  Δacc={d['acc_last'] - ref_acc:+.4f} Δnll={d['nll_last'] - ref_nll:+.4f}"

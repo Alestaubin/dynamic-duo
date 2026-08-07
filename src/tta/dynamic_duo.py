@@ -31,7 +31,7 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "oracle_ts", "proxy_weighted", "coca"}
+_CALIB_MODES = {"fixed_ts", "oracle_ts", "proxy_weighted", "coca", "optimal_w_oracle"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
@@ -62,6 +62,12 @@ class DynamicDuo(nn.Module):
                             scaling baseline (COCA TS, Yi et al. 2025) —
                             fits a single tau aligning the small model to the
                             large one each batch; owns its own optimizer.
+      * "optimal_w_oracle" -> JointOptimalWOracle: cheating oracle ceiling —
+                            solves for the NLL-minimizing w_l directly per
+                            batch (no sigmoid gate, no beta). Uses
+                            set_labels() injected by DynamicDuo.forward()
+                            the same way "proxy_weighted" does, for
+                            diagnostics only (never for adaptation).
     """
     def __init__(
         self,
@@ -137,9 +143,20 @@ class DynamicDuo(nn.Module):
         elif calibration_mode == "coca":
             # Self-adapting: owns its optimization internally, fits per batch.
             logger.info("Calibrator SELF-ADAPTING (coca) | fits its temperature per batch")
+        elif calibration_mode == "optimal_w_oracle":
+            # Cheating oracle: solves for w_l fresh per batch via set_labels()
+            # (injected below), same as proxy_weighted's oracle proxy_kind.
+            logger.info(
+                "Calibrator OPTIMAL-W ORACLE (optimal_w_oracle) | solves the "
+                "NLL-minimizing w_l directly per batch — upper-bound diagnostic only"
+            )
 
     def forward(self, x, labels=None):
-        if self.calibration_mode == "proxy_weighted" and labels is not None:
+        # Generic (not hardcoded to one calibration_mode) so any calibrator
+        # that cheats via labels — proxy_weighted's oracle proxy_kind,
+        # optimal_w_oracle — gets them, without special-casing each by name
+        # here. Never used for adaptation, diagnostics/oracle solves only.
+        if labels is not None and hasattr(self.joint_calibrator, "set_labels"):
             self.joint_calibrator.set_labels(labels)
         for _ in range(self.steps):
             outputs, z_large, z_small = forward_and_adapt(
