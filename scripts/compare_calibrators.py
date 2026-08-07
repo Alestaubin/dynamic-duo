@@ -410,11 +410,19 @@ def main():
                     f"Δece={method_ece - fts_ece:+.4f}"
                 )
             else:
+                fts_acc = fts_nll = fts_ece = float("nan")
                 print(
                     f"[{corruption}/s{severity}] {run_cfg['name']} summary: "
                     f"acc={method_acc:.4f} nll={method_nll:.4f} ece={method_ece:.4f}  |  "
                     f"fixed_ts reference unavailable"
                 )
+            comparison_rows.append({
+                "name": run_cfg["name"], "corruption": corruption, "severity": severity,
+                "method_acc": method_acc, "method_nll": method_nll, "method_ece": method_ece,
+                "fixed_ts_acc": fts_acc, "fixed_ts_nll": fts_nll, "fixed_ts_ece": fts_ece,
+                "delta_acc": method_acc - fts_acc, "delta_nll": method_nll - fts_nll,
+                "delta_ece": method_ece - fts_ece,
+            })
 
         results_rows = evaluate_dynamic_duo(
             duo, config, wandb_project=args.wandb_project,
@@ -435,8 +443,25 @@ def main():
         if avg_row is not None:
             summary_rows.append({"name": run_cfg["name"], **avg_row})
 
+        # One extra "average" row per run_cfg, macro-averaged over that
+        # config's own per-corruption comparison_rows just appended above —
+        # a quick overall glance in the SAME table as the per-corruption
+        # breakdown, same convention as evaluate_dynamic_duo's own
+        # per-corruption results_rows + trailing average row.
+        cfg_rows = [r for r in comparison_rows if r["name"] == run_cfg["name"]]
+        if cfg_rows:
+            _numeric_cols = [
+                "method_acc", "method_nll", "method_ece",
+                "fixed_ts_acc", "fixed_ts_nll", "fixed_ts_ece",
+                "delta_acc", "delta_nll", "delta_ece",
+            ]
+            comparison_rows.append({
+                "name": run_cfg["name"], "corruption": "average", "severity": 0,
+                **{c: sum(r[c] for r in cfg_rows) / len(cfg_rows) for c in _numeric_cols},
+            })
+
     _print_summary(summary_rows)
-    _log_summary_to_wandb(summary_rows, args.wandb_project, group)
+    _log_summary_to_wandb(comparison_rows, args.wandb_project, group)
     print(f"\nAll runs grouped under wandb group='{group}' in project '{args.wandb_project}'.")
 
 

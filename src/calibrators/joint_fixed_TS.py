@@ -91,7 +91,16 @@ class JointFixedTS(BaseJointCalibrator):
         
     @property
     def model(self): return _NoOpModule()
-    
+
+    @property
+    def last_w_l(self) -> float:
+        """combine_logits(z_l,z_s,Tl,Ts) = 0.5*(z_l/Tl) + 0.5*(z_s/Ts) is
+        exactly JointProxyWeighted/JointOptimalWOracle's affine combine at a
+        constant w_l=0.5 -- expose it so callers that introspect any
+        calibrator's chosen w_l (e.g. scripts/plot_optimal_w_sanity.py) can
+        treat a fixed_ts baseline uniformly, without a special case."""
+        return 0.5
+
     def save(self, folder: str, trained_on: dict | None = None) -> None:
         """
         Save calibrator to a folder containing:

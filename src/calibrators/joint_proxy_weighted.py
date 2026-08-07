@@ -495,6 +495,16 @@ class JointProxyWeighted(BaseJointCalibrator):
         pass  # gate/filter have no offline-tunable params here; see setup.fit_beta
 
     @property
+    def last_w_l(self) -> float:
+        """The gate weight actually used to combine the most recent batch —
+        the cached value, whether freshly refreshed this batch or reused
+        from the last completed proxy batch (see _maybe_update_gate).
+        Uniform introspection point with JointOptimalWOracle.last_w_l and
+        JointFixedTS.last_w_l, e.g. for scripts/plot_optimal_w_sanity.py
+        comparing arbitrary w_l-choosing strategies against the optimum."""
+        return self._cached_w_l
+
+    @property
     def model(self):
         return _NoOpModule()
 
