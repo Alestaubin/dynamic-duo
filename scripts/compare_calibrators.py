@@ -61,6 +61,13 @@ Usage
         --configs_file cfgs/compare_runs/calibrated.json \
         --num_samples 10000 --seed 0 --mode no_adapt \
         --use_cache --verbose
+
+    python scripts/compare_calibrators.py --config cfgs/dynamic_duo_config.yaml \
+        --configs_file cfgs/compare_runs/calibrated.json \
+        --num_samples 10000 --seed 0 --mode no_adapt \
+        --use_cache --verbose
+
+
 """
 
 from __future__ import annotations
@@ -110,7 +117,7 @@ def _build_calibrator(
     run_cfg: dict, config: dict,
     large_model, large_preprocess, small_model, small_preprocess,
     device: torch.device, num_samples: int | None, seed: int | None,
-    csv_path: str,
+    csv_path: str, verbose: bool = False,
 ):
     mode = run_cfg["calibration_mode"]
     if mode == "fixed_ts":
@@ -121,7 +128,9 @@ def _build_calibrator(
         return JointCoca(num_steps=10, lr=5e-2, chunk_size=run_cfg.get("coca_bs"))
     if mode == "optimal_w_oracle":
         base_ts = JointFixedTS.load(run_cfg["fixed_ts_config"]) if run_cfg.get("fixed_ts_config") else None
-        return JointOptimalWOracle(base_ts=base_ts)
+        return JointOptimalWOracle(
+            base_ts=base_ts, proxy_batch_size=run_cfg.get("proxy_batch_size", 1), verbose=verbose,
+        )
     if mode == "proxy_weighted":
         base_ts = JointFixedTS.load(run_cfg["fixed_ts_config"]) if run_cfg.get("fixed_ts_config") else None
         calibrator = build_proxy_weighted_calibrator(
@@ -145,10 +154,16 @@ def _build_calibrator(
             proxy_batch_size=run_cfg.get("proxy_batch_size", 1),
         )
         if run_cfg.get("fit_beta"):
+            # Stay quiet for fit_beta's own dev-corruption pass (many
+            # batches, purely for the beta grid search) regardless of the
+            # final verbose setting -- only respect it for the actual eval
+            # loop below.
+            calibrator.verbose = False
             fit_beta(
                 calibrator, large_model, large_preprocess, small_model, small_preprocess,
                 config, device, num_samples=num_samples, seed=seed,
             )
+        calibrator.verbose = verbose
         return calibrator
     raise ValueError(f"Unknown calibration_mode '{mode}'")
 
@@ -309,7 +324,7 @@ def main():
         csv_path = str(Path(args.out_dir) / run_cfg["name"])
         calibrator = _build_calibrator(
             run_cfg, config, large_model, large_preprocess, small_model, small_preprocess,
-            device, args.num_samples, args.seed, csv_path,
+            device, args.num_samples, args.seed, csv_path, verbose=args.verbose,
         )
 
         duo = setup_duo(
@@ -418,16 +433,23 @@ def main():
                 )
             comparison_rows.append({
                 "name": run_cfg["name"], "corruption": corruption, "severity": severity,
+                "proxy_batch_size": getattr(calibrator, "proxy_batch_size", None),
+                "adaptation_batch_size": config["BS"],
                 "method_acc": method_acc, "method_nll": method_nll, "method_ece": method_ece,
                 "fixed_ts_acc": fts_acc, "fixed_ts_nll": fts_nll, "fixed_ts_ece": fts_ece,
                 "delta_acc": method_acc - fts_acc, "delta_nll": method_nll - fts_nll,
                 "delta_ece": method_ece - fts_ece,
             })
 
+        # pbs/abs baked into the run name too (not just evaluate_dynamic_duo's
+        # config, which run_name= below overrides) -- visible in the wandb
+        # Runs list with no clicking, matching the config fields it also sets.
+        _pbs = getattr(calibrator, "proxy_batch_size", None)
+        _pbs_str = f"__pbs{_pbs}_abs{config['BS']}" if _pbs is not None else ""
         results_rows = evaluate_dynamic_duo(
             duo, config, wandb_project=args.wandb_project,
             num_samples=args.num_samples, seed=args.seed,
-            use_wandb=True, group=group, run_name=f"{run_cfg['name']}__{args.mode}",
+            use_wandb=True, group=group, run_name=f"{run_cfg['name']}__{args.mode}{_pbs_str}",
             on_corruption_start=_on_corruption_start,
             # Always on now (not just --verbose): _on_batch needs to run every
             # batch to accumulate the per-corruption fixed_ts running total
@@ -457,6 +479,10 @@ def main():
             ]
             comparison_rows.append({
                 "name": run_cfg["name"], "corruption": "average", "severity": 0,
+                # constant across every corruption for this run_cfg -- copied
+                # from the first row rather than averaged.
+                "proxy_batch_size": cfg_rows[0]["proxy_batch_size"],
+                "adaptation_batch_size": cfg_rows[0]["adaptation_batch_size"],
                 **{c: sum(r[c] for r in cfg_rows) / len(cfg_rows) for c in _numeric_cols},
             })
 

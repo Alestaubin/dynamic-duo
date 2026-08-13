@@ -27,7 +27,7 @@ batch. For calibrators with set_corruption (JointProxyWeighted), this script
 forces total_samples=<this batch's size> so the gate is freshly computed on
 this exact batch regardless of the run_cfg's configured proxy_batch_size,
 rather than possibly reusing a stale/never-refreshed prior (see
-JointProxyWeighted._maybe_update_gate's stream_exhausted flush).
+JointProxyWeighted._flush_bucket's stream_exhausted flush).
 
 Correctness prerequisite: the "ceiling" every strategy is measured against
 is only trustworthy if optimal_w_nll actually finds the true minimum, so
@@ -137,14 +137,14 @@ def _run_strategy(
     calibrator doesn't expose last_w_l (not a w_l-based strategy)."""
     calibrator = _build_calibrator(
         run_cfg, config, large_model, large_preprocess, small_model, small_preprocess,
-        device, num_samples=None, seed=None, csv_path=None,
+        device, num_samples=None, seed=None, csv_path=None, verbose=True,
     )
     calibrator.to(device)
     if hasattr(calibrator, "set_corruption"):
         # Force a fresh gate computation on THIS exact batch regardless of
         # the run_cfg's configured proxy_batch_size, instead of possibly
         # leaving last_w_l at an unrefreshed prior (see
-        # JointProxyWeighted._maybe_update_gate's stream_exhausted flush).
+        # JointProxyWeighted._flush_bucket's stream_exhausted flush).
         calibrator.set_corruption("plot_optimal_w_sanity", total_samples=z_l.shape[0])
     if hasattr(calibrator, "set_labels"):
         calibrator.set_labels(labels)

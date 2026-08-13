@@ -34,5 +34,17 @@
         "filter_kwargs": {"alpha": 0.5},
         "fit_beta": true,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "proxy_weighted_oracle_acc",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "oracle",
+        "calib_map": null,
+        "proxy_batch_size": 512,
+        "filter_kind": "none",
+        "fit_beta": false,
+        "beta" : 5.0,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
     }
+
 ]

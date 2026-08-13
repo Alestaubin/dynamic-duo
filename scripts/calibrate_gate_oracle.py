@@ -272,6 +272,7 @@ def _run_config(streams, base_ts, beta, filter_kind, filter_kwargs, proxy_batch_
         beta=beta, filter_kind=filter_kind, filter_kwargs=filter_kwargs,
         prior_l=to_logit(0.5), prior_s=to_logit(0.5),
         base_ts=base_ts, proxy_batch_size=proxy_batch_size, log_every=0,
+        verbose=False,  # sweeps many configs across many batches; stay quiet
     )
 
     per_stream_rows = []
@@ -279,7 +280,7 @@ def _run_config(streams, base_ts, beta, filter_kind, filter_kwargs, proxy_batch_
         n = z_l.shape[0]
         # total_samples lets the calibrator flush a trailing proxy-batch
         # remainder instead of leaving it stale (see
-        # JointProxyWeighted._maybe_update_gate).
+        # JointProxyWeighted._flush_bucket).
         calibrator.set_corruption(f"{corruption}/s{severity}", total_samples=n)
         correct, nll_sum, entropy_sum, w_l_sum, total = 0.0, 0.0, 0.0, 0.0, 0
         z_duo_chunks = []

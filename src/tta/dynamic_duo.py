@@ -435,9 +435,21 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
     proxy_kind = getattr(duo.joint_calibrator, "proxy_kind", None)
+    # adaptation_batch_size is simply cfg["BS"] -- however many samples the
+    # DataLoader hands to one calibrate()/calibrate_with_grad() call.
+    # proxy_batch_size only exists on calibrators with their own proxy-bucket
+    # buffering (JointProxyWeighted, JointOptimalWOracle) -- None elsewhere
+    # (fixed_ts/oracle_ts/coca have no such concept). Surfaced in BOTH the
+    # run name (visible in the Runs list with no clicking) and the run
+    # config (a filterable/addable column across many runs) since "easy to
+    # see" means different things depending on whether you're scanning a
+    # list or comparing a table.
+    adaptation_batch_size = cfg["BS"]
+    proxy_batch_size = getattr(duo.joint_calibrator, "proxy_batch_size", None)
     run_name = run_name or (
         f"{duo.mode} | {calibration_name}{' normalized' if duo.norm_logits else ' '}"
         f"{' proxy_kind: ' + proxy_kind if proxy_kind else ' '}"
+        f"{f' | pbs={proxy_batch_size} abs={adaptation_batch_size}' if proxy_batch_size is not None else ''}"
         f"| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
     )
     if use_wandb:
@@ -453,6 +465,8 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                 "adapt_small": adapt_small,
                 "signal": signal,
                 "steps": duo.steps,
+                "adaptation_batch_size": adaptation_batch_size,
+                "proxy_batch_size": proxy_batch_size,
                 "large/name": cfg["LARGE"]["NAME"],
                 "large/norm": cfg["LARGE"]["NORM"],
                 "large/lr": cfg["LARGE"]["OPTIM"]["LR"],

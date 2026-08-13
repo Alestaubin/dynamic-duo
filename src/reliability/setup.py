@@ -249,7 +249,7 @@ def fit_beta(
         )
         # total_samples lets the calibrator flush a trailing proxy-batch
         # remainder instead of leaving it stale (see
-        # JointProxyWeighted._maybe_update_gate).
+        # JointProxyWeighted._flush_bucket).
         calibrator.set_corruption(corruption, total_samples=len(loader.dataset))
         for imgs, labels in loader:
             xl = torch.stack([large_preprocess(img) for img in imgs]).to(device)
