@@ -20,7 +20,7 @@ env/
 
 # SLURM outputs
 *.out
-*slurm/
+# *slurm/
 
 # sh files
 *.sh

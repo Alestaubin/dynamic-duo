@@ -1,44 +1,57 @@
-[
+[    
     {
-        "name": "optimal_w_oracle",
+        "name": "optimal_w_oracle_pbs_2",
+        "calibration_mode": "optimal_w_oracle",
+        "proxy_batch_size": 2,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "optimal_w_oracle_pbs_8",
         "calibration_mode": "optimal_w_oracle",
         "proxy_batch_size": 8,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     },
     {
-        "name": "optimal_w_oracle",
+        "name": "optimal_w_oracle_pbs_16",
         "calibration_mode": "optimal_w_oracle",
         "proxy_batch_size": 16,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     },
     {
-        "name": "optimal_w_oracle",
+        "name": "optimal_w_oracle_pbs_32",
         "calibration_mode": "optimal_w_oracle",
         "proxy_batch_size": 32,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     },
     {
-        "name": "optimal_w_oracle",
+        "name": "optimal_w_oracle_pbs_64",
         "calibration_mode": "optimal_w_oracle",
         "proxy_batch_size": 64,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     },
     {
-        "name": "optimal_w_oracle",
+        "name": "optimal_w_oracle_pbs_128",
         "calibration_mode": "optimal_w_oracle",
         "proxy_batch_size": 128,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     },
     {
-        "name": "optimal_w_oracle",
+        "name": "optimal_w_oracle_pbs_256",
         "calibration_mode": "optimal_w_oracle",
         "proxy_batch_size": 256,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     },
     {
-        "name": "optimal_w_oracle",
+        "name": "optimal_w_oracle_pbs_512",
         "calibration_mode": "optimal_w_oracle",
         "proxy_batch_size": 512,
         "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "optimal_w_oracle_pbs_1024",
+        "calibration_mode": "optimal_w_oracle",
+        "proxy_batch_size": 1024,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
     }
+
 ]
