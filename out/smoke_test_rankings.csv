@@ -1,0 +1,3 @@
+proxy_kind,calib_method,proxy_batch_size,corruption,n,sel_acc,sel_correct,sel_total,bal_sel_acc,sel_acc_large_better,sel_acc_small_better,n_large_better,n_small_better,gap_bias,gap_slope,gap_pearson,gap_spearman,l_r2,l_pearson_r,l_spearman_rho,s_r2,s_pearson_r,s_spearman_rho
+nuclear_norm,identity,128,clean,2,0.5,1,2,0.5,1.0,0.0,1,1,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan
+nuclear_norm,identity,128,gaussian_noise_s3,2,1.0,2,2,nan,1.0,nan,2,0,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan

@@ -57,6 +57,77 @@ Two additions catch this:
     that tracks the accuracy gap monotonically through a nonlinear
     calibration map even when gap_corr undersells it.
 
+Per-corruption proxy rankings (held-out-shift proxy SELECTION, not just
+scoring)
+----------------------------------------------------------------------------
+The sweep table above pools every eval corruption into ONE row per (proxy_
+kind, calib_method, proxy_batch_size) — the right view for "how good is this
+proxy on average", but useless for "if I picked this proxy using only ONE
+held-out shift, would that choice have generalized to the others". A SEPARATE
+table (_RANKING_TABLE_COLUMNS, logged as wandb's "proxy_rankings" and written
+to --rankings_csv_path) answers that: the EXACT SAME columns and per-row
+stats as the sweep table above (same _selection_accuracy/
+_balanced_selection_accuracy/_gap_stats/_corr_stats calls), just NOT pooled
+across streams first — one row per (proxy_kind, calib_method,
+proxy_batch_size, corruption) instead of one row per (proxy_kind,
+calib_method, proxy_batch_size). With E eval corruptions (+ "clean", see
+below), this table has (E+1)x as many rows as the pooled one. Pivot it in
+Excel (corruption as columns, bal_sel_acc as values, one proxy_kind/
+calib_method/proxy_batch_size combo per row) and CORREL() any two corruption
+columns: a high correlation means picking the best proxy on a held-out shift
+transfers to the others; a low one means it doesn't, and per-corruption
+re-sweeping (see the module docstring's transferability warning) is
+unavoidable.
+
+The "clean" corruption value scores every proxy against the UNCORRUPTED
+ImageNet validation set (config['VAL_DIR']) — collected once, same as every
+other stream, cached under --use_cache like the rest. Included because
+clean-data access is usually free at deployment time (unlike a held-out
+CORRUPTION, which assumes you already know something about the shift you'll
+face) — if ranking proxies on clean data alone turns out to correlate well
+with ranking them on real corruptions, that's a genuinely deployable
+proxy-selection strategy; if it doesn't, that's worth knowing before relying
+on it.
+
+Adaptation mode (--mode)
+------------------------
+By default (--mode no_adapt) the models are frozen (configure_model_frozen:
+train() mode for live batch statistics, no gradient updates — see
+src.tta.tent) — this is what made the "collect once, resweep every combo"
+design above safe: a frozen model's output is a pure function of its own
+batch, never of call history.
+
+--mode also accepts any of src.tta.dynamic_duo's other modes
+(large_indep/small_indep/both_indep, large_duo/small_duo/both_duo). Two
+different cases:
+  - indep-signal modes (*_indep): each model adapts by minimizing entropy on
+    its OWN logits — this does NOT depend on which proxy_kind/calib_method/
+    proxy_batch_size is under test, so the adaptation trajectory (and hence
+    the collected z_l/z_s/f_l/f_s stream) is identical across the whole
+    sweep grid. The one-collection-pass-per-stream design is therefore still
+    exactly safe and cheap here, just with TENT stepping turned on for
+    whichever side(s) the mode adapts.
+  - duo-signal modes (*_duo): real end-to-end adaptation is driven by the
+    JOINT CALIBRATED output — i.e. by the exact (proxy_kind, calib_method,
+    proxy_batch_size) combo under test, which is a genuine circular
+    dependency (the sweep can't know which combo "wins" until it's already
+    adapted the models with it). Rather than pay for one full model reload +
+    adaptation run per combo (what scripts/compare_calibrators.py does, and
+    the only fully faithful option), this script adapts the models ONCE per
+    stream using a frozen --fixed_ts_reference calibrator (plain per-model
+    temperature scaling, not proxy-weighted) to produce the entropy signal,
+    then sweeps proxy_kind/calib_method/proxy_batch_size cheaply on top of
+    that one adapted trajectory, same as every other mode. This measures
+    "how good is this combo at combining logits from a duo that's already
+    adapting under a generic reference calibrator" — NOT "how would the
+    model actually adapt if this exact combo were driving it". If you need
+    the fully faithful (and fully expensive) version, use
+    compare_calibrators.py with calibration_mode="proxy_weighted" instead.
+
+--steps mirrors DynamicDuo's steps (gradient steps per batch); default 1.
+Cache keys (see --use_cache) always fold in --mode and --steps, since they
+change what gets collected.
+
 Usage
 -----
     python scripts/sweep_proxies.py --config cfgs/dynamic_duo_config.yaml \
@@ -64,6 +135,14 @@ Usage
         --calib_methods identity linear isotonic \
         --proxy_batch_sizes 32 128 512 \
         --csv_path out/proxy_sweep.csv
+
+    # sweep under both_duo adaptation (driven by a fixed reference
+    # calibrator — see "Adaptation mode" above), instead of no_adapt:
+    python scripts/sweep_proxies.py --config cfgs/dynamic_duo_config.yaml \
+        --mode both_duo --steps 1 \
+        --proxy_kinds nuclear_norm atc ac_mc \
+        --calib_methods identity isotonic \
+        --csv_path out/proxy_sweep_both_duo.csv
 """
 
 from __future__ import annotations
@@ -81,9 +160,11 @@ from tqdm import tqdm
 
 from src.utils.data import load_config, load_imagenetC
 from src.utils.model import get_model
-from src.utils.stream_cache import duo_cache_dir, stream_key, collect_stream, load_or_collect_stream
+from src.utils.stream_cache import duo_cache_dir, stream_key, load_or_collect_stream
 from src.reliability.proxies.stats import FeatureExtractor, build_proxy_stats, ProxyStats
 from src.reliability.calibration.maps import make_record, fit_calibration_maps, CalibrationMaps
+from src.tta.dynamic_duo import setup_duo
+from src.calibrators.joint_fixed_TS import JointFixedTS
 
 _ALL_PROXY_KINDS = ["nuclear_norm", "atc", "prototype", "ac_mc", "cot"]
 _ALL_CALIB_METHODS = ["identity", "linear", "platt", "beta", "isotonic"]
@@ -97,6 +178,17 @@ _TABLE_COLUMNS = [
     "gap_bias", "gap_slope", "gap_pearson", "gap_spearman",
     "l_r2", "l_pearson_r", "l_spearman_rho",
     "s_r2", "s_pearson_r", "s_spearman_rho",
+]
+
+# Same fields as _TABLE_COLUMNS (every stat computed exactly the same way,
+# _selection_accuracy/_balanced_selection_accuracy/_gap_stats/_corr_stats),
+# just NOT pooled across eval streams first — one row per (proxy_kind,
+# calib_method, proxy_batch_size, corruption) instead of one row per
+# (proxy_kind, calib_method, proxy_batch_size) pooling every corruption
+# together. "corruption" is every eval corruption (as "<name>_s<severity>")
+# plus "clean" — see module docstring's ranking-table section.
+_RANKING_TABLE_COLUMNS = ["proxy_kind", "calib_method", "proxy_batch_size", "corruption"] + [
+    c for c in _TABLE_COLUMNS if c not in ("proxy_kind", "calib_method", "proxy_batch_size")
 ]
 
 
@@ -208,6 +300,31 @@ def _chunks(n: int, size: int) -> list[slice]:
     return [slice(i, min(i + size, n)) for i in range(0, n, size)]
 
 
+def collect_stream_via_duo(duo, ext_l, ext_s, loader):
+    """Like src.utils.stream_cache.collect_stream, but drives batches through
+    a (possibly adapting) DynamicDuo instead of two frozen models directly —
+    see the module docstring's "Adaptation mode" section.
+
+    ext_l/ext_s are plain FeatureExtractor hooks registered on duo.large/
+    duo.small purely for their forward-PRE-hook side effect: they capture
+    the penultimate feature on every call, including the ones INSIDE
+    duo.forward -> forward_and_adapt. They are never called directly here
+    (ext_l(x) forces its own @torch.no_grad() forward pass — see
+    FeatureExtractor.__call__ — which would both duplicate the forward pass
+    and break the TENT gradient path duo.forward relies on).
+
+    Caller must duo.reset() before this if the stream should start from the
+    pre-adaptation model state (every call site below does).
+    """
+    zl_all, zs_all, fl_all, fs_all, labels_all = [], [], [], [], []
+    for imgs, labels in tqdm(loader, desc="collecting", leave=False):
+        outputs, z_large, z_small = duo(imgs, labels=None)
+        zl_all.append(z_large.detach().cpu()); zs_all.append(z_small.detach().cpu())
+        fl_all.append(ext_l._feats.detach().cpu()); fs_all.append(ext_s._feats.detach().cpu())
+        labels_all.append(labels.cpu())
+    return (torch.cat(zl_all), torch.cat(zs_all), torch.cat(fl_all), torch.cat(fs_all), torch.cat(labels_all))
+
+
 def _records_from_raw(cfg_l, cfg_s, z_l, z_s, f_l, f_s, labels, batch_size, corruption, severity):
     """Rebuild BatchRecords from cached raw (z, f, labels), one per original
     batch_size-sized chunk (matching the DataLoader batches make_record would
@@ -247,6 +364,24 @@ def main():
     parser.add_argument("--calib_methods", type=str, nargs="+", default=_ALL_CALIB_METHODS,
                         choices=_ALL_CALIB_METHODS)
     parser.add_argument("--proxy_batch_sizes", type=int, nargs="+", default=[128])
+    parser.add_argument("--mode", type=str, default="no_adapt",
+                        help="Any src.tta.dynamic_duo mode: no_adapt (default, frozen "
+                             "models, batch-norm stats), large_indep/small_indep/both_indep "
+                             "(each model adapts on its own entropy — combo-independent, "
+                             "still cheap), large_duo/small_duo/both_duo (adaptation driven "
+                             "by --fixed_ts_reference instead of the combo under test — see "
+                             "module docstring's 'Adaptation mode' section for why). Invalid "
+                             "values raise from setup_duo's own assertion.")
+    parser.add_argument("--steps", type=int, default=1,
+                        help="Gradient steps per batch, passed straight to setup_duo "
+                             "(DynamicDuo.steps). No effect when --mode no_adapt.")
+    parser.add_argument("--fixed_ts_reference", type=str, default="checkpoints/fixed_ts/default",
+                        help="JointFixedTS checkpoint used as the joint_calibrator that drives "
+                             "TENT adaptation for *_duo modes (frozen — its own temperatures "
+                             "are never adapted). Ignored substantively by no_adapt/*_indep "
+                             "modes (no adaptation depends on the joint-calibrated output "
+                             "there), but still loaded since DynamicDuo/setup_duo always "
+                             "require a joint_calibrator.")
     parser.add_argument("--proto_metric", type=str, default="cosine", choices=["cosine", "mahalanobis"])
     parser.add_argument("--calib_corruptions", type=str, nargs="+", default=None,
                         help="Defaults to the config's CALIBRATOR.CORRUPTIONS.")
@@ -266,8 +401,9 @@ def main():
                              "calibration stream and each eval (corruption, severity) stream "
                              "under cache/stream_cache/<large>+<small>/ (see src.utils."
                              "stream_cache — automatic, duo-specific, no directory to pick), "
-                             "keyed by corruptions/severities/num_samples/seed — a repeat sweep "
-                             "on the same duo/data skips both model-forward passes entirely. "
+                             "keyed by corruptions/severities/num_samples/seed/--mode/--steps — "
+                             "a repeat sweep on the same duo/data/mode skips both model-forward "
+                             "passes entirely. "
                              "Caches penultimate features too, so it's never skipped for "
                              "proxy_kind='prototype'. Proxy scoring itself always re-runs fresh "
                              "from the cached tensors (never cached), so a cache built with a "
@@ -282,11 +418,24 @@ def main():
     parser.add_argument("--csv_path", type=str, default=None,
                         help="Where to write the full comparison table. Defaults to "
                              "out/proxy_sweep_<large>_<small>_<timestamp>.csv.")
+    parser.add_argument("--rankings_csv_path", type=str, default=None,
+                        help="Where to write the per-corruption proxy-ranking table (see "
+                             "module docstring) — the same columns/stats as --csv_path's sweep "
+                             "table plus a 'corruption' column, one row per (proxy_kind, "
+                             "calib_method, proxy_batch_size, corruption) instead of pooling "
+                             "every corruption into one row — (E+1)x as many rows as the sweep "
+                             "table for E eval corruptions (+1 for 'clean'). Pivot in Excel "
+                             "(corruption as columns) and CORREL() any two to check whether a "
+                             "held-out shift (or clean data) would have picked the same proxy "
+                             "as the real corruptions. Defaults to --csv_path with '_rankings' "
+                             "inserted before the extension.")
     parser.add_argument("--log_wandb", action="store_true",
                         help="Log the full sweep as one wandb.Table (all rows, every "
                              "_TABLE_COLUMNS field) — wandb's table UI lets you click any "
                              "column header (bal_sel_acc, gap_corr, sel_acc, ...) to sort "
-                             "interactively, so you aren't limited to --sort_by's one ranking.")
+                             "interactively, so you aren't limited to --sort_by's one ranking. "
+                             "Also logs the per-corruption ranking table (see "
+                             "--rankings_csv_path) as a second wandb.Table, 'proxy_rankings'.")
     parser.add_argument("--wandb_project", type=str, default="proxy-weighted-duo-calibration")
     parser.add_argument("--wandb_group", type=str, default=None,
                         help="Defaults to a timestamp. Always prefixed with the duo's model "
@@ -308,6 +457,9 @@ def main():
     if args.csv_path is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         args.csv_path = f"out/proxy_sweep_{config['LARGE']['NAME']}_{config['SMALL']['NAME']}_{timestamp}.csv"
+    if args.rankings_csv_path is None:
+        p = Path(args.csv_path)
+        args.rankings_csv_path = str(p.with_name(f"{p.stem}_rankings{p.suffix}"))
 
     # One source-fit pass covering every requested proxy kind at once (fit_source
     # is a no-op for stateless proxies) — never repeated per proxy_kind, and
@@ -361,28 +513,55 @@ def main():
     eval_corruptions = args.eval_corruptions or config["EVAL"]["CORRUPTIONS"]
     eval_severities = args.eval_severities or config["EVAL"]["SEVERITIES"]
 
+    # ref_calibrator only actually drives adaptation for *_duo modes (see
+    # module docstring's "Adaptation mode" section) — for no_adapt/*_indep it
+    # is loaded purely because DynamicDuo/setup_duo require a
+    # joint_calibrator, and is never consulted for those modes' loss.
+    # calibration_mode="fixed_ts" freezes it (setup_duo/DynamicDuo never
+    # tune it), so it's safe regardless of --mode.
+    ref_calibrator = JointFixedTS.load(args.fixed_ts_reference)
+    for p in ref_calibrator.parameters():
+        p.requires_grad_(False)
+    # Built ONCE and reused for every stream below (calib/eval/clean) —
+    # duo.reset() (called at the top of each _collect_* closure) restores the
+    # pre-adaptation state each time, matching evaluate_dynamic_duo's own
+    # per-corruption reset. Source-fitting above ran BEFORE this on the
+    # plain .eval() models; setup_duo now reconfigures them (train() mode,
+    # live batch stats, TENT params where the mode adapts) for collection.
+    duo = setup_duo(
+        large=large_model, large_preprocess=large_preprocess,
+        small=small_model, small_preprocess=small_preprocess,
+        joint_calibrator=ref_calibrator, calibration_mode="fixed_ts",
+        mode=args.mode, cfg=config, steps=args.steps,
+    )
+
     ext_l = FeatureExtractor(large_model, cfg_l.name)
     ext_s = FeatureExtractor(small_model, cfg_s.name)
 
     stream_cache_dir = duo_cache_dir(config["LARGE"]["NAME"], config["SMALL"]["NAME"]) if args.use_cache else None
+    # --mode/--steps folded into every stream's cache tag below: a frozen
+    # no_adapt stream and a both_duo-adapted stream for the same corruption
+    # are entirely different logits and must never collide in the cache.
+    mode_tag = f"mode{args.mode}_steps{args.steps}"
 
     try:
         # --- Phase B: one pass over calibration (dev-shift) data, fit every
         # (proxy_kind, calib_method) map from the SAME collected records. ---
         print(f"Collecting calibration records over {len(calib_corruptions)} corruptions x {len(calib_severities)} severities, over {args.calib_num_samples} samples each...")
         calib_tag = (
-            "calib_" + "-".join(sorted(calib_corruptions)) +
+            f"{mode_tag}_calib_" + "-".join(sorted(calib_corruptions)) +
             f"_sev{'-'.join(str(s) for s in sorted(calib_severities))}"
         )
         calib_key = stream_key(calib_tag, args.calib_num_samples, args.seed)
 
         def _collect_calib():
+            duo.reset()
             calib_loader = load_imagenetC(
                 config["TEST_DIR"], severities=calib_severities, corruption_types=calib_corruptions,
                 device=device, batch_size=config["BS"], num_workers=config["WORKERS"],
                 num_samples=args.calib_num_samples, seed=args.seed,
             )
-            return collect_stream(calib_loader, large_preprocess, small_preprocess, ext_l, ext_s, device)
+            return collect_stream_via_duo(duo, ext_l, ext_s, calib_loader)
 
         z_l, z_s, f_l, f_s, labels = load_or_collect_stream(
             stream_cache_dir, calib_key, _collect_calib,
@@ -413,27 +592,62 @@ def main():
         eval_data: dict[tuple[str, int], tuple] = {}
         for severity in eval_severities:
             for corruption in eval_corruptions:
-                eval_key = stream_key(f"{corruption}_s{severity}", args.eval_num_samples, args.seed)
+                eval_key = stream_key(f"{mode_tag}_{corruption}_s{severity}", args.eval_num_samples, args.seed)
 
                 def _collect_eval(corruption=corruption, severity=severity):
+                    duo.reset()
                     loader = load_imagenetC(
                         config["TEST_DIR"], severities=severity, corruption_types=[corruption],
                         device=device, batch_size=config["BS"], num_workers=config["WORKERS"],
                         num_samples=args.eval_num_samples, seed=args.seed,
                     )
-                    return collect_stream(loader, large_preprocess, small_preprocess, ext_l, ext_s, device)
+                    return collect_stream_via_duo(duo, ext_l, ext_s, loader)
 
                 print(f"Collecting eval stream {corruption}/s{severity}...")
                 eval_data[(corruption, severity)] = load_or_collect_stream(
                     stream_cache_dir, eval_key, _collect_eval,
                     use_cache=args.use_cache, overwrite_cache=args.overwrite_cache,
                 )
+
+        # --- Phase C.5: the UNCORRUPTED validation set, for the ranking
+        # table's "clean" column (see module docstring) -- clean-data access
+        # is usually free at deployment time, unlike a held-out corruption,
+        # so this checks whether ranking proxies on clean data alone would
+        # have picked the same proxy as the real corruptions. Collected and
+        # cached exactly like every other stream (plain ImageFolder over
+        # VAL_DIR, same pattern as the source-fit pass above).
+        clean_key = stream_key(f"{mode_tag}_clean_val", args.eval_num_samples, args.seed)
+
+        def _collect_clean():
+            from torch.utils.data import DataLoader, Subset
+            from torchvision import datasets
+            from src.utils.data import _pil_collate_fn
+
+            duo.reset()
+            clean_ds = datasets.ImageFolder(config["VAL_DIR"])
+            if args.eval_num_samples is not None:
+                n = min(args.eval_num_samples, len(clean_ds))
+                gen = torch.Generator().manual_seed(args.seed) if args.seed is not None else None
+                indices = torch.randperm(len(clean_ds), generator=gen)[:n].tolist()
+                clean_ds = Subset(clean_ds, indices)
+            clean_loader = DataLoader(
+                clean_ds, batch_size=config["BS"], shuffle=False,
+                num_workers=config["WORKERS"], pin_memory=(device.type == "cuda"),
+                collate_fn=_pil_collate_fn,
+            )
+            return collect_stream_via_duo(duo, ext_l, ext_s, clean_loader)
+
+        print("Collecting clean validation stream...")
+        clean_stream = load_or_collect_stream(
+            stream_cache_dir, clean_key, _collect_clean,
+            use_cache=args.use_cache, overwrite_cache=args.overwrite_cache,
+        )
     finally:
         ext_l.remove()
         ext_s.remove()
 
-    # collect_stream/load_or_collect_stream always hand back CPU tensors
-    # (see src/utils/stream_cache.py — cached to disk that way regardless of
+    # collect_stream_via_duo/load_or_collect_stream always hand back CPU
+    # tensors (see src/utils/stream_cache.py — cached to disk that way regardless of
     # --device), so move each stream onto the target device ONCE here rather
     # than per chunk inside the (proxy_kind, proxy_batch_size) sweep below —
     # every score() call in the Sweep phase then runs on-device for free via
@@ -443,19 +657,38 @@ def main():
             key: tuple(t.to(device) for t in tensors)
             for key, tensors in eval_data.items()
         }
+        clean_stream = tuple(t.to(device) for t in clean_stream)
+
+    # Named (not tuple-keyed) view of every stream the RANKING table scores
+    # against: every eval corruption plus "clean" — see module docstring.
+    # Kept separate from eval_data/the pooled Sweep below, which stays
+    # corruption-only and unchanged, so this is purely additive.
+    ranking_streams: dict[str, tuple] = {
+        f"{corruption}_s{severity}": eval_data[(corruption, severity)]
+        for (corruption, severity) in eval_data
+    }
+    ranking_streams["clean"] = clean_stream
+    ranking_stream_names = list(ranking_streams.keys())
 
     # --- Sweep: cheap in-memory recomputation from the two cached passes,
     # EXCEPT proxy_kind='cot' (Hungarian assignment, O(proxy_batch_size^3)
     # per chunk, scipy on CPU) and 'nuclear_norm' (SVD per chunk, also CPU),
     # whose per-chunk score() cost grows sharply with proxy_batch_size — a
     # tqdm + per-combo timing over (proxy_kind, proxy_batch_size), not over
-    # every chunk, keeps this visible without flooding the log. ---
+    # every chunk, keeps this visible without flooding the log.
+    #
+    # raw scores are computed ONCE per stream (raw_by_stream), then reused
+    # for BOTH the pooled row (rows, corruption-only — "clean" excluded so
+    # the existing pooled semantics are unchanged) and the per-stream
+    # ranking row (ranking_rows, includes "clean") — no duplicate scoring. ---
     rows = []
+    ranking_rows = []
     combos = [(pk, pbs) for pk in args.proxy_kinds for pbs in args.proxy_batch_sizes]
     for pk, pbs in tqdm(combos, desc="Sweep (proxy_kind, proxy_batch_size)"):
         t0 = time.time()
-        raw = []  # (r_l, r_s, acc_l, acc_s) per proxy-batch chunk, across all eval streams
-        for (zl, zs, fl, fs, labels) in eval_data.values():
+        raw_by_stream: dict[str, list] = {}
+        for stream_name, (zl, zs, fl, fs, labels) in ranking_streams.items():
+            stream_raw = []
             n = zl.shape[0]
             for sl in _chunks(n, pbs):
                 z_l_c, z_s_c, f_l_c, f_s_c, labels_c = zl[sl], zs[sl], fl[sl], fs[sl], labels[sl]
@@ -463,8 +696,11 @@ def main():
                 r_s = cfg_s.score(pk, z_s_c, f_s_c)
                 acc_l = float((z_l_c.argmax(1) == labels_c).float().mean())
                 acc_s = float((z_s_c.argmax(1) == labels_c).float().mean())
-                raw.append((r_l, r_s, acc_l, acc_s))
-        print(f"  [{pk}, pbs={pbs}] raw scoring over {len(raw)} chunks took {time.time() - t0:.1f}s")
+                stream_raw.append((r_l, r_s, acc_l, acc_s))
+            raw_by_stream[stream_name] = stream_raw
+        raw = [item for name, items in raw_by_stream.items() if name != "clean" for item in items]
+        print(f"  [{pk}, pbs={pbs}] raw scoring over {len(raw)} chunks "
+              f"(+ clean, {len(raw_by_stream['clean'])} chunks) took {time.time() - t0:.1f}s")
 
         for cm in args.calib_methods:
             maps = fitted_maps[(pk, cm)]
@@ -487,7 +723,35 @@ def main():
                 "s_r2": s_stats["r2"], "s_pearson_r": s_stats["pearson_r"], "s_spearman_rho": s_stats["spearman_rho"],
             })
 
+            # Same stats as the pooled row above, computed separately per
+            # stream (not pooled) — one row per (pk, cm, pbs, corruption),
+            # matching _TABLE_COLUMNS' schema exactly plus "corruption".
+            for stream_name in ranking_stream_names:
+                stream_raw = raw_by_stream[stream_name]
+                s_cal_l = [maps.predict_l(pk, r_l) for r_l, r_s, acc_l, acc_s in stream_raw]
+                s_cal_s = [maps.predict_s(pk, r_s) for r_l, r_s, acc_l, acc_s in stream_raw]
+                s_acc_l = [acc_l for r_l, r_s, acc_l, acc_s in stream_raw]
+                s_acc_s = [acc_s for r_l, r_s, acc_l, acc_s in stream_raw]
+
+                s_sel_acc, s_sel_correct, s_sel_total = _selection_accuracy(s_cal_l, s_cal_s, s_acc_l, s_acc_s)
+                s_bal_stats = _balanced_selection_accuracy(s_cal_l, s_cal_s, s_acc_l, s_acc_s)
+                s_gap_stats = _gap_stats(s_cal_l, s_cal_s, s_acc_l, s_acc_s)
+                s_l_stats = _corr_stats(s_cal_l, s_acc_l)
+                s_s_stats = _corr_stats(s_cal_s, s_acc_s)
+                ranking_rows.append({
+                    "proxy_kind": pk, "calib_method": cm, "proxy_batch_size": pbs,
+                    "corruption": stream_name, "n": len(stream_raw),
+                    "sel_acc": s_sel_acc, "sel_correct": s_sel_correct, "sel_total": s_sel_total,
+                    **s_bal_stats,
+                    **s_gap_stats,
+                    "l_r2": s_l_stats["r2"], "l_pearson_r": s_l_stats["pearson_r"],
+                    "l_spearman_rho": s_l_stats["spearman_rho"],
+                    "s_r2": s_s_stats["r2"], "s_pearson_r": s_s_stats["pearson_r"],
+                    "s_spearman_rho": s_s_stats["spearman_rho"],
+                })
+
     rows.sort(key=lambda r: (r[args.sort_by] if r[args.sort_by] == r[args.sort_by] else -1), reverse=True)
+    ranking_rows.sort(key=lambda r: (r["proxy_kind"], r["calib_method"], r["proxy_batch_size"], r["corruption"]))
 
     if args.csv_path:
         path = Path(args.csv_path)
@@ -497,6 +761,19 @@ def main():
             writer.writeheader()
             writer.writerows(rows)
         print(f"\nWrote {len(rows)} rows to {path}")
+
+    if args.rankings_csv_path:
+        path = Path(args.rankings_csv_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="") as f:
+            writer = csv_module.DictWriter(f, fieldnames=_RANKING_TABLE_COLUMNS)
+            writer.writeheader()
+            writer.writerows(ranking_rows)
+        print(f"Wrote {len(ranking_rows)} rows to {path} "
+              f"({len(ranking_stream_names)} corruptions incl. clean, "
+              f"{len(rows)} combos each) — pivot in Excel (corruption as columns) and "
+              f"CORREL() any two to check proxy-selection transferability across "
+              f"corruptions (see module docstring).")
 
     if args.log_wandb:
         import wandb
@@ -510,9 +787,16 @@ def main():
         for r in rows:
             table.add_data(*[r[c] for c in _TABLE_COLUMNS])
         run.log({"proxy_sweep": table})
+
+        ranking_table = wandb.Table(columns=_RANKING_TABLE_COLUMNS)
+        for r in ranking_rows:
+            ranking_table.add_data(*[r[c] for c in _RANKING_TABLE_COLUMNS])
+        run.log({"proxy_rankings": ranking_table})
+
         run.finish()
         print(f"\nLogged {len(rows)} rows to wandb project '{args.wandb_project}' "
-              f"(group='{group}') — click any column header in the table UI to sort by it.")
+              f"(group='{group}') — click any column header in the table UI to sort by it.\n"
+              f"Logged {len(ranking_rows)} rows to the 'proxy_rankings' table in the same run.")
 
 
 if __name__ == "__main__":
