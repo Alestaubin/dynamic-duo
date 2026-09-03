@@ -403,34 +403,14 @@ def collect_logits(large, large_preprocess, small, small_preprocess, data_loader
     return torch.cat(all_z_l), torch.cat(all_z_s), torch.cat(all_labels)
 
 
-def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None,
-                          use_wandb=False, group=None, run_name=None, on_corruption_start=None,
-                          on_batch=None, on_corruption_end=None):
-    """Runs duo over cfg['EVAL']'s corruptions/severities; returns results_rows
-    (one dict per corruption/severity, plus a final "average" row).
-
-    group is passed straight to wandb.init(group=...) so multiple calls (e.g.
-    from a driver script comparing several calibrators) can be grouped
-    together in the W&B UI. run_name overrides the auto-generated wandb run
-    name — useful for the same reason (a short, consistent label per config
-    rather than the verbose default).
-
-    on_corruption_start(corruption_type, severity), if given, is called once
-    per stream right before duo.reset() — an extension point for callers
-    that need to know corruption boundaries without re-implementing this
-    loop (e.g. a logits cache keyed per corruption/severity).
-
-    on_batch, if given, is passed straight through to run_duo (see its
-    docstring) — an extension point for per-batch diagnostics (e.g.
-    compare_calibrators.py's --verbose).
-
-    on_corruption_end(corruption_type, severity, metrics_by_model), if given,
-    is called once per stream right after this corruption's metrics are
-    computed (metrics_by_model is the same dict this function's own
-    "duo=... large=... small=..." console line prints from) — an extension
-    point for callers that want to fold in their own per-corruption summary
-    (e.g. compare_calibrators.py comparing against a fixed_ts reference)
-    without recomputing accuracy themselves.
+def build_wandb_run(duo, cfg, wandb_project="dynamic-duos", group=None, run_name=None):
+    """Creates (but does not own/finish) a wandb run configured exactly the
+    way evaluate_dynamic_duo's own internal wandb.init call is -- pulled out
+    so a caller that wants to log additional artifacts (e.g. diagnostics
+    plots, only available after evaluate_dynamic_duo returns) into the SAME
+    run can create it first, pass it as evaluate_dynamic_duo's wandb_run=
+    argument (which then logs into it without finishing it), and finish it
+    itself once its own post-hoc logging is done. See run_dynamic_duo.py.
     """
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
@@ -452,39 +432,82 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
         f"{f' | pbs={proxy_batch_size} abs={adaptation_batch_size}' if proxy_batch_size is not None else ''}"
         f"| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
     )
-    if use_wandb:
-        wandb_run = wandb.init(
-            project=wandb_project,
-            name=run_name,
-            group=group,
-            tags=[cfg["LARGE"]["NAME"], cfg["SMALL"]["NAME"]],
-            config={
-                "mode": duo.mode,
-                "calibration_mode": duo.calibration_mode,
-                "adapt_large": adapt_large,
-                "adapt_small": adapt_small,
-                "signal": signal,
-                "steps": duo.steps,
-                "adaptation_batch_size": adaptation_batch_size,
-                "proxy_batch_size": proxy_batch_size,
-                "large/name": cfg["LARGE"]["NAME"],
-                "large/norm": cfg["LARGE"]["NORM"],
-                "large/lr": cfg["LARGE"]["OPTIM"]["LR"],
-                "large/optim": cfg["LARGE"]["OPTIM"]["METHOD"],
-                "small/name": cfg["SMALL"]["NAME"],
-                "small/norm": cfg["SMALL"]["NORM"],
-                "small/lr": cfg["SMALL"]["OPTIM"]["LR"],
-                "small/optim": cfg["SMALL"]["OPTIM"]["METHOD"],
-                **({
-                    "calibrator/Tl": duo.joint_calibrator.Tl.item(),
-                    "calibrator/Ts": duo.joint_calibrator.Ts.item(),
-                } if duo.calibration_mode == "fixed_ts" else {}),
-                "eval/corruptions": cfg["EVAL"]["CORRUPTIONS"],
-                "eval/severities": cfg["EVAL"]["SEVERITIES"],
-            },
-        )
-    else:
-        wandb_run = None
+    return wandb.init(
+        project=wandb_project,
+        name=run_name,
+        group=group,
+        tags=[cfg["LARGE"]["NAME"], cfg["SMALL"]["NAME"]],
+        config={
+            "mode": duo.mode,
+            "calibration_mode": duo.calibration_mode,
+            "adapt_large": adapt_large,
+            "adapt_small": adapt_small,
+            "signal": signal,
+            "steps": duo.steps,
+            "adaptation_batch_size": adaptation_batch_size,
+            "proxy_batch_size": proxy_batch_size,
+            "large/name": cfg["LARGE"]["NAME"],
+            "large/norm": cfg["LARGE"]["NORM"],
+            "large/lr": cfg["LARGE"]["OPTIM"]["LR"],
+            "large/optim": cfg["LARGE"]["OPTIM"]["METHOD"],
+            "small/name": cfg["SMALL"]["NAME"],
+            "small/norm": cfg["SMALL"]["NORM"],
+            "small/lr": cfg["SMALL"]["OPTIM"]["LR"],
+            "small/optim": cfg["SMALL"]["OPTIM"]["METHOD"],
+            **({
+                "calibrator/Tl": duo.joint_calibrator.Tl.item(),
+                "calibrator/Ts": duo.joint_calibrator.Ts.item(),
+            } if duo.calibration_mode == "fixed_ts" else {}),
+            "eval/corruptions": cfg["EVAL"]["CORRUPTIONS"],
+            "eval/severities": cfg["EVAL"]["SEVERITIES"],
+        },
+    )
+
+
+def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None,
+                          use_wandb=False, group=None, run_name=None, wandb_run=None,
+                          on_corruption_start=None, on_batch=None, on_corruption_end=None):
+    """Runs duo over cfg['EVAL']'s corruptions/severities; returns results_rows
+    (one dict per corruption/severity, plus a final "average" row).
+
+    group is passed straight to wandb.init(group=...) so multiple calls (e.g.
+    from a driver script comparing several calibrators) can be grouped
+    together in the W&B UI. run_name overrides the auto-generated wandb run
+    name — useful for the same reason (a short, consistent label per config
+    rather than the verbose default).
+
+    wandb_run, if given, is used INSTEAD of creating a new run here (group/
+    run_name/wandb_project/use_wandb are then ignored for init purposes,
+    though use_wandb still gates whether any logging happens at all) — and
+    is never .finish()ed by this function, only by whoever created it. This
+    lets a caller wandb.init() its own run (e.g. with extra config fields, or
+    to attach additional media/tables after this function returns) while
+    still getting evaluate_dynamic_duo's own per-batch/per-corruption logging
+    into that SAME run instead of a second, separate one.
+
+    on_corruption_start(corruption_type, severity), if given, is called once
+    per stream right before duo.reset() — an extension point for callers
+    that need to know corruption boundaries without re-implementing this
+    loop (e.g. a logits cache keyed per corruption/severity).
+
+    on_batch, if given, is passed straight through to run_duo (see its
+    docstring) — an extension point for per-batch diagnostics (e.g.
+    compare_calibrators.py's --verbose).
+
+    on_corruption_end(corruption_type, severity, metrics_by_model), if given,
+    is called once per stream right after this corruption's metrics are
+    computed (metrics_by_model is the same dict this function's own
+    "duo=... large=... small=..." console line prints from) — an extension
+    point for callers that want to fold in their own per-corruption summary
+    (e.g. compare_calibrators.py comparing against a fixed_ts reference)
+    without recomputing accuracy themselves.
+    """
+    owns_wandb_run = False
+    if wandb_run is not None:
+        use_wandb = True  # a passed-in run always means "log into it"
+    elif use_wandb:
+        wandb_run = build_wandb_run(duo, cfg, wandb_project, group, run_name)
+        owns_wandb_run = True
 
     results_rows = []
     for severity in cfg["EVAL"]["SEVERITIES"]:
@@ -611,7 +634,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             wandb_run.log({"summary/results": table})
         results_rows.append(avg_row)
 
-    if wandb_run is not None:
+    if owns_wandb_run:
         wandb_run.finish()
 
     return results_rows

@@ -1,12 +1,19 @@
-from src.tta.dynamic_duo import setup_duo, evaluate_dynamic_duo
+from src.tta.dynamic_duo import setup_duo, evaluate_dynamic_duo, build_wandb_run
 from src.utils.model import get_model
 from src.utils.data import load_config
 from src.calibrators.joint_fixed_TS import JointFixedTS, PreScaledCalibrator
 from src.calibrators.joint_coca import JointCoca
 from src.reliability.setup import build_proxy_weighted_calibrator, fit_beta
+from src.utils.diagnostics_plots import (
+    plot_batch_diagnostics, plot_proxy_diagnostics, plot_per_corruption_proxy_vs_accuracy,
+)
 
 import argparse
+import csv
+from datetime import datetime
+from pathlib import Path
 import torch
+import wandb
 
 """
 source /scratch0/alxstaub/ddenv/bin/activate
@@ -129,6 +136,21 @@ if __name__ == "__main__":
                              "independent of the TENT batch size. Only used when "
                              "--duo_calibration_mode coca.")
 
+    # --- diagnostics plots ---
+    parser.add_argument("--no_plots", action="store_true",
+                        help="Skip the end-of-run diagnostics plots (per-batch "
+                             "acc/nll/entropy for large/small/duo, plus -- for "
+                             "--duo_calibration_mode proxy_weighted -- raw proxy "
+                             "scores and gate weight vs. ground-truth accuracy, "
+                             "the signal for whether a proxy tracks one model "
+                             "collapsing during adaptation). On by default.")
+    parser.add_argument("--out_dir", type=str, default="out/run_diagnostics",
+                        help="Directory to write plots (and, for proxy_weighted, "
+                             "the underlying proxy CSV log) under a per-run subdir.")
+    parser.add_argument("--run_name", type=str, default=None,
+                        help="Subdirectory name under --out_dir. Default: "
+                             "auto-generated from calibration_mode/mode/timestamp.")
+
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -139,6 +161,20 @@ if __name__ == "__main__":
     small_model, small_preprocess = get_model(config["SMALL"]["NAME"])
     large_model = large_model.to(device)
     small_model = small_model.to(device)
+
+    run_name = args.run_name or (
+        f"{args.duo_calibration_mode}"
+        f"{'_' + args.proxy_kind if args.duo_calibration_mode == 'proxy_weighted' else ''}"
+        f"__{args.mode}__{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    )
+    out_dir = Path(args.out_dir) / run_name
+    if not args.no_plots:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        # proxy_weighted's proxy-batch CSV log (r_l/r_s/w_l/acc_l/acc_s/duo_acc)
+        # is what the proxy-vs-collapse plot below is read back from -- point
+        # it at the run's own out_dir unless the user already gave one.
+        if args.duo_calibration_mode == "proxy_weighted" and args.csv_path is None:
+            args.csv_path = str(out_dir / "proxy_log")
 
     if args.duo_calibration_mode == "proxy_weighted":
         try:
@@ -208,4 +244,83 @@ if __name__ == "__main__":
         steps=args.steps,
         norm_logits=args.norm_logits,
     )
-    evaluate_dynamic_duo(duo, config, num_samples=args.num_samples, seed=args.seed, use_wandb=args.wandb)
+
+    # Built here (rather than left for evaluate_dynamic_duo to create+finish
+    # internally) so the diagnostics plots below -- only available after
+    # evaluate_dynamic_duo returns -- can be logged into the SAME run instead
+    # of a second, separate one. Passing wandb_run= makes evaluate_dynamic_duo
+    # log into it without finishing it; we finish it ourselves at the end.
+    wandb_run = build_wandb_run(duo, config, run_name=run_name) if args.wandb else None
+    if wandb_run is not None:
+        print(f"wandb run: {wandb_run.url}")
+
+    # Per-batch diagnostics -- accumulated via evaluate_dynamic_duo's
+    # on_corruption_start/on_batch hooks (see run_duo's docstring), read
+    # straight out of DynamicDuo._diag rather than recomputed here. Only
+    # collected when plotting is wanted, to avoid the bookkeeping cost on a
+    # plain sweep/production run.
+    batch_records, corruption_boundaries = [], []
+
+    def _on_corruption_start(corruption, severity):
+        corruption_boundaries.append({"idx": len(batch_records), "label": f"{corruption}/s{severity}"})
+
+    def _on_batch(batch_idx, prefix, duo, outputs, z_large, z_small, labels):
+        row = {"global_idx": len(batch_records), "corruption": prefix.rstrip("/")}
+        for name in ("large", "small", "duo"):
+            d = duo._diag[name]
+            row[f"{name}_acc"] = d["acc_last"]
+            row[f"{name}_nll"] = d["nll_last"]
+            row[f"{name}_ent"] = d["ent_last"]
+            row[f"{name}_acc_run"] = d["acc_sum"] / d["n"] if d["n"] > 0 else float("nan")
+            row[f"{name}_nll_run"] = d["nll_sum"] / d["n"] if d["n"] > 0 else float("nan")
+            row[f"{name}_ent_run"] = d["ent_sum"] / d["n"] if d["n"] > 0 else float("nan")
+        batch_records.append(row)
+
+    evaluate_dynamic_duo(
+        duo, config, num_samples=args.num_samples, seed=args.seed, use_wandb=args.wandb,
+        wandb_run=wandb_run,
+        on_corruption_start=None if args.no_plots else _on_corruption_start,
+        on_batch=None if args.no_plots else _on_batch,
+    )
+
+    has_batch_plot, has_proxy_plot = False, False
+    if not args.no_plots:
+        if batch_records:
+            with (out_dir / "batch_diagnostics.csv").open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(batch_records[0].keys()))
+                writer.writeheader()
+                writer.writerows(batch_records)
+            plot_batch_diagnostics(batch_records, corruption_boundaries, out_dir / "batch_diagnostics.png")
+            has_batch_plot = True
+        else:
+            print("No batches were recorded -- nothing to plot.")
+
+        # proxy_kind's raw scores (r_l, r_s) and the gate weight w_l vs. each
+        # proxy batch's ACTUAL accuracy -- the plot that answers "does the
+        # proxy track one model collapsing during adaptation" (see
+        # JointProxyWeighted's CSV logging, csv_path set above).
+        proxy_csv_path = getattr(calibrator, "_csv_path", None)
+        proxy_rows = []
+        if proxy_csv_path is not None and Path(proxy_csv_path).exists():
+            with Path(proxy_csv_path).open() as f:
+                proxy_rows = list(csv.DictReader(f))
+        has_proxy_plot = plot_proxy_diagnostics(proxy_rows, out_dir / "proxy_diagnostics.png")
+
+        # One figure per corruption (saved locally only, not sent to wandb):
+        # running-average accuracy for large/small/duo (bold, right axis)
+        # with the raw proxy scores r_l/r_s (light, left axis) overlaid.
+        per_corruption_dir = out_dir / "per_corruption"
+        per_corruption_dir.mkdir(parents=True, exist_ok=True)
+        plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir)
+
+        print(f"\nDiagnostics written to {out_dir}")
+
+    if wandb_run is not None:
+        media = {}
+        if has_batch_plot:
+            media["plots/batch_diagnostics"] = wandb.Image(str(out_dir / "batch_diagnostics.png"))
+        if has_proxy_plot:
+            media["plots/proxy_diagnostics"] = wandb.Image(str(out_dir / "proxy_diagnostics.png"))
+        if media:
+            wandb_run.log(media)
+        wandb_run.finish()
