@@ -6,6 +6,11 @@ from src.calibrators.joint_coca import JointCoca
 from src.reliability.setup import build_proxy_weighted_calibrator, fit_beta
 from src.utils.diagnostics_plots import (
     plot_batch_diagnostics, plot_proxy_diagnostics, plot_per_corruption_proxy_vs_accuracy,
+    DEFAULT_EMA_WINDOW,
+)
+from scripts._cli import (
+    add_duo_config_arg, add_num_samples_arg, add_seed_arg,
+    add_proto_metric_arg, add_out_dir_run_name_args,
 )
 
 import argparse
@@ -52,26 +57,21 @@ python scripts/run_dynamic_duo.py \
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Dynamic Duo TTA on ImageNet-C")
-    parser.add_argument("--config", type=str, required=True)
+    add_duo_config_arg(parser, required=True)
     parser.add_argument("--mode", type=str, default="both_duo")
     parser.add_argument("--steps", type=int, default=1)
-    parser.add_argument("--num_samples", type=int, default=None)
-    parser.add_argument("--seed", type=int, default=None)
+    add_num_samples_arg(parser, default=None)
+    add_seed_arg(parser, default=None)
 
     parser.add_argument("--duo_calibration_mode", type=str, default="fixed_ts",
                         choices=["fixed_ts", "oracle_ts", "proxy_weighted", "coca"])
-    
+
     parser.add_argument("--proxy_kind", type=str, default="prototype",
                         choices=["nuclear_norm", "atc", "prototype", "ac_mc", "cot", "oracle"],
                         help="Proxy kind for the proxy-weighted calibration. ")
-    
-    parser.add_argument("--proto_metric", type=str, default="cosine",
-                        choices=["cosine", "mahalanobis"],
-                        help="Distance for the prototype proxy: cosine similarity to "
-                             "L2-normalised class means (default), or tied-covariance "
-                             "Mahalanobis to raw class means. Only used when "
-                             "--proxy_kind prototype.")
-    
+
+    add_proto_metric_arg(parser)
+
     parser.add_argument("--proxy_cache", type=str, default=None,
                         help="Path to a .pt file containing cached proxy values. "
                              "If not provided, the proxy will be computed on-the-fly. ")
@@ -144,12 +144,20 @@ if __name__ == "__main__":
                              "scores and gate weight vs. ground-truth accuracy, "
                              "the signal for whether a proxy tracks one model "
                              "collapsing during adaptation). On by default.")
-    parser.add_argument("--out_dir", type=str, default="out/run_diagnostics",
-                        help="Directory to write plots (and, for proxy_weighted, "
-                             "the underlying proxy CSV log) under a per-run subdir.")
-    parser.add_argument("--run_name", type=str, default=None,
-                        help="Subdirectory name under --out_dir. Default: "
-                             "auto-generated from calibration_mode/mode/timestamp.")
+    add_out_dir_run_name_args(
+        parser, out_dir_default="out/run_diagnostics",
+        out_dir_help="Directory to write plots (and, for proxy_weighted, "
+                      "the underlying proxy CSV log) under a per-run subdir.",
+        run_name_help="Subdirectory name under --out_dir. Default: "
+                       "auto-generated from calibration_mode/mode/timestamp.",
+    )
+    parser.add_argument("--ema_window", type=int, default=DEFAULT_EMA_WINDOW,
+                        help="Span (in points) of the EMA smoothing applied to every plotted "
+                             "line (accuracy, NLL, entropy, proxy scores, gate weight) across "
+                             "all three diagnostics plots -- alpha = 2/(window+1). Purely a "
+                             "plotting knob; unrelated to --ema_alpha, the proxy_weighted "
+                             "gate's own Section-4 temporal filter, which affects the logged "
+                             "values themselves, not just how they're plotted.")
 
     args = parser.parse_args()
 
@@ -290,7 +298,8 @@ if __name__ == "__main__":
                 writer = csv.DictWriter(f, fieldnames=list(batch_records[0].keys()))
                 writer.writeheader()
                 writer.writerows(batch_records)
-            plot_batch_diagnostics(batch_records, corruption_boundaries, out_dir / "batch_diagnostics.png")
+            plot_batch_diagnostics(batch_records, corruption_boundaries, out_dir / "batch_diagnostics.png",
+                                    ema_window=args.ema_window)
             has_batch_plot = True
         else:
             print("No batches were recorded -- nothing to plot.")
@@ -304,14 +313,16 @@ if __name__ == "__main__":
         if proxy_csv_path is not None and Path(proxy_csv_path).exists():
             with Path(proxy_csv_path).open() as f:
                 proxy_rows = list(csv.DictReader(f))
-        has_proxy_plot = plot_proxy_diagnostics(proxy_rows, out_dir / "proxy_diagnostics.png")
+        has_proxy_plot = plot_proxy_diagnostics(proxy_rows, out_dir / "proxy_diagnostics.png",
+                                                 ema_window=args.ema_window)
 
         # One figure per corruption (saved locally only, not sent to wandb):
-        # running-average accuracy for large/small/duo (bold, right axis)
-        # with the raw proxy scores r_l/r_s (light, left axis) overlaid.
+        # EMA-smoothed accuracy for large/small/duo (bold, right axis) with
+        # the raw proxy scores r_l/r_s (light, left axis) overlaid.
         per_corruption_dir = out_dir / "per_corruption"
         per_corruption_dir.mkdir(parents=True, exist_ok=True)
-        plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir)
+        plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir,
+                                               ema_window=args.ema_window)
 
         print(f"\nDiagnostics written to {out_dir}")
 

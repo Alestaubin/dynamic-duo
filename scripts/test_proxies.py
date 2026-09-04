@@ -59,6 +59,7 @@ from src.utils.model import get_model
 from src.reliability.proxies.stats import FeatureExtractor
 from src.reliability.setup import _build_proxy_stats, _fit_and_save_calibration_maps
 from src.reliability.calibration.maps import load_calibration_maps
+from scripts._cli import add_duo_config_arg, add_num_samples_arg, add_seed_arg, add_proto_metric_arg
 
 _VALIDATABLE_PROXY_KINDS = ["nuclear_norm", "atc", "prototype", "ac_mc", "cot"]
 
@@ -136,9 +137,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Check whether a reliability proxy indicates the better model, before/after calibration."
     )
-    parser.add_argument("--config", type=str, required=True)
+    add_duo_config_arg(parser, required=True)
     parser.add_argument("--proxy_kind", type=str, required=True, choices=_VALIDATABLE_PROXY_KINDS)
-    parser.add_argument("--proto_metric", type=str, default="cosine", choices=["cosine", "mahalanobis"])
+    add_proto_metric_arg(parser)
     parser.add_argument("--proxy_cache", type=str, default=None)
     parser.add_argument("--calib_map", type=str, default=None,
                         help="Name of a calibration-map file to load, or fit fresh "
@@ -153,8 +154,8 @@ def main():
                         help="Defaults to the config's EVAL.CORRUPTIONS.")
     parser.add_argument("--severities", type=int, nargs="+", default=None,
                         help="Defaults to the config's EVAL.SEVERITIES.")
-    parser.add_argument("--num_samples", type=int, default=None)
-    parser.add_argument("--seed", type=int, default=None)
+    add_num_samples_arg(parser, default=None)
+    add_seed_arg(parser, default=None)
     parser.add_argument("--csv_path", type=str, default=None,
                         help="If given, write one row per proxy batch to this CSV path.")
     args = parser.parse_args()

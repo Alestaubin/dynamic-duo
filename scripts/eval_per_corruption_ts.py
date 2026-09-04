@@ -16,6 +16,7 @@ import torch
 from src.utils.data import load_config
 from src.utils.logits import get_model_logits
 from src.calibrators.joint_fixed_TS import JointFixedTS
+from scripts._cli import add_duo_config_arg
 
 
 def _acc(logits: torch.Tensor, labels: torch.Tensor) -> float:
@@ -42,7 +43,7 @@ def _latex_row(label, tl, ts, acc_l, acc_s, acc_duo):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="cfgs/dynamic_duo_config.yaml")
+    add_duo_config_arg(parser)
     parser.add_argument("--cache_dir", default="cache/logits")
     args = parser.parse_args()
 

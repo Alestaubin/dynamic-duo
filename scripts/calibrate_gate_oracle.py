@@ -122,6 +122,10 @@ from src.calibrators.joint_proxy_weighted import JointProxyWeighted
 from src.calibrators.joint_optimal_w_oracle import combine as _combine, optimal_w_nll as _optimal_w_nll
 from src.reliability.proxies.stats import ProxyStats, FeatureExtractor
 from src.reliability.calibration.logit import to_logit
+from scripts._cli import (
+    add_duo_config_arg, add_num_samples_arg, add_seed_arg,
+    add_cache_toggle_args, add_wandb_project_group_args,
+)
 
 _TABLE_COLUMNS = [
     "beta", "filter_kind", "proxy_batch_size",
@@ -418,9 +422,9 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--config", type=str, default="cfgs/dynamic_duo_config.yaml")
-    parser.add_argument("--num_samples", type=int, default=5000)
-    parser.add_argument("--seed", type=int, default=0)
+    add_duo_config_arg(parser)
+    add_num_samples_arg(parser)
+    add_seed_arg(parser)
     parser.add_argument("--fixed_ts_config", type=str, default=None,
                          help="JointFixedTS checkpoint folder supplying (T_l, T_s) for the "
                               "Section-5 combination. Omit for T_l=T_s=1.0 (not recommended -- "
@@ -439,14 +443,11 @@ def main():
     parser.add_argument("--kalman_r", type=float, default=1e-1)
     parser.add_argument("--sort_by", type=str, default="duo_acc", choices=_TABLE_COLUMNS)
     parser.add_argument("--csv_path", type=str, default="out/gate_calibration_oracle.csv")
-    parser.add_argument("--use_cache", action="store_true",
-                         help="Cache each eval (corruption, severity) stream's logits (see "
-                              "src.utils.stream_cache — automatic, duo-specific directory, no "
-                              "path to pick) so a repeat run against the same duo/--num_samples/"
-                              "--seed skips the model forward pass entirely.")
-    parser.add_argument("--overwrite_cache", action="store_true",
-                         help="With --use_cache, always recompute and overwrite any existing "
-                              "cache entries instead of reusing them.")
+    add_cache_toggle_args(parser, use_cache_help=(
+        "Cache each eval (corruption, severity) stream's logits (see src.utils.stream_cache — "
+        "automatic, duo-specific directory, no path to pick) so a repeat run against the same "
+        "duo/--num_samples/--seed skips the model forward pass entirely."
+    ))
     parser.add_argument("--diagnose", action="store_true",
                          help="Print the raw oracle accuracy gap (acc_l - acc_s) per corruption/"
                               "severity/proxy_batch_size, bypassing calibration/filter/gate "
@@ -463,10 +464,11 @@ def main():
                               "can watch it fill in live rather than only seeing it once the "
                               "whole sweep finishes — click any column header in the table UI "
                               "to sort by it, rather than being limited to --sort_by's one ranking.")
-    parser.add_argument("--wandb_project", type=str, default="proxy-weighted-duo-calibration")
-    parser.add_argument("--wandb_group", type=str, default=None,
-                         help="Defaults to a timestamp. Always prefixed with the duo's model "
-                              "names so two duos' sweeps can never mix in the same wandb group.")
+    add_wandb_project_group_args(
+        parser,
+        group_help="Defaults to a timestamp. Always prefixed with the duo's model names so two "
+                    "duos' sweeps can never mix in the same wandb group.",
+    )
     parser.add_argument("--run_baselines", action="store_true",
                          help="Run the fixed_ts/coca_ts baseline rows (see _baseline_accuracy) "
                               "even if --diagnose_only is set, so you can see where the "

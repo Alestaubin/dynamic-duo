@@ -104,6 +104,7 @@ from src.calibrators.joint_optimal_w_oracle import combine, optimal_w_nll
 from src.utils.data import load_config
 from src.utils.model import get_model
 from scripts.compare_calibrators import _build_calibrator, _load_run_configs
+from scripts._cli import add_duo_config_arg, add_seed_arg
 
 _NOT_W_L_MODES = {"coca", "oracle_ts"}
 
@@ -215,10 +216,11 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--config", type=str, default="cfgs/dynamic_duo_config.yaml",
-                   help="duo config (LARGE/SMALL model names) -- needed to build any "
-                        "strategy's calibrator, even if this script only ever combines "
-                        "cached logits, never runs the models forward itself.")
+    add_duo_config_arg(p, help=(
+        "duo config (LARGE/SMALL model names) -- needed to build any strategy's calibrator, "
+        "even if this script only ever combines cached logits, never runs the models forward "
+        "itself."
+    ))
     p.add_argument("--configs_file", type=Path, default=None,
                    help="compare_calibrators.py-format JSON (see cfgs/compare_runs/) "
                         "listing the strategies to compare against the optimum.")
@@ -243,7 +245,7 @@ def main() -> None:
                         "the same one via their own fixed_ts_config.")
     p.add_argument("--n", type=int, default=401, help="grid points")
     p.add_argument("--out", type=Path, default=Path("optimal_w_sanity.png"))
-    p.add_argument("--seed", type=int, default=0)
+    add_seed_arg(p)
     args = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

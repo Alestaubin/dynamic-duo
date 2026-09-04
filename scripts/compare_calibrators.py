@@ -91,6 +91,7 @@ from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_optimal_w_oracle import JointOptimalWOracle
 from src.reliability.setup import build_proxy_weighted_calibrator, fit_beta
+from scripts._cli import add_duo_config_arg, add_num_samples_arg, add_seed_arg, add_cache_toggle_args
 
 DEFAULT_CONFIGS_FILE = "cfgs/compare_runs/default.json"
 
@@ -201,11 +202,11 @@ def main():
         description="Run JointProxyWeighted against the fixed_ts/oracle_ts/coca_ts baselines "
                     "and log all of them, grouped, to Weights & Biases for easy comparison."
     )
-    parser.add_argument("--config", type=str, required=True)
+    add_duo_config_arg(parser, required=True)
     parser.add_argument("--mode", type=str, default="both_duo")
     parser.add_argument("--steps", type=int, default=1)
-    parser.add_argument("--num_samples", type=int, default=5000)
-    parser.add_argument("--seed", type=int, default=0)
+    add_num_samples_arg(parser)
+    add_seed_arg(parser)
     parser.add_argument("--wandb_project", type=str, default="proxy-weighted-duo-calibration",
                         help="Dedicated W&B project for these filtered-proxy soft-weighting "
                              "comparisons, separate from other dynamic-duos experiments.")
@@ -217,19 +218,15 @@ def main():
                         help="JSON file with a list of run configs (see cfgs/compare_runs/).")
     parser.add_argument("--only", type=str, nargs="+", default=None,
                         help="Restrict to these run names (see --configs_file) instead of all of them.")
-    parser.add_argument("--use_cache", action="store_true",
-                        help="If set (and --mode no_adapt), cache each (corruption, "
-                             "severity) stream's logits AND penultimate features (see "
-                             "src.utils.stream_cache) under an automatic, duo-specific "
-                             "directory, so repeat comparisons on the same duo/--num_samples/"
-                             "--seed skip the model forward pass entirely after the first "
-                             "run_cfg populates the cache — including proxy_kind='prototype', "
-                             "which needs the features too. Ignored (with a warning) for any "
-                             "other --mode, where logits are calibrator-dependent (adaptation "
-                             "mutates the models) and can't be shared across run_cfgs.")
-    parser.add_argument("--overwrite_cache", action="store_true",
-                        help="With --use_cache, always recompute and overwrite any existing "
-                             "cache entries instead of reusing them.")
+    add_cache_toggle_args(parser, use_cache_help=(
+        "If set (and --mode no_adapt), cache each (corruption, severity) stream's logits AND "
+        "penultimate features (see src.utils.stream_cache) under an automatic, duo-specific "
+        "directory, so repeat comparisons on the same duo/--num_samples/--seed skip the model "
+        "forward pass entirely after the first run_cfg populates the cache — including "
+        "proxy_kind='prototype', which needs the features too. Ignored (with a warning) for "
+        "any other --mode, where logits are calibrator-dependent (adaptation mutates the "
+        "models) and can't be shared across run_cfgs."
+    ))
     parser.add_argument("--verbose", action="store_true",
                         help="Print one line per batch: the current run_cfg's calibrator "
                              "accuracy/NLL (already tracked in duo._diag, free) alongside a "

@@ -38,17 +38,19 @@ for plotting/wandb, rather than re-deriving the same numbers a second way.
 
 Usage
 -----
-    # fixed_ts baseline, no adaptation, 3 corruptions
+Corruptions/severities always come from --config's EVAL.CORRUPTIONS/
+EVAL.SEVERITIES (cfgs/dynamic_duo_config.yaml) -- edit that file to change
+which ones a run covers, rather than passing them on the command line.
+
+    # fixed_ts baseline, no adaptation
     python scripts/plot_run_diagnostics.py --config cfgs/dynamic_duo_config.yaml \
         --calib_config cfgs/calib_configs/fixed_ts_default.json \
-        --mode no_adapt --corruptions gaussian_noise fog brightness --severities 5 \
-        --num_samples 10000
+        --mode no_adapt --num_samples 10000
 
     # filtered-proxy soft weighting, both models adapting jointly
     python scripts/plot_run_diagnostics.py --config cfgs/dynamic_duo_config.yaml \
         --calib_config cfgs/calib_configs/nuclear_norm_identity_pbs128.json \
-        --mode both_indep --corruptions gaussian_noise fog brightness --severities 5 \
-        --num_samples 10000
+        --mode both_indep --num_samples 10000
 
     # same, but skip wandb entirely (quick local iteration)
     python scripts/plot_run_diagnostics.py --config cfgs/dynamic_duo_config.yaml \
@@ -74,6 +76,11 @@ from src.reliability.proxies.stats import PROXY_KINDS
 from src.calibrators.joint_proxy_weighted import JointProxyWeighted
 from src.utils.diagnostics_plots import (
     plot_batch_diagnostics, plot_proxy_diagnostics, plot_per_corruption_proxy_vs_accuracy,
+    DEFAULT_EMA_WINDOW,
+)
+from scripts._cli import (
+    add_duo_config_arg, add_num_samples_arg, add_seed_arg,
+    add_wandb_project_group_args, add_out_dir_run_name_args,
 )
 from scripts.compare_calibrators import _build_calibrator
 
@@ -137,6 +144,79 @@ def _resolve_fixed_ts_config(path: str | None) -> str | None:
 
 def _default_calib_map(cfg: dict, proxy_kind: str, calib_method: str) -> str:
     return f"{cfg['LARGE']['NAME']}_{cfg['SMALL']['NAME']}_{proxy_kind}_{calib_method}"
+
+
+def _load_batch_diagnostics_csv(path: Path) -> list[dict]:
+    """Read a previously-written batch_diagnostics.csv back into the same
+    shape _run's on_batch hook builds live (global_idx an int, everything
+    else -- including "duo_*" columns, still present in the CSV even though
+    the plots no longer draw them -- a float), so it can be handed straight
+    to plot_batch_diagnostics/plot_per_corruption_proxy_vs_accuracy as if
+    this were a fresh run."""
+    with path.open() as f:
+        rows = list(csv.DictReader(f))
+    for r in rows:
+        for k, v in r.items():
+            if k != "corruption":
+                r[k] = int(v) if k == "global_idx" else float(v)
+    return rows
+
+
+def _load_proxy_log_csv(csv_dir: Path) -> list[dict]:
+    """The proxy log's filename carries a timestamp suffix (JointProxyWeighted
+    appends one at construction) so it can't be located by a fixed name --
+    glob for it instead. Empty (not an error) when the run wasn't
+    calibration_mode=proxy_weighted, matching plot_proxy_diagnostics' own
+    graceful no-proxy-data handling."""
+    matches = sorted(csv_dir.glob("proxy_log_*.csv"))
+    if not matches:
+        return []
+    if len(matches) > 1:
+        print(f"WARNING: {len(matches)} proxy_log_*.csv files in {csv_dir}; "
+              f"using the most recent: {matches[-1].name}")
+    with matches[-1].open() as f:
+        return list(csv.DictReader(f))
+
+
+def _boundaries_from_batch_records(batch_records: list[dict]) -> list[dict]:
+    """Recover corruption boundaries (see _run's on_corruption_start hook)
+    from batch_records alone -- they aren't a column in batch_diagnostics.csv,
+    but every row's own "corruption" field is enough to reconstruct exactly
+    where each one started."""
+    boundaries = []
+    last_corr = None
+    for i, r in enumerate(batch_records):
+        if r["corruption"] != last_corr:
+            boundaries.append({"idx": i, "label": r["corruption"]})
+            last_corr = r["corruption"]
+    return boundaries
+
+
+def _replot_from_csv_dir(csv_dir: Path, ema_window: int) -> None:
+    """Re-run every plotting function against an existing run's own output
+    directory instead of re-running the duo -- e.g. after a plotting-only
+    change (line styles, --ema_window) that doesn't need fresh model
+    forward passes. Overwrites every PNG (and the per-corruption CSVs,
+    which are themselves a plot-data export -- see
+    plot_per_corruption_proxy_vs_accuracy's docstring) already there."""
+    batch_csv = csv_dir / "batch_diagnostics.csv"
+    batch_records = _load_batch_diagnostics_csv(batch_csv) if batch_csv.exists() else []
+    if not batch_records:
+        print(f"No {batch_csv} -- nothing to plot.")
+        return
+    boundaries = _boundaries_from_batch_records(batch_records)
+    proxy_rows = _load_proxy_log_csv(csv_dir)
+
+    plot_batch_diagnostics(batch_records, boundaries, csv_dir / "batch_diagnostics.png",
+                            ema_window=ema_window)
+    plot_proxy_diagnostics(proxy_rows, csv_dir / "proxy_diagnostics.png", ema_window=ema_window)
+
+    per_corruption_dir = csv_dir / "per_corruption"
+    per_corruption_dir.mkdir(parents=True, exist_ok=True)
+    plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir,
+                                           ema_window=ema_window)
+
+    print(f"\nRe-plotted from {csv_dir} (existing PNGs/per-corruption CSVs overwritten).")
 
 
 def _wandb_config(args: argparse.Namespace, run_cfg: dict, cfg: dict) -> dict:
@@ -299,45 +379,64 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("--config", type=str, default="cfgs/dynamic_duo_config.yaml",
-                    help="Duo config -- picks the duo (LARGE/SMALL model names).")
-    p.add_argument("--calib_config", type=str, required=True,
+    p.add_argument("--csv_dir", type=str, default=None,
+                    help="Skip running the duo entirely and instead re-plot from an existing "
+                         "run's own output directory (reads batch_diagnostics.csv and "
+                         "proxy_log_*.csv back in) -- e.g. after a plotting-only change like "
+                         "--ema_window or a line-style tweak that doesn't need fresh model "
+                         "forward passes. OVERWRITES every PNG (and the per-corruption CSVs) "
+                         "already in that directory. When given, every other argument below "
+                         "except --ema_window is ignored (no duo config/calibrator is built).")
+    add_duo_config_arg(p)
+    p.add_argument("--calib_config", type=str, default=None,
                     help="Path to a JSON file holding ONE run_cfg dict -- calibration_mode plus "
                          "all its knobs (proxy_kind, calib_method, filter_kind, proxy_batch_size, "
                          "beta, fixed_ts_config, ...). Same shape as one entry in "
-                         "cfgs/compare_runs/*.json -- see cfgs/calib_configs/ for ready-made ones.")
+                         "cfgs/compare_runs/*.json -- see cfgs/calib_configs/ for ready-made ones. "
+                         "Required unless --csv_dir is given.")
     p.add_argument("--mode", type=str, default="no_adapt", choices=sorted(_MODES))
     p.add_argument("--steps", type=int, default=1)
-    p.add_argument("--corruptions", type=str, nargs="+", default=None,
-                    help="Overrides cfg['EVAL']['CORRUPTIONS']. Default: use the config's own list.")
-    p.add_argument("--severities", type=int, nargs="+", default=None,
-                    help="Overrides cfg['EVAL']['SEVERITIES'].")
-    p.add_argument("--num_samples", type=int, default=5000)
-    p.add_argument("--seed", type=int, default=0)
+    add_num_samples_arg(p)
+    add_seed_arg(p)
     p.add_argument("--batch_size", type=int, default=None, help="Overrides cfg['BS'].")
 
-    p.add_argument("--out_dir", type=str, default="out/run_diagnostics")
-    p.add_argument("--run_name", type=str, default=None,
-                    help="Subdirectory name under --out_dir, and the wandb run name. Default: "
-                         "auto-generated from the calib_config name/mode/timestamp.")
+    add_out_dir_run_name_args(
+        p, out_dir_default="out/run_diagnostics",
+        run_name_help="Subdirectory name under --out_dir, and the wandb run name. Default: "
+                       "auto-generated from the calib_config name/mode/timestamp.",
+    )
+    p.add_argument("--ema_window", type=int, default=DEFAULT_EMA_WINDOW,
+                    help="Span (in points) of the EMA smoothing applied to every plotted line "
+                         "(accuracy, NLL, entropy, proxy scores, gate weight) across all three "
+                         "diagnostics plots -- alpha = 2/(window+1). Purely a plotting knob; "
+                         "unrelated to a proxy_weighted calib_config's own 'filter_kind': 'ema' "
+                         "gate-smoothing knob (Section 4), which affects the logged values "
+                         "themselves, not just how they're plotted.")
 
     wandb_group_args = p.add_argument_group("wandb options")
     wandb_group_args.add_argument("--use_wandb", dest="use_wandb", action="store_true", default=True,
                                    help="Log everything to Weights & Biases (default: on).")
     wandb_group_args.add_argument("--no_wandb", dest="use_wandb", action="store_false",
                                    help="Disable wandb logging entirely (quick local iteration).")
-    wandb_group_args.add_argument("--wandb_project", type=str, default="proxy-weighted-duo-calibration")
-    wandb_group_args.add_argument("--wandb_group", type=str, default=None,
-                                   help="Optional shared group tag (e.g. to cluster several manual "
-                                        "invocations in the W&B UI). Always prefixed with the duo's "
-                                        "model names. Default: ungrouped (a standalone run).")
+    add_wandb_project_group_args(
+        wandb_group_args,
+        group_help="Optional shared group tag (e.g. to cluster several manual invocations in "
+                    "the W&B UI). Always prefixed with the duo's model names. Default: "
+                    "ungrouped (a standalone run).",
+    )
     args = p.parse_args()
 
+    if args.csv_dir is not None:
+        csv_dir = Path(args.csv_dir)
+        if not csv_dir.is_dir():
+            p.error(f"--csv_dir {csv_dir} is not a directory.")
+        _replot_from_csv_dir(csv_dir, args.ema_window)
+        return
+
+    if args.calib_config is None:
+        p.error("--calib_config is required unless --csv_dir is given.")
+
     cfg = load_config(args.config)
-    if args.corruptions:
-        cfg["EVAL"]["CORRUPTIONS"] = args.corruptions
-    if args.severities:
-        cfg["EVAL"]["SEVERITIES"] = args.severities
     if args.batch_size:
         cfg["BS"] = args.batch_size
 
@@ -365,19 +464,22 @@ def main() -> None:
 
     has_batch_plot = False
     if batch_records:
-        plot_batch_diagnostics(batch_records, boundaries, out_dir / "batch_diagnostics.png")
+        plot_batch_diagnostics(batch_records, boundaries, out_dir / "batch_diagnostics.png",
+                                ema_window=args.ema_window)
         has_batch_plot = True
     else:
         print("No batches were recorded -- nothing to plot.")
 
-    has_proxy_plot = plot_proxy_diagnostics(proxy_rows, out_dir / "proxy_diagnostics.png")
+    has_proxy_plot = plot_proxy_diagnostics(proxy_rows, out_dir / "proxy_diagnostics.png",
+                                             ema_window=args.ema_window)
 
     # One figure (+ aligned CSV) per corruption (saved locally only, not sent
-    # to wandb): running-average accuracy for large/small/duo (bold, right
+    # to wandb): EMA-smoothed accuracy for large/small/duo (bold, right
     # axis) with the raw proxy scores r_l/r_s (light, left axis) overlaid.
     per_corruption_dir = out_dir / "per_corruption"
     per_corruption_dir.mkdir(parents=True, exist_ok=True)
-    plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir)
+    plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir,
+                                           ema_window=args.ema_window)
 
     if wandb_run is not None:
         _log_wandb_artifacts(wandb_run, out_dir, has_batch_plot, has_proxy_plot, proxy_rows, results_rows)

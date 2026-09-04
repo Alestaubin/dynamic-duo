@@ -1,0 +1,53 @@
+TEST_DIR: ./data/ImageNet-C
+VAL_DIR: ./data/imagenet-val
+BS: 128
+WORKERS: 8
+CALIBRATOR:
+  CORRUPTIONS:
+    - 'gaussian_blur'
+    - 'saturate'
+    - 'spatter'
+    - 'speckle_noise'
+  SEVERITIES:
+    - 5
+
+LARGE:
+  NAME: resnet50
+  NORM: BN
+  OPTIM:
+    METHOD: "Adam"
+    STEPS: 1
+    LR: 0.001
+    BETA: 0.9
+    WD: 0.0
+
+SMALL:
+  NAME: deit_small
+  NORM: LN
+  OPTIM:
+    METHOD: "Adam"
+    STEPS: 1
+    LR: 0.001
+    BETA: 0.9
+    WD: 0.0
+
+
+EVAL:
+  CORRUPTIONS:
+    - 'brightness'
+    - 'contrast'
+    - 'defocus_blur'
+    - 'elastic_transform'
+    - 'fog'
+    - 'frost'
+    - 'gaussian_noise'
+    - 'glass_blur'
+    - 'impulse_noise'
+    - 'jpeg_compression'
+    - 'motion_blur'
+    - 'pixelate'
+    - 'shot_noise'
+    - 'snow'
+    - 'zoom_blur'
+  SEVERITIES:
+    - 5

@@ -29,6 +29,12 @@ def get_model(model_name, freeze=True, verbose=True):
         model, preprocess = load_efficientnet_b0(verbose=verbose)
     elif model_name == "efficientnet_b4":
         model, preprocess = load_efficientnet_b4(verbose=verbose)
+    elif model_name == "convnext_tiny":
+        model, preprocess = load_convnext_tiny(verbose=verbose)
+    elif model_name == "swin_t":
+        model, preprocess = load_swin_t(verbose=verbose)
+    elif model_name == "deit_small":
+        model, preprocess = load_deit_small(verbose=verbose)
     else:
         raise ValueError(f"Model {model_name} not recognized. Add it to model_loader.py")
         
@@ -163,6 +169,45 @@ def load_wideresnet50_2(verbose=True):
     preprocess = weights.transforms()
     model = models.wide_resnet50_2(weights=weights)
     model.eval()
+    return model, preprocess
+
+def load_convnext_tiny(verbose=True):
+    """
+    Loads ConvNeXt-Tiny pretrained on ImageNet-1K.
+    """
+    if verbose:
+        print("Loading ConvNeXt-Tiny (Pretrained: ImageNet-1K)...")
+    weights = models.ConvNeXt_Tiny_Weights.DEFAULT
+    preprocess = weights.transforms()
+    model = models.convnext_tiny(weights=weights)
+    model.eval()
+    return model, preprocess
+
+def load_swin_t(verbose=True):
+    """
+    Loads Swin-T pretrained on ImageNet-1K.
+    """
+    if verbose:
+        print("Loading Swin-T (Pretrained: ImageNet-1K)...")
+    weights = models.Swin_T_Weights.DEFAULT
+    preprocess = weights.transforms()
+    model = models.swin_t(weights=weights)
+    model.eval()
+    return model, preprocess
+
+def load_deit_small(verbose=True):
+    """
+    Loads DeiT-S (deit_small_patch16_224, no distillation head) pretrained
+    on ImageNet-1K via timm -- torchvision has no DeiT variant.
+    """
+    if verbose:
+        print("Loading DeiT-S (timm, Pretrained: ImageNet-1K)...")
+    import timm
+    from timm.data import resolve_data_config
+    from timm.data.transforms_factory import create_transform
+    model = timm.create_model("deit_small_patch16_224", pretrained=True)
+    model.eval()
+    preprocess = create_transform(**resolve_data_config({}, model=model))
     return model, preprocess
 
 def load_resnext50(verbose=True):

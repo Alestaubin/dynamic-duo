@@ -165,6 +165,10 @@ from src.reliability.proxies.stats import FeatureExtractor, build_proxy_stats, P
 from src.reliability.calibration.maps import make_record, fit_calibration_maps, CalibrationMaps
 from src.tta.dynamic_duo import setup_duo
 from src.calibrators.joint_fixed_TS import JointFixedTS
+from scripts._cli import (
+    add_duo_config_arg, add_seed_arg, add_cache_toggle_args,
+    add_proto_metric_arg, add_wandb_project_group_args,
+)
 
 _ALL_PROXY_KINDS = ["nuclear_norm", "atc", "prototype", "ac_mc", "cot"]
 _ALL_CALIB_METHODS = ["identity", "linear", "platt", "beta", "isotonic"]
@@ -358,7 +362,7 @@ def main():
         description="Sweep (proxy_kind, calib_method, proxy_batch_size) combinations "
                     "and compare them on selection accuracy and score<->accuracy correlation."
     )
-    parser.add_argument("--config", type=str, required=True)
+    add_duo_config_arg(parser, required=True)
     parser.add_argument("--proxy_kinds", type=str, nargs="+", default=_ALL_PROXY_KINDS,
                         choices=_ALL_PROXY_KINDS)
     parser.add_argument("--calib_methods", type=str, nargs="+", default=_ALL_CALIB_METHODS,
@@ -382,7 +386,7 @@ def main():
                              "modes (no adaptation depends on the joint-calibrated output "
                              "there), but still loaded since DynamicDuo/setup_duo always "
                              "require a joint_calibrator.")
-    parser.add_argument("--proto_metric", type=str, default="cosine", choices=["cosine", "mahalanobis"])
+    add_proto_metric_arg(parser)
     parser.add_argument("--calib_corruptions", type=str, nargs="+", default=None,
                         help="Defaults to the config's CALIBRATOR.CORRUPTIONS.")
     parser.add_argument("--calib_severities", type=int, nargs="+", default=None,
@@ -395,22 +399,17 @@ def main():
                         help="Cap on dev samples used to fit calibration maps.")
     parser.add_argument("--eval_num_samples", type=int, default=None,
                         help="Cap on samples per eval (corruption, severity) stream.")
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--use_cache", action="store_true",
-                        help="Cache the (z_l, z_s, f_l, f_s, labels) collected for the "
-                             "calibration stream and each eval (corruption, severity) stream "
-                             "under cache/stream_cache/<large>+<small>/ (see src.utils."
-                             "stream_cache — automatic, duo-specific, no directory to pick), "
-                             "keyed by corruptions/severities/num_samples/seed/--mode/--steps — "
-                             "a repeat sweep on the same duo/data/mode skips both model-forward "
-                             "passes entirely. "
-                             "Caches penultimate features too, so it's never skipped for "
-                             "proxy_kind='prototype'. Proxy scoring itself always re-runs fresh "
-                             "from the cached tensors (never cached), so a cache built with a "
-                             "different --proxy_kinds selection is still safe to reuse.")
-    parser.add_argument("--overwrite_cache", action="store_true",
-                        help="With --use_cache, always recompute and overwrite any existing "
-                             "cache entries instead of reusing them.")
+    add_seed_arg(parser, default=None)
+    add_cache_toggle_args(parser, use_cache_help=(
+        "Cache the (z_l, z_s, f_l, f_s, labels) collected for the calibration stream and each "
+        "eval (corruption, severity) stream under cache/stream_cache/<large>+<small>/ (see "
+        "src.utils.stream_cache — automatic, duo-specific, no directory to pick), keyed by "
+        "corruptions/severities/num_samples/seed/--mode/--steps — a repeat sweep on the same "
+        "duo/data/mode skips both model-forward passes entirely. Caches penultimate features "
+        "too, so it's never skipped for proxy_kind='prototype'. Proxy scoring itself always "
+        "re-runs fresh from the cached tensors (never cached), so a cache built with a "
+        "different --proxy_kinds selection is still safe to reuse."
+    ))
     parser.add_argument("--sort_by", type=str, default="bal_sel_acc", choices=_TABLE_COLUMNS,
                         help="Defaults to bal_sel_acc rather than sel_acc, since sel_acc "
                              "alone can be fooled by a proxy that's just biased toward "
@@ -436,11 +435,11 @@ def main():
                              "interactively, so you aren't limited to --sort_by's one ranking. "
                              "Also logs the per-corruption ranking table (see "
                              "--rankings_csv_path) as a second wandb.Table, 'proxy_rankings'.")
-    parser.add_argument("--wandb_project", type=str, default="proxy-weighted-duo-calibration")
-    parser.add_argument("--wandb_group", type=str, default=None,
-                        help="Defaults to a timestamp. Always prefixed with the duo's model "
-                             "names (see duo_tag below) so two duos' sweeps can never mix in "
-                             "the same wandb group.")
+    add_wandb_project_group_args(
+        parser,
+        group_help="Defaults to a timestamp. Always prefixed with the duo's model names (see "
+                    "duo_tag below) so two duos' sweeps can never mix in the same wandb group.",
+    )
     parser.add_argument("--device", type=str, default=None,
                         help="torch device for model loading, source-fitting, AND the Sweep")
     args = parser.parse_args()

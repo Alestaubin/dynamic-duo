@@ -17,6 +17,8 @@ import wandb
 import argparse
 import logging
 
+from scripts._cli import add_duo_config_arg, add_num_samples_arg, add_seed_arg
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -24,11 +26,11 @@ _MODES = {"large", "small"}
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run single-model TENT TTA on ImageNet-C")
-    parser.add_argument("--config",   type=str,   required=True)
+    add_duo_config_arg(parser, required=True)
     parser.add_argument("--mode",     type=str,   default="large", choices=list(_MODES))
     parser.add_argument("--steps",    type=int,   default=1,  help="Adaptation steps per batch")
-    parser.add_argument("--num_samples", type=int, default=None, help="Number of samples to use from each corruption/severity subset (default: all)")
-    parser.add_argument("--seed",     type=int,   default=None)
+    add_num_samples_arg(parser, default=None)
+    add_seed_arg(parser, default=None)
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
