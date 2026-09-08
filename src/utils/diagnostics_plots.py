@@ -135,9 +135,10 @@ def plot_batch_diagnostics(
         _mark_corruption_boundaries(ax, boundaries, len(batch_records))
     axes[0].legend(loc="upper right", fontsize=8, ncols=2)
     axes[0].set_title(
-        f"Per-batch diagnostics -- faint = single batch, bold = EMA "
-        f"(window={ema_window}, resets at each corruption boundary, dashed lines)",
-        fontsize=10,
+        f"Per-batch diagnostics"
+        # f" -- faint = single batch, bold = EMA "
+        # f"(window={ema_window}, resets at each corruption boundary, dashed lines)",
+        # fontsize=10,
     )
     axes[-1].set_xlabel("adaptation batch (global index across all corruptions)")
     fig.tight_layout()
@@ -179,12 +180,12 @@ def plot_proxy_diagnostics(
     ax.set_ylabel("proxy score")
     ax.grid(True, alpha=0.5, lw=0.5)
     ax.legend(loc="upper right", fontsize=8)
-    ax.set_title(
-        f"Filtered-proxy soft weighting -- proxy score (top) vs. gate weight against "
-        f"ground-truth accuracy (bottom, per proxy batch) -- faint = raw, bold = EMA "
-        f"(window={ema_window}, resets at each corruption boundary)",
-        fontsize=10,
-    )
+    # ax.set_title(
+    #     f"Filtered-proxy soft weighting -- proxy score (top) vs. gate weight against "
+    #     f"ground-truth accuracy (bottom, per proxy batch) -- faint = raw, bold = EMA "
+    #     f"(window={ema_window}, resets at each corruption boundary)",
+    #     fontsize=10,
+    # )
     _mark_corruption_boundaries(ax, boundaries, len(proxy_rows))
 
     ax = axes[1]
@@ -324,10 +325,10 @@ def plot_per_corruption_proxy_vs_accuracy(
         ax_acc.set_ylim(-0.02, 1.02)
         ax_ent.set_ylabel("EMA entropy (nats)", color=C_MUTED)
         ax_proxy.set_xlabel("fraction of corruption stream elapsed")
-        ax_acc.set_title(
-            f"{corruption} -- accuracy (right, solid bold EMA) vs. proxy score (left, dotted -- "
-            f"faint raw / bold EMA) vs. entropy (far right, dash-dot EMA) -- window={ema_window}",
-            fontsize=10,
+        ax_acc.set_title(f"Corruption {corruption}"
+            # f"{corruption} -- accuracy (right, solid bold EMA) vs. proxy score (left, dotted -- "
+            # f"faint raw / bold EMA) vs. entropy (far right, dash-dot EMA) -- window={ema_window}",
+            # fontsize=10,
         )
         ax_proxy.grid(True, alpha=0.4, lw=0.5)
 
