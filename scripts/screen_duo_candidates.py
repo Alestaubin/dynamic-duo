@@ -233,7 +233,7 @@ def _fit_or_load_fixed_ts(cfg: dict, duo_name: str, args, device: torch.device) 
     common = dict(
         val_dir=cfg["VAL_DIR"], test_dir=cfg["TEST_DIR"], cache_dir=args.cache_dir,
         batch_size=cfg["BS"], num_workers=cfg["WORKERS"], device=device,
-        tent_mode=True, seed=args.seed, verbose=args.verbose,
+        tent_mode=False, seed=args.seed, verbose=args.verbose,
     )
     z_l, y_l = get_model_logits(model_name=cfg["LARGE"]["NAME"], norm_type=cfg["LARGE"]["NORM"], **common)
     z_s, y_s = get_model_logits(model_name=cfg["SMALL"]["NAME"], norm_type=cfg["SMALL"]["NORM"], **common)
@@ -295,7 +295,8 @@ def _screen_duo(config_path: str, args, device: torch.device, w_grid: torch.Tens
         f"{overall['win_rate_small']:.2f}  oracle_Δacc={overall['oracle_delta_acc_mean_pp']:+.2f}pp "
         f"(median {overall['oracle_delta_acc_median_pp']:+.2f}pp)  disagree={overall['disagree_rate']:.3f}  "
         f"acc(L/S)={overall['acc_large']:.3f}/{overall['acc_small']:.3f}\n"
-        f"  acc_fixed={overall['acc_fixed']:.3f}  acc_gate={overall['acc_gate']:.3f}  "
+        f"  acc_fixed={overall['acc_fixed']:.3f}  acc_small={overall['acc_small']:.3f}  acc_large={overall['acc_large']:.3f}  "
+        f"acc_gate={overall['acc_gate']:.3f}  "
         f"acc_persample={overall['acc_persample']:.3f}  acc_hard={overall['acc_hard']:.3f}  "
         f"acc_either={overall['acc_either']:.3f}"
     )
@@ -324,12 +325,15 @@ def _print_comparison(all_rows: list[dict]) -> None:
         )
 
     print("\n" + "=" * 100)
-    print(f"{'duo':<30}{'acc_fixed':>11}{'acc_gate':>11}{'acc_persample':>15}{'acc_hard':>11}{'acc_either':>13}")
+    print(
+        f"{'duo':<30}{'acc_large':>11}{'acc_small':>11}{'acc_fixed':>11}{'acc_gate':>11}"
+        f"{'acc_persample':>15}{'acc_hard':>11}{'acc_either':>13}"
+    )
     print("-" * 100)
     for r in overall_rows:
         print(
-            f"{r['duo']:<30}{r['acc_fixed']:>11.3f}{r['acc_gate']:>11.3f}"
-            f"{r['acc_persample']:>15.3f}{r['acc_hard']:>11.3f}{r['acc_either']:>13.3f}"
+            f"{r['duo']:<30}{r['acc_large']:>11.3f}{r['acc_small']:>11.3f}{r['acc_fixed']:>11.3f}"
+            f"{r['acc_gate']:>11.3f}{r['acc_persample']:>15.3f}{r['acc_hard']:>11.3f}{r['acc_either']:>13.3f}"
         )
 
 

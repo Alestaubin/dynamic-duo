@@ -1,0 +1,14 @@
+TEST_DIR: ./data/ImageNet-C
+VAL_DIR: ./data/imagenet-val
+CALIBRATOR:
+  CORRUPTIONS:
+    - 'gaussian_blur'
+    - 'saturate'
+    - 'spatter' 
+    - 'speckle_noise'
+  SEVERITIES: 
+    # - 1
+    # - 2
+    # - 3
+    # - 4
+    - 5

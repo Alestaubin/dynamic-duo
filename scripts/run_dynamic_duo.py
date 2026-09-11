@@ -273,7 +273,7 @@ if __name__ == "__main__":
         corruption_boundaries.append({"idx": len(batch_records), "label": f"{corruption}/s{severity}"})
 
     def _on_batch(batch_idx, prefix, duo, outputs, z_large, z_small, labels):
-        row = {"global_idx": len(batch_records), "corruption": prefix.rstrip("/")}
+        row = {"global_idx": len(batch_records), "corruption": prefix.rstrip("/"), "n": labels.shape[0]}
         for name in ("large", "small", "duo"):
             d = duo._diag[name]
             row[f"{name}_acc"] = d["acc_last"]

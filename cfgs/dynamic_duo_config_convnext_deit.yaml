@@ -13,7 +13,7 @@ CALIBRATOR:
 
 LARGE:
   NAME: convnext_tiny
-  NORM: BN
+  NORM: LN
   OPTIM:
     METHOD: "Adam"
     STEPS: 1
@@ -27,7 +27,7 @@ SMALL:
   OPTIM:
     METHOD: "Adam"
     STEPS: 1
-    LR: 0.001
+    LR: 0.00001
     BETA: 0.9
     WD: 0.0
 
@@ -39,15 +39,15 @@ EVAL:
     - 'defocus_blur'
     - 'elastic_transform'
     - 'fog'
-    - 'frost'
-    - 'gaussian_noise'
-    - 'glass_blur'
-    - 'impulse_noise'
-    - 'jpeg_compression'
-    - 'motion_blur'
-    - 'pixelate'
-    - 'shot_noise'
-    - 'snow'
-    - 'zoom_blur'
+    # - 'frost'
+    # - 'gaussian_noise'
+    # - 'glass_blur'
+    # - 'impulse_noise'
+    # - 'jpeg_compression'
+    # - 'motion_blur'
+    # - 'pixelate'
+    # - 'shot_noise'
+    # - 'snow'
+    # - 'zoom_blur'
   SEVERITIES:
     - 5

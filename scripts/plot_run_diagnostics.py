@@ -280,7 +280,7 @@ def _run(
         corruption_boundaries.append({"idx": len(batch_records), "label": f"{corruption}/s{severity}"})
 
     def _on_batch(batch_idx, prefix, duo, outputs, z_large, z_small, labels):
-        row = {"global_idx": len(batch_records), "corruption": prefix.rstrip("/")}
+        row = {"global_idx": len(batch_records), "corruption": prefix.rstrip("/"), "n": labels.shape[0]}
         for name in ("large", "small", "duo"):
             d = duo._diag[name]
             row[f"{name}_acc"] = d["acc_last"]
@@ -403,7 +403,7 @@ def main() -> None:
     add_out_dir_run_name_args(
         p, out_dir_default="out/run_diagnostics",
         run_name_help="Subdirectory name under --out_dir, and the wandb run name. Default: "
-                       "auto-generated from the calib_config name/mode/timestamp.",
+                       "auto-generated from the duo's model names/calib_config name/mode/timestamp.",
     )
     p.add_argument("--ema_window", type=int, default=DEFAULT_EMA_WINDOW,
                     help="Span (in points) of the EMA smoothing applied to every plotted line "
@@ -450,8 +450,9 @@ def main() -> None:
         print(f"No 'calib_map' in {args.calib_config} with calib_method={run_cfg['calib_method']!r}; "
               f"auto-naming it {run_cfg['calib_map']!r} (fit fresh if not already cached).")
 
+    duo_tag = f"{cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']}"
     run_name = args.run_name or (
-        f"{run_cfg['name']}__{args.mode}__{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"{duo_tag}__{run_cfg['name']}__{args.mode}__{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
     out_dir = Path(args.out_dir) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)

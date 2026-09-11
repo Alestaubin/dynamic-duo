@@ -56,13 +56,26 @@ class JointFixedTS(BaseJointCalibrator):
         if self.verbose:
             print(f"Best temperatures found with grid search: Ts={best_Ts_g:.4f}, Tl={best_Tl_g:.4f}")
 
-        # 2. L-BFGS refinement on full data, in log-temperature space
+        # 2. L-BFGS refinement on full data, in log-temperature space.
+        # Clamped to [log(t_min), log(t_max)] on every closure evaluation:
+        # when a model is unhelpful enough that NLL keeps (asymptotically)
+        # improving as its temperature -> inf, there's no finite interior
+        # minimum and unconstrained LBFGS's strong_wolfe line search will
+        # take an arbitrarily large step on that flat objective, landing on
+        # a numerically arbitrary value (seen in practice: T in the
+        # millions, different every run) instead of a reproducible optimum.
+        # Clamping keeps the legitimate "fully suppress this model" case a
+        # deterministic, finite boundary value instead of optimizer noise.
+        log_t_min, log_t_max = math.log(t_min), math.log(t_max)
         log_Tl = torch.tensor([math.log(best_Tl_g)], device=self.device, requires_grad=True)
         log_Ts = torch.tensor([math.log(best_Ts_g)], device=self.device, requires_grad=True)
         optimizer = optim.LBFGS([log_Tl, log_Ts], lr=1.0, max_iter=100,
                                 line_search_fn="strong_wolfe")
         def closure():
             optimizer.zero_grad()
+            with torch.no_grad():
+                log_Tl.clamp_(log_t_min, log_t_max)
+                log_Ts.clamp_(log_t_min, log_t_max)
             loss = F.cross_entropy(
                 combine_logits(z_l=logits_l, z_s=logits_s,
                                tau_l=log_Tl.exp(), tau_s=log_Ts.exp()),
@@ -71,6 +84,9 @@ class JointFixedTS(BaseJointCalibrator):
             loss.backward()
             return loss
         optimizer.step(closure)
+        with torch.no_grad():
+            log_Tl.clamp_(log_t_min, log_t_max)
+            log_Ts.clamp_(log_t_min, log_t_max)
 
         self.Tl.data = log_Tl.detach().exp()
         self.Ts.data = log_Ts.detach().exp()
