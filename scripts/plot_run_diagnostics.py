@@ -42,6 +42,42 @@ a long run killed mid-way by a SLURM walltime limit still leaves usable,
 up-to-date plots instead of only the calibrator's own incrementally-written
 proxy_log CSV.
 
+--compare_configs (optional) points at a JSON file holding a LIST of run_cfg
+dicts -- the SAME shape/file compare_calibrators.py's --configs_file takes
+(e.g. cfgs/compare_runs/default.json). Each entry is built into its own
+calibrator (fit_beta/register_hooks included, via
+compare_calibrators._build_calibrator) against the SAME large/small model
+instances as this run's own --calib_config duo, then every batch re-
+calibrates that SAME batch's z_large/z_small through it (no extra model
+forward passes -- see compare_calibrators.py's fixed_ts_reference pattern,
+generalized here from one hardcoded reference to an arbitrary list). Each
+one's resulting per-batch accuracy is plotted as a dashed line (plus an avg-
+accuracy tag) in every per-corruption plot, alongside this run's own duo
+accuracy (also newly shown there -- see plot_per_corruption_proxy_vs_accuracy's
+`extra_series`) and the two input models' independent accuracy -- so one
+figure per corruption compares the calibrator actually driving this run
+against a list of alternatives, all on the exact same stream.
+
+Both this run's own --calib_config AND every --compare_configs entry are
+built at --fit_num_samples (small, default 5000), not --num_samples (large,
+the eval loop's own sample count) -- see --fit_num_samples' own help and the
+comment on `calibrator`'s construction in _run for why: a fit_beta=true or
+calib_method != 'identity' run_cfg's dev-corruption fitting pass only needs
+enough samples to estimate a handful of scalars/maps, not eval-sized data,
+and a --compare_configs file with several such entries multiplies that cost.
+
+--cache_logits (optional, off by default) saves every batch's z_large/
+z_small/labels to out_dir/logits_cache/ (one file per completed corruption).
+This is the ONLY thing that lets you add MORE calibrators to a run's plots
+LATER without rerunning the duo: pass --csv_dir <run's out_dir> together
+with --compare_configs (instead of --calib_config) and every listed
+calibrator is built fresh and replayed against those cached logits -- see
+_replay_compare_configs_from_cache. Zero model forward passes over the eval
+set either way; only a --fit_num_samples-sized dev pass if a calibrator
+needs fit_beta/a calib_map fit. Without --cache_logits on the original run,
+there's nothing to replay against and adding a calibrator later needs a
+full rerun with an updated --compare_configs instead.
+
 Usage
 -----
 Corruptions/severities always come from --config's EVAL.CORRUPTIONS/
@@ -82,13 +118,13 @@ from src.reliability.proxies.stats import PROXY_KINDS
 from src.calibrators.joint_proxy_weighted import JointProxyWeighted
 from src.utils.diagnostics_plots import (
     plot_batch_diagnostics, plot_proxy_diagnostics, plot_per_corruption_proxy_vs_accuracy,
-    DEFAULT_EMA_WINDOW,
+    extra_duo_series_from_batch_records, DEFAULT_EMA_WINDOW, C_GATE, EXTRA_SERIES_PALETTE,
 )
 from scripts._cli import (
     add_duo_config_arg, add_num_samples_arg, add_seed_arg,
     add_wandb_project_group_args, add_out_dir_run_name_args,
 )
-from scripts.compare_calibrators import _build_calibrator
+from scripts.compare_calibrators import _build_calibrator, _load_run_configs
 
 # Private JointProxyWeighted attributes holding the LATEST cached gate
 # internals (refreshed at proxy-batch flushes, reused between them) -- no
@@ -201,6 +237,7 @@ def _boundaries_from_batch_records(batch_records: list[dict]) -> list[dict]:
 def _write_plots(
     batch_records: list[dict], boundaries: list[dict], proxy_rows: list[dict],
     out_dir: Path, ema_window: int,
+    extra_series: list[tuple[str, str, str]] | None = None,
 ) -> tuple[bool, bool]:
     """Write every diagnostics artifact from whatever has been recorded SO
     FAR, overwriting what's already on disk -- called after every corruption
@@ -210,6 +247,12 @@ def _write_plots(
     partial proxy_log CSV behind. Mirrors run_tent.py's own _write_plots for
     the exact same reason (see its docstring). Returns (has_batch_plot,
     has_proxy_plot), same as the two plotting calls' own return values.
+
+    extra_series (this run's own duo accuracy, plus one per --compare_configs
+    entry -- see _run) is only ever forwarded to the per-corruption plot,
+    which is the one place a "calibrated duo" comparison line makes sense --
+    see plot_per_corruption_proxy_vs_accuracy's own docstring for why this
+    isn't the default everywhere.
     """
     has_batch_plot = False
     if batch_records:
@@ -223,7 +266,7 @@ def _write_plots(
     per_corruption_dir = out_dir / "per_corruption"
     per_corruption_dir.mkdir(parents=True, exist_ok=True)
     plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir,
-                                           ema_window=ema_window)
+                                           ema_window=ema_window, extra_series=extra_series)
     return has_batch_plot, has_proxy_plot
 
 
@@ -241,10 +284,138 @@ def _replot_from_csv_dir(csv_dir: Path, ema_window: int) -> None:
         return
     boundaries = _boundaries_from_batch_records(batch_records)
     proxy_rows = _load_proxy_log_csv(csv_dir)
+    # No run_cfg available here to name the main duo line -- "duo" is a
+    # generic stand-in; cmp_<name>_acc columns (if any) keep their own names.
+    extra_series = extra_duo_series_from_batch_records(batch_records, main_label="duo")
 
-    _write_plots(batch_records, boundaries, proxy_rows, csv_dir, ema_window)
+    _write_plots(batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series)
 
     print(f"\nRe-plotted from {csv_dir} (existing PNGs/per-corruption CSVs overwritten).")
+
+
+def _replay_compare_configs_from_cache(
+    csv_dir: Path, config_path: str, compare_configs_path: str,
+    fit_num_samples: int | None, seed: int | None, ema_window: int,
+) -> None:
+    """Add MORE --compare_configs calibrators to an already-finished run's
+    plots WITHOUT rerunning the duo. Valid because --compare_configs
+    calibrators (see _run's _on_batch) only ever re-calibrate the SAME
+    z_large/z_small a batch already produced -- if those were saved during
+    the original run (--cache_logits, one file per COMPLETED corruption
+    under csv_dir/logits_cache/), a brand new calibrator can be built fresh
+    and replayed against them here with ZERO model forward passes over the
+    eval set (only a small --fit_num_samples-sized dev pass if it needs
+    fit_beta or a calib_map fit).
+
+    Raises if csv_dir/logits_cache/ doesn't exist -- a run from before
+    --cache_logits existed, or one that didn't pass it, has nothing to
+    replay against; the only way to add calibrators to THAT run's plots is
+    a full rerun with --compare_configs.
+
+    Does not support proxy_kind='prototype' compare-config entries: the
+    cache holds logits only, not the penultimate features that proxy needs
+    a live forward hook for (same limitation as compare_calibrators.py's
+    own --use_cache + prototype).
+    """
+    batch_csv = csv_dir / "batch_diagnostics.csv"
+    batch_records = _load_batch_diagnostics_csv(batch_csv) if batch_csv.exists() else []
+    if not batch_records:
+        raise FileNotFoundError(f"No {batch_csv} -- nothing to replay new calibrators onto.")
+
+    cache_dir = csv_dir / "logits_cache"
+    if not cache_dir.is_dir():
+        raise FileNotFoundError(
+            f"{cache_dir} not found -- this run wasn't started with --cache_logits, so there are "
+            f"no saved z_large/z_small to replay new calibrators against. For THIS run, add the "
+            f"new calibrator(s) to --compare_configs and do a full rerun instead; pass "
+            f"--cache_logits on the next run to enable this fast path going forward."
+        )
+
+    cfg = load_config(config_path)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}  |  duo: {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']}  |  "
+          f"replaying against cached logits in: {cache_dir}")
+    large_model, large_preprocess = get_model(cfg["LARGE"]["NAME"])
+    small_model, small_preprocess = get_model(cfg["SMALL"]["NAME"])
+    large_model, small_model = large_model.to(device), small_model.to(device)
+
+    cmp_run_cfgs = _load_run_configs(compare_configs_path)
+    print(f"Loaded {len(cmp_run_cfgs)} compare-config(s) from {compare_configs_path} to replay")
+
+    new_calibrators: list[tuple[str, object]] = []
+    for cmp_cfg in cmp_run_cfgs:
+        if cmp_cfg["calibration_mode"] == "proxy_weighted" and cmp_cfg.get("proxy_kind") == "prototype":
+            print(f"Skipping {cmp_cfg['name']!r}: proxy_kind='prototype' needs live features, "
+                  f"which the logits-only cache can't supply.")
+            continue
+        if "fixed_ts_config" in cmp_cfg:
+            cmp_cfg["fixed_ts_config"] = _resolve_fixed_ts_config(cmp_cfg["fixed_ts_config"])
+        calibrator = _build_calibrator(
+            cmp_cfg, cfg, large_model, large_preprocess, small_model, small_preprocess,
+            device, fit_num_samples, seed,
+            csv_path=str(csv_dir / f"compare_{cmp_cfg['name']}"), verbose=False,
+        )
+        new_calibrators.append((cmp_cfg["name"], calibrator))
+
+    if not new_calibrators:
+        print("No new calibrators to replay -- nothing to do.")
+        return
+
+    # Every row gets every new column, defaulted to NaN first, so the CSV
+    # stays rectangular even for a corruption whose cache file is missing
+    # (e.g. one from before --cache_logits was added mid-run, or a run
+    # killed before that corruption's _on_corruption_end saved it).
+    for name, _ in new_calibrators:
+        for r in batch_records:
+            r[f"cmp_{name}_acc"] = float("nan")
+
+    boundaries = _boundaries_from_batch_records(batch_records)
+    for i, b in enumerate(boundaries):
+        start = b["idx"]
+        end = boundaries[i + 1]["idx"] if i + 1 < len(boundaries) else len(batch_records)
+        label = b["label"]  # e.g. "brightness/s5" -- matches _on_corruption_end's own naming
+        cache_file = cache_dir / f"{label.replace('/', '_')}.pt"
+        if not cache_file.exists():
+            print(f"WARNING: no cached logits for {label} ({cache_file} missing) -- leaving new "
+                  f"calibrator columns as NaN for its rows.")
+            continue
+
+        cached = torch.load(cache_file, map_location=device, weights_only=True)
+        z_l_all, z_s_all, labels_all = cached["z_l"], cached["z_s"], cached["labels"]
+        rows = batch_records[start:end]
+        n_cached = sum(int(r["n"]) for r in rows)
+        if n_cached != z_l_all.shape[0]:
+            print(f"WARNING: {label} cache has {z_l_all.shape[0]} samples but batch_diagnostics."
+                  f"csv rows for it sum to {n_cached} -- skipping as stale/mismatched (re-run "
+                  f"with --cache_logits to refresh it).")
+            continue
+
+        for name, calibrator in new_calibrators:
+            if hasattr(calibrator, "set_corruption"):
+                calibrator.set_corruption(label)
+            pos = 0
+            for r in rows:
+                n = int(r["n"])
+                z_l, z_s, labels = z_l_all[pos:pos + n], z_s_all[pos:pos + n], labels_all[pos:pos + n]
+                if hasattr(calibrator, "set_labels"):
+                    calibrator.set_labels(labels)
+                with torch.no_grad():
+                    z_cmp = calibrator.calibrate(z_l, z_s)
+                r[f"cmp_{name}_acc"] = float((z_cmp.argmax(1) == labels.to(z_cmp.device)).float().mean())
+                pos += n
+
+    with batch_csv.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(batch_records[0].keys()))
+        writer.writeheader()
+        writer.writerows(batch_records)
+    print(f"Merged {len(new_calibrators)} new calibrator column(s) into {batch_csv}")
+
+    proxy_rows = _load_proxy_log_csv(csv_dir)
+    extra_series = extra_duo_series_from_batch_records(batch_records, main_label="duo")
+    _write_plots(batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series)
+
+    print(f"\nReplayed {[n for n, _ in new_calibrators]} against cached logits and re-plotted "
+          f"{csv_dir} -- no model forward passes over the eval set were needed.")
 
 
 def _wandb_config(args: argparse.Namespace, run_cfg: dict, cfg: dict) -> dict:
@@ -252,6 +423,7 @@ def _wandb_config(args: argparse.Namespace, run_cfg: dict, cfg: dict) -> dict:
         "mode": args.mode,
         "steps": args.steps,
         "num_samples": args.num_samples,
+        "fit_num_samples": args.fit_num_samples,
         "seed": args.seed,
         "batch_size": cfg["BS"],
         "eval/corruptions": cfg["EVAL"]["CORRUPTIONS"],
@@ -289,9 +461,35 @@ def _run(
     small_model, small_preprocess = get_model(cfg["SMALL"]["NAME"])
     large_model, small_model = large_model.to(device), small_model.to(device)
 
+    # --cache_logits: one file per COMPLETED corruption under out_dir/
+    # logits_cache/, written at _on_corruption_end below -- lets a LATER
+    # invocation (--csv_dir + --compare_configs, see
+    # _replay_compare_configs_from_cache) add brand new calibrators to this
+    # run's plots with zero model forward passes, by re-calibrating these
+    # exact saved z_large/z_small instead of re-running the duo. Valid
+    # regardless of --mode: every --compare_configs entry already only ever
+    # re-combines the SAME z_large/z_small a batch produced (see below), so
+    # caching those same tensors changes nothing about what gets computed,
+    # only WHEN. Off by default -- a full multi-corruption run's logits can
+    # be several GB.
+    logits_cache_dir = out_dir / "logits_cache" if args.cache_logits else None
+    if logits_cache_dir is not None:
+        logits_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # args.fit_num_samples (NOT args.num_samples) here: any calibrator-
+    # construction-time dev fitting a run_cfg triggers -- fit_beta's beta
+    # grid search, or _fit_and_save_calibration_maps for a calib_method !=
+    # identity -- only needs enough held-out CALIBRATOR.CORRUPTIONS samples
+    # to estimate a handful of scalars/maps, not the full eval sample count.
+    # args.num_samples is reserved for the actual EVAL loop below (see
+    # evaluate_dynamic_duo), which needs many samples for stable
+    # per-corruption accuracy curves -- conflating the two meant a
+    # fit_beta=true run_cfg re-ran its ENTIRE dev pass at eval-sized
+    # num_samples for no benefit (e.g. 50000 samples x 4 dev corruptions to
+    # grid-search 7 beta scalars).
     calibrator = _build_calibrator(
         run_cfg, cfg, large_model, large_preprocess, small_model, small_preprocess,
-        device, args.num_samples, args.seed, csv_path=str(out_dir / "proxy_log"), verbose=True,
+        device, args.fit_num_samples, args.seed, csv_path=str(out_dir / "proxy_log"), verbose=True,
     )
     # JointProxyWeighted appends its own timestamp suffix to the csv_path
     # given above and writes to it incrementally as the run progresses (see
@@ -301,6 +499,37 @@ def _run(
     # around to ask directly).
     proxy_csv_path = getattr(calibrator, "_csv_path", None)
 
+    # --compare_configs: extra calibrators built against the SAME large/small
+    # model instances as `calibrator` above (before setup_duo's
+    # configure_model/configure_model_frozen calls, matching how `calibrator`
+    # itself is built), so each one's accuracy line reflects whatever
+    # adaptation state those models are ACTUALLY in at that point in the
+    # stream -- compare_calibrators.py's fixed_ts_reference pattern (see its
+    # _on_batch), generalized from one hardcoded reference to an arbitrary
+    # list. Populated below, after setup_duo, once large/small are finalized
+    # and register_hooks (prototype proxies) can target the exact objects
+    # the primary calibrator's own hooks were registered on. Also built at
+    # args.fit_num_samples, not args.num_samples -- see the comment on
+    # `calibrator`'s own construction above; a compare-configs file with
+    # several fit_beta=true entries makes this decoupling matter even more,
+    # since each one otherwise re-ran its own full-sized dev pass.
+    compare_calibrators: list[tuple[str, object]] = []
+    if args.compare_configs:
+        cmp_run_cfgs = _load_run_configs(args.compare_configs)
+        print(f"Loaded {len(cmp_run_cfgs)} compare-config(s) from {args.compare_configs}")
+        for cmp_cfg in cmp_run_cfgs:
+            if "fixed_ts_config" in cmp_cfg:
+                cmp_cfg["fixed_ts_config"] = _resolve_fixed_ts_config(cmp_cfg["fixed_ts_config"])
+            cmp_calibrator = _build_calibrator(
+                cmp_cfg, cfg, large_model, large_preprocess, small_model, small_preprocess,
+                device, args.fit_num_samples, args.seed,
+                csv_path=str(out_dir / f"compare_{cmp_cfg['name']}"), verbose=False,
+            )
+            if (cmp_cfg["calibration_mode"] == "proxy_weighted"
+                    and getattr(cmp_calibrator, "proxy_kind", None) == "prototype"):
+                cmp_calibrator.register_hooks(large_model, small_model)
+            compare_calibrators.append((cmp_cfg["name"], cmp_calibrator))
+
     duo = setup_duo(
         large=large_model, large_preprocess=large_preprocess,
         small=small_model, small_preprocess=small_preprocess,
@@ -308,13 +537,31 @@ def _run(
         cfg=cfg, steps=args.steps,
     )
 
+    # This run's own duo (always shown -- see the module docstring) plus one
+    # dashed line per --compare_configs entry, in the file's own order, from
+    # EXTRA_SERIES_PALETTE (cycled past 5 entries) -- fed to every
+    # per-corruption plot via _write_plots below.
+    extra_series: list[tuple[str, str, str]] = [("duo_acc", C_GATE, run_cfg["name"])]
+    for i, (name, _) in enumerate(compare_calibrators):
+        extra_series.append((f"cmp_{name}_acc", EXTRA_SERIES_PALETTE[i % len(EXTRA_SERIES_PALETTE)], name))
+
     batch_records: list[dict] = []
     corruption_boundaries: list[dict] = []
     proxy_rows: list[dict] = []
     has_batch_plot, has_proxy_plot = False, False
+    # --cache_logits buffer for the CURRENT corruption -- reset at
+    # _on_corruption_start, appended to in _on_batch, saved+cleared at
+    # _on_corruption_end (once the whole stream has actually completed, so a
+    # SLURM walltime kill mid-corruption leaves no truncated/misleading cache
+    # file for it -- same convention as batch_diagnostics.csv itself).
+    cache_buf = {"z_l": [], "z_s": [], "labels": []}
 
     def _on_corruption_start(corruption, severity):
         corruption_boundaries.append({"idx": len(batch_records), "label": f"{corruption}/s{severity}"})
+        for _, cmp_calibrator in compare_calibrators:
+            if hasattr(cmp_calibrator, "set_corruption"):
+                cmp_calibrator.set_corruption(f"{corruption}/s{severity}")
+        cache_buf["z_l"].clear(); cache_buf["z_s"].clear(); cache_buf["labels"].clear()
 
     def _on_batch(batch_idx, prefix, duo, outputs, z_large, z_small, labels):
         row = {"global_idx": len(batch_records), "corruption": prefix.rstrip("/"), "n": labels.shape[0]}
@@ -329,6 +576,24 @@ def _run(
         w_l = getattr(duo.joint_calibrator, "last_w_l", None)
         if w_l is not None:
             row["w_l"] = w_l
+
+        # --compare_configs: re-calibrate this SAME batch's z_large/z_small
+        # through every extra calibrator (no extra model forward pass) and
+        # record its accuracy -- see plot_per_corruption_proxy_vs_accuracy's
+        # extra_series for how these get plotted.
+        for name, cmp_calibrator in compare_calibrators:
+            if hasattr(cmp_calibrator, "set_labels"):
+                cmp_calibrator.set_labels(labels)
+            with torch.no_grad():
+                z_cmp = cmp_calibrator.calibrate(z_large, z_small)
+            labels_dev = labels.to(z_cmp.device)
+            row[f"cmp_{name}_acc"] = float((z_cmp.argmax(1) == labels_dev).float().mean())
+
+        if logits_cache_dir is not None:
+            cache_buf["z_l"].append(z_large.detach().cpu())
+            cache_buf["z_s"].append(z_small.detach().cpu())
+            cache_buf["labels"].append(labels.detach().cpu())
+
         batch_records.append(row)
 
         if wandb_run is not None:
@@ -362,12 +627,22 @@ def _run(
                 writer.writeheader()
                 writer.writerows(batch_records)
 
+        if logits_cache_dir is not None and cache_buf["z_l"]:
+            cache_file = logits_cache_dir / f"{corruption}_s{severity}.pt"
+            torch.save({
+                "z_l": torch.cat(cache_buf["z_l"]),
+                "z_s": torch.cat(cache_buf["z_s"]),
+                "labels": torch.cat(cache_buf["labels"]),
+            }, cache_file)
+            print(f"[cache_logits] wrote {cache_file}")
+
         if proxy_csv_path is not None and Path(proxy_csv_path).exists():
             with Path(proxy_csv_path).open() as f:
                 proxy_rows = list(csv.DictReader(f))
 
         has_batch_plot, has_proxy_plot = _write_plots(
             batch_records, corruption_boundaries, proxy_rows, out_dir, args.ema_window,
+            extra_series,
         )
         print(f"Diagnostics through {corruption}/s{severity} written to {out_dir}")
 
@@ -442,8 +717,12 @@ def main() -> None:
                          "proxy_log_*.csv back in) -- e.g. after a plotting-only change like "
                          "--ema_window or a line-style tweak that doesn't need fresh model "
                          "forward passes. OVERWRITES every PNG (and the per-corruption CSVs) "
-                         "already in that directory. When given, every other argument below "
-                         "except --ema_window is ignored (no duo config/calibrator is built).")
+                         "already in that directory. Normally every other argument below except "
+                         "--ema_window is ignored (no duo config/calibrator is built) -- UNLESS "
+                         "--compare_configs is ALSO given, which instead replays those new "
+                         "calibrators against that run's cached logits (requires the original "
+                         "run to have used --cache_logits) and merges the new columns in before "
+                         "plotting -- see --compare_configs and _replay_compare_configs_from_cache.")
     add_duo_config_arg(p)
     p.add_argument("--calib_config", type=str, default=None,
                     help="Path to a JSON file holding ONE run_cfg dict -- calibration_mode plus "
@@ -451,9 +730,41 @@ def main() -> None:
                          "beta, fixed_ts_config, ...). Same shape as one entry in "
                          "cfgs/compare_runs/*.json -- see cfgs/calib_configs/ for ready-made ones. "
                          "Required unless --csv_dir is given.")
+    p.add_argument("--compare_configs", type=str, default=None,
+                    help="Path to a JSON file holding a LIST of run_cfg dicts (compare_calibrators."
+                         "py's --configs_file shape, e.g. cfgs/compare_runs/default.json). Each one "
+                         "is re-evaluated on this run's own z_large/z_small every batch (no extra "
+                         "model forward passes) and its resulting duo accuracy is plotted, alongside "
+                         "this run's own duo accuracy and the two input models, as one dashed line "
+                         "(plus an avg-accuracy tag) per calibrator in every per-corruption plot -- "
+                         "see plot_per_corruption_proxy_vs_accuracy's extra_series. Optional. Also "
+                         "usable WITH --csv_dir (instead of --calib_config) to add these calibrators "
+                         "to an already-finished run's plots without rerunning the duo -- requires "
+                         "that run to have used --cache_logits; --config must point at the SAME "
+                         "duo config that run used (for model names + CALIBRATOR corruptions).")
+    p.add_argument("--cache_logits", action="store_true",
+                    help="Save z_large/z_small/labels for every batch to out_dir/logits_cache/ "
+                         "(one file per COMPLETED corruption). Lets a LATER invocation "
+                         "(--csv_dir + --compare_configs) add brand new calibrators to this run's "
+                         "plots afterward with NO model forward passes over the eval set -- see "
+                         "--compare_configs. Off by default: a full multi-corruption run's logits "
+                         "can be several GB. Not needed for --compare_configs entries known at "
+                         "THIS run's launch time -- those are already computed live regardless.")
     p.add_argument("--mode", type=str, default="no_adapt", choices=sorted(_MODES))
     p.add_argument("--steps", type=int, default=1)
     add_num_samples_arg(p)
+    p.add_argument("--fit_num_samples", type=int, default=5000,
+                    help="Samples per CALIBRATOR.CORRUPTIONS dev stream used ONLY for "
+                         "calibrator-construction-time fitting -- fit_beta's beta grid search, "
+                         "and _fit_and_save_calibration_maps for a calib_method != 'identity' -- "
+                         "for BOTH --calib_config and every --compare_configs entry. Decoupled "
+                         "from --num_samples (the eval loop's own sample count, which needs to "
+                         "be large for stable per-corruption accuracy curves): grid-searching a "
+                         "handful of beta scalars or fitting a calibration map doesn't need "
+                         "nearly that many dev samples, and reusing --num_samples for both meant "
+                         "a fit_beta=true run_cfg re-ran its entire dev pass at eval-sized "
+                         "num_samples for no benefit. Pass the same value as --num_samples to "
+                         "restore the old behavior.")
     add_seed_arg(p)
     p.add_argument("--batch_size", type=int, default=None, help="Overrides cfg['BS'].")
 
@@ -487,7 +798,13 @@ def main() -> None:
         csv_dir = Path(args.csv_dir)
         if not csv_dir.is_dir():
             p.error(f"--csv_dir {csv_dir} is not a directory.")
-        _replot_from_csv_dir(csv_dir, args.ema_window)
+        if args.compare_configs:
+            _replay_compare_configs_from_cache(
+                csv_dir, args.config, args.compare_configs,
+                args.fit_num_samples, args.seed, args.ema_window,
+            )
+        else:
+            _replot_from_csv_dir(csv_dir, args.ema_window)
         return
 
     if args.calib_config is None:

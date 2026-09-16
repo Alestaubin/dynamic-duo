@@ -4,17 +4,27 @@ Used by scripts/run_dynamic_duo.py, scripts/plot_run_diagnostics.py, and
 scripts/run_tent.py (single-model) so they never drift into slightly
 different versions of the same plot.
 
-Large/small INPUT models only -- no duo series. The duo's combined output is
-what the joint calibrator under test produces; these plots exist to compare
-the input models to each other and to the proxy signal, so a duo line here
-would only ever be a third, differently-scaled series crowding the same axes
-without answering that question. plot_batch_diagnostics and
+Large/small INPUT models only -- no duo series -- by default. The duo's
+combined output is what the joint calibrator under test produces; these plots
+exist to compare the input models to each other and to the proxy signal, so a
+duo line here would only ever be a third, differently-scaled series crowding
+the same axes without answering that question. plot_batch_diagnostics and
 plot_per_corruption_proxy_vs_accuracy take an optional `series` (and
 `proxy_series`) list so a single-model run can pass one entry instead of the
 default large/small pair -- see scripts/run_tent.py. plot_proxy_diagnostics
 stays large/small-only (its whole point is the two-model gate weight, which
 has no single-model analogue); scripts/run_tent.py uses
 plot_single_model_proxy_diagnostics instead.
+
+plot_per_corruption_proxy_vs_accuracy also takes an opt-in `extra_series`: one
+accuracy-only line (plus an avg-accuracy tag) per named "calibrated duo" --
+used by scripts/plot_run_diagnostics.py's --compare_configs to compare this
+run's own duo accuracy against a list of OTHER calibrators re-evaluated on the
+SAME z_large/z_small every batch (see extra_duo_series_from_batch_records).
+This is the one deliberate exception to the "no duo series" rule above: unlike
+the input-model comparison every other plot here does, --compare_configs's
+whole point IS comparing duo accuracy under different calibrators, so it asks
+for this explicitly rather than it being a default.
 
 plot_batch_diagnostics: accuracy/NLL/entropy for large/small, per adaptation
 batch -- the direct "is one model collapsing" signal (ground truth, ignores
@@ -59,6 +69,7 @@ rows at a time, so its EMA needs no explicit reset.
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 
 import matplotlib
@@ -81,6 +92,16 @@ C_INK = "#0b0b0b"
 C_MUTED = "#898781"
 C_GRID = "#e1e0d9"
 C_SURFACE = "#fcfcfb"
+
+# Categorical slots 3/4/5/6/8 of the dataviz skill's validated palette
+# (references/palette.md) -- slots 1/2/7 are already C_LARGE/C_SMALL/C_GATE
+# above. Used by plot_per_corruption_proxy_vs_accuracy's `extra_series` for
+# an arbitrary-length list of "calibrated duo" comparison lines (see
+# scripts/plot_run_diagnostics.py's --compare_configs), assigned in this
+# fixed order rather than cycled, matching the compare-configs file's own
+# ordering. Past 5 entries colors repeat -- a comparison with more
+# calibrators than that on one figure is already pushing legibility.
+EXTRA_SERIES_PALETTE = ["#1baf7a", "#eda100", "#e87ba4", "#008300", "#e34948"]
 
 plt.rcParams.update({
     "figure.facecolor": C_SURFACE, "axes.facecolor": C_SURFACE,
@@ -331,6 +352,33 @@ def plot_single_model_proxy_diagnostics(
 # list (its proxy log has one column, "r", not "r_l"/"r_s").
 _DEFAULT_PROXY_SERIES = [("r_l", C_LARGE, "r_l"), ("r_s", C_SMALL, "r_s")]
 
+_CMP_ACC_RE = re.compile(r"^cmp_(.+)_acc$")
+
+
+def extra_duo_series_from_batch_records(
+    batch_records: list[dict], main_label: str | None = None,
+) -> list[tuple[str, str, str]]:
+    """Reconstruct plot_per_corruption_proxy_vs_accuracy's `extra_series` from
+    a REPLAYED batch_diagnostics.csv (see scripts/plot_run_diagnostics.py's
+    --csv_dir) -- cmp_<name>_acc columns (one per --compare_configs entry,
+    written by that script's _on_batch) plus, if main_label is given, this
+    run's own "duo_acc" (present in every batch_diagnostics.csv regardless of
+    --compare_configs, but only surfaced as a series here since a caller has
+    explicitly asked for the duo-comparison view -- see extra_series' own
+    docstring for why it's opt-in everywhere else). Column order (not an
+    alphabetical resort) drives color order via EXTRA_SERIES_PALETTE, so
+    replotting from disk assigns the same colors the live run used.
+    """
+    if not batch_records:
+        return []
+    out: list[tuple[str, str, str]] = []
+    if main_label is not None and "duo_acc" in batch_records[0]:
+        out.append(("duo_acc", C_GATE, main_label))
+    names = [m.group(1) for k in batch_records[0] if (m := _CMP_ACC_RE.match(k))]
+    for i, name in enumerate(names):
+        out.append((f"cmp_{name}_acc", EXTRA_SERIES_PALETTE[i % len(EXTRA_SERIES_PALETTE)], name))
+    return out
+
 
 def _cumulative_samples(rows: list[dict]) -> list[float] | None:
     """Cumulative sample count AFTER each row (i.e. x[i] = how many samples
@@ -443,6 +491,7 @@ def plot_per_corruption_proxy_vs_accuracy(
     ema_window: int = DEFAULT_EMA_WINDOW,
     series: list[tuple[str, str, str, float]] | None = None,
     proxy_series: list[tuple[str, str, str]] | None = None,
+    extra_series: list[tuple[str, str, str]] | None = None,
 ) -> list[Path]:
     """One figure per corruption, two axes: EMA-smoothed accuracy for
     large/small/duo (bold) and the raw proxy scores r_l/r_s (light, EMA
@@ -452,6 +501,16 @@ def plot_per_corruption_proxy_vs_accuracy(
     entropy gets the left axis (nats, not on the same scale as the other
     two). Each series' plain overall average accuracy is tagged bottom-right
     in gray.
+
+    extra_series, if given, is a list of (row_key, color, label) -- one
+    dashed accuracy-only line (no entropy) per named "calibrated duo",
+    reading batch_records[row_key] directly (unlike `series`, whose entries
+    are a prefix combined with "_acc"/"_ent") -- see
+    scripts/plot_run_diagnostics.py's --compare_configs and
+    extra_duo_series_from_batch_records. Each also gets an avg-accuracy tag
+    appended to the same bottom-right text block as `series`, and is folded
+    into the shared adaptive y-range and the per-corruption CSV export
+    alongside `series`.
 
     batch_records (one row per adaptation batch) and proxy_rows (one row per
     proxy batch) can have different counts within the same corruption --
@@ -479,6 +538,7 @@ def plot_per_corruption_proxy_vs_accuracy(
         return []
     series = series or _DEFAULT_SERIES
     proxy_series = proxy_series if proxy_series is not None else _DEFAULT_PROXY_SERIES
+    extra_series = extra_series or []
 
     corruptions: dict[str, list[dict]] = {}
     for r in batch_records:
@@ -512,11 +572,25 @@ def plot_per_corruption_proxy_vs_accuracy(
             ax_ent.plot(x_acc, ent_series[key], color=color, lw=1.4 * lw_scale, ls="-.",
                         alpha=0.75, label=f"{label} entropy (EMA)", zorder=2)
 
+        # extra_series: accuracy-only, dashed -- visually distinct from the
+        # solid `series` accuracy lines and the dotted proxy overlay below,
+        # since these are a different KIND of comparison (calibrated duo
+        # outputs, not input models) sharing the same axis/scale.
+        extra_acc_series = {row_key: _ema([r[row_key] for r in rows], ema_window)
+                             for row_key, _, _ in extra_series}
+        for row_key, color, label in extra_series:
+            ax_data.plot(x_acc, extra_acc_series[row_key], color=color, lw=2.0, ls="--",
+                         alpha=0.9, label=f"{label} (duo, EMA)", zorder=4)
+
         # Overall average accuracy tag per series (plain mean over this
         # corruption's rows, not the EMA's tail value) -- stacked bottom-right
         # in gray (a reference number, not another data series, so it
         # deliberately doesn't compete with the series' own line colors).
         avg_acc_lines = [f"{label} avg acc: {avg_acc[key]:.3f}" for key, _, label, _ in series]
+        avg_acc_lines += [
+            f"{label} (duo) avg acc: {float(np.mean([r[row_key] for r in rows])):.3f}"
+            for row_key, _, label in extra_series
+        ]
         ax_data.text(
             0.985, 0.03, "\n".join(avg_acc_lines),
             transform=ax_data.transAxes, ha="right", va="bottom", fontsize=8,
@@ -547,6 +621,7 @@ def plot_per_corruption_proxy_vs_accuracy(
             # span, and the two are still directly comparable at a glance.
             ax_data.set_ylim(*_adaptive_ylim(
                 *acc_series.values(), *proxy_vals.values(), *proxy_ema.values(),
+                *extra_acc_series.values(),
             ))
 
             for pkey, color, label in proxy_series:
@@ -558,6 +633,8 @@ def plot_per_corruption_proxy_vs_accuracy(
                           for key, _, _, _ in series}
             interp_ent = {key: np.interp(x_proxy, x_acc, ent_series[key]).tolist()
                           for key, _, _, _ in series}
+            interp_extra = {row_key: np.interp(x_proxy, x_acc, extra_acc_series[row_key]).tolist()
+                             for row_key, _, _ in extra_series}
             csv_path = out_dir / f"corruption_{safe_name}.csv"
             with csv_path.open("w", newline="") as f:
                 writer = csv.writer(f)
@@ -567,6 +644,7 @@ def plot_per_corruption_proxy_vs_accuracy(
                     + [f"{pkey}_ema" for pkey, _, _ in proxy_series]
                     + [f"{key}_acc_ema" for key, _, _, _ in series]
                     + [f"{key}_ent_ema" for key, _, _, _ in series]
+                    + [f"{label}_duo_acc_ema" for _, _, label in extra_series]
                 )
                 for i, t in enumerate(x_proxy):
                     writer.writerow(
@@ -575,6 +653,7 @@ def plot_per_corruption_proxy_vs_accuracy(
                         + [proxy_ema[pkey][i] for pkey, _, _ in proxy_series]
                         + [interp_acc[key][i] for key, _, _, _ in series]
                         + [interp_ent[key][i] for key, _, _, _ in series]
+                        + [interp_extra[row_key][i] for row_key, _, _ in extra_series]
                     )
             print(f"wrote {csv_path}")
         else:
@@ -591,7 +670,7 @@ def plot_per_corruption_proxy_vs_accuracy(
             )
             # No proxy series to share a scale with -- still adapt to
             # accuracy's own range rather than a fixed [0, 1].
-            ax_data.set_ylim(*_adaptive_ylim(*acc_series.values()))
+            ax_data.set_ylim(*_adaptive_ylim(*acc_series.values(), *extra_acc_series.values()))
 
         ax_data.set_ylabel("accuracy / proxy score")
         ax_ent.set_ylabel("EMA entropy (nats)", color=C_MUTED)

@@ -1,6 +1,6 @@
 TEST_DIR: ./data/ImageNet-C
 VAL_DIR: ./data/imagenet-val
-BS: 128
+BS: 64
 WORKERS: 8
 CALIBRATOR:
   CORRUPTIONS:
@@ -21,7 +21,7 @@ LARGE:
   OPTIM:    
     METHOD: "Adam"
     STEPS: 1       # Tune this per model
-    LR: 0.00025    
+    LR: 0.0001    
     BETA: 0.9
     WD: 0.0
     # METHOD: "SGD"
@@ -38,7 +38,7 @@ SMALL:
   OPTIM:
     METHOD: "Adam"
     STEPS: 1       # Tune this per model
-    LR: 0.001     # Tune this per model
+    LR: 0.00025     # Tune this per model
     BETA: 0.9
     WD: 0.0
     # METHOD: "SGD"
@@ -71,12 +71,6 @@ EVAL:
     - 'pixelate'
     - 'shot_noise'
     - 'snow'
-    - 'zoom_blur'
-    - 'brightness'
-    - 'defocus_blur'
-    - 'fog'
-    - 'gaussian_noise'
-    - 'jpeg_compression'
   SEVERITIES:
     # - 1
     # - 2
