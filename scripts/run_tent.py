@@ -40,18 +40,45 @@ per-proxy-batch score -> calibrate -> filter loop) is this script's own
 _SingleModelProxyTracker, the single-model analogue of
 JointProxyWeighted._flush_bucket with no gate/combine step.
 
+--proxy_batch_sizes: track SEVERAL proxy_batch_size (b_t) values from the
+SAME TENT run instead of one run per value -- proxy scoring is cheap
+relative to a TENT forward/backward pass, so _build_trackers builds one
+_SingleModelProxyTracker per pbs (all sharing the one ProxyStats fit above;
+only the buffering/filter timescale differs) and every batch is fed to all
+of them. Writes one proxy_log CSV per pbs plus a per-corruption reactivity
+comparison plot (per_corruption/corruption_*_pbs_comparison.png: actual
+accuracy vs. each pbs's calibrated score, color-ramped small->large pbs) --
+see plot_proxy_pbs_comparison. Falls back to the original single-tracker
+behavior (proxy_diagnostics.png etc.) when omitted or given only one value.
+
+--track_frozen: also forward a second, never-adapted copy of --model
+(configure_model_frozen -- live batch-stats norm behavior, no gradient
+updates) on every batch, as a baseline to compare the adapting model
+against. Adds a thinner, gray "frozen" series to batch_diagnostics.png and
+each per_corruption/corruption_*.png (see model_series in main()), each
+tagged with its own overall average accuracy for that corruption (see
+diagnostics_plots.py's plot_per_corruption_proxy_vs_accuracy). Off by
+default since it roughly doubles the forward-pass cost.
+
 Usage
 -----
 python scripts/run_tent.py --config cfgs/dynamic_duo_config.yaml \
     --model resnet50 --lr 0.00025 --bs 64 \
     --calib_config cfgs/calib_configs/nuclear_norm_identity_pbs128.json \
     --num_samples 2500 --severity 5 --corruptions brightness fog --norm BN
-    
+
     # a handful of corruptions only, no wandb
     python scripts/run_tent.py --config cfgs/dynamic_duo_config.yaml \\
         --model vit_b_16 --lr 0.005 --bs 128 --norm LN \\
         --calib_config cfgs/calib_configs/nuclear_norm_identity_pbs128.json \\
         --corruptions fog snow --severity 5 --num_samples 2000 --no_wandb
+
+    # compare several proxy_batch_size values' reactivity from one run
+    python scripts/run_tent.py --config cfgs/dynamic_duo_config.yaml \\
+        --model resnet50 --lr 0.00025 --bs 64 --norm BN \\
+        --calib_config cfgs/calib_configs/nuclear_norm_identity_pbs128.json \\
+        --proxy_batch_sizes 16 32 64 128 256 512 \\
+        --num_samples 2500 --severity 5 --corruptions brightness fog
 """
 
 from __future__ import annotations
@@ -70,7 +97,7 @@ from tqdm import tqdm
 from src.utils.model import get_model, _preprocess_batch
 from src.utils.data import load_config, load_imagenetC
 from src.utils.metrics import get_metrics_dict
-from src.tta.tent import setup_tent, softmax_entropy
+from src.tta.tent import setup_tent, softmax_entropy, configure_model_frozen
 from src.reliability.setup import build_proxy_weighted_calibrator
 from src.reliability.proxies.stats import PROXY_KINDS, FeatureExtractor
 from src.reliability.calibration.logit import to_logit
@@ -82,7 +109,8 @@ from src.reliability.calibration.logit import to_logit
 from src.calibrators.joint_proxy_weighted import _build_filter, _corr_stats
 from src.utils.diagnostics_plots import (
     plot_batch_diagnostics, plot_single_model_proxy_diagnostics,
-    plot_per_corruption_proxy_vs_accuracy, DEFAULT_EMA_WINDOW, C_LARGE,
+    plot_per_corruption_proxy_vs_accuracy, plot_proxy_pbs_comparison,
+    DEFAULT_EMA_WINDOW, C_LARGE, C_FROZEN,
 )
 from scripts._cli import (
     add_duo_config_arg, add_num_samples_arg, add_seed_arg,
@@ -261,10 +289,14 @@ class _SingleModelProxyTracker:
         return stats
 
 
-def _build_proxy_tracker(run_cfg: dict, cfg: dict, model, preprocess, device, args, out_dir: Path):
+def _build_proxy_stats(run_cfg: dict, cfg: dict, model, preprocess, device, args):
     """Build the ProxyStats (with calibration map attached) via the SAME
     two-model factory the duo pipeline uses -- see module docstring's Reuse
-    note -- then wrap it in _SingleModelProxyTracker."""
+    note. proxy_kind/calib_method/calib_map are shared across every tracked
+    proxy_batch_size (see _build_trackers), so this fitting work -- the
+    expensive part, when calib_method needs a fresh dev-corruption fit --
+    happens exactly ONCE per run regardless of how many --proxy_batch_sizes
+    are tracked, not once per pbs."""
     proxy_kind = run_cfg["proxy_kind"]
     calib_method = run_cfg.get("calib_method", "identity")
     calib_map = run_cfg.get("calib_map")
@@ -323,27 +355,41 @@ def _build_proxy_tracker(run_cfg: dict, cfg: dict, model, preprocess, device, ar
         proto_metric=run_cfg.get("proto_metric", "cosine"),
         proxy_batch_size=1,
     )
-    proxy_stats = jpw_for_fitting.cfg_l
+    return jpw_for_fitting.cfg_l
 
+
+def _build_trackers(
+    proxy_stats, run_cfg: dict, pbs_list: list[int], out_dir: Path,
+) -> dict[int, _SingleModelProxyTracker]:
+    """One _SingleModelProxyTracker per proxy_batch_size in pbs_list, all
+    sharing the SAME fitted proxy_stats (proxy_kind/calibration map don't
+    depend on proxy_batch_size -- only the buffering/filter timescale does)
+    and the same filter_kind/filter_kwargs/prior from --calib_config, so
+    they differ ONLY in proxy_batch_size and their own CSV log -- this is
+    what lets --proxy_batch_sizes compare several b_t values' reactivity
+    from a single TENT run instead of one run per value."""
     prior = to_logit(run_cfg.get("prior", run_cfg.get("prior_l", 0.5)))
-    tracker = _SingleModelProxyTracker(
-        proxy_kind=proxy_kind,
-        cfg=proxy_stats,
-        filter_kind=run_cfg.get("filter_kind", "none"),
-        filter_kwargs=run_cfg.get("filter_kwargs") or {},
-        prior=prior,
-        eps=1e-3,
-        proxy_batch_size=run_cfg.get("proxy_batch_size", 128),
-        csv_path=str(out_dir / "proxy_log"),
-        verbose=True,
-    )
-    return tracker
+    trackers = {}
+    for pbs in pbs_list:
+        trackers[pbs] = _SingleModelProxyTracker(
+            proxy_kind=run_cfg["proxy_kind"],
+            cfg=proxy_stats,
+            filter_kind=run_cfg.get("filter_kind", "none"),
+            filter_kwargs=run_cfg.get("filter_kwargs") or {},
+            prior=prior,
+            eps=1e-3,
+            proxy_batch_size=pbs,
+            csv_path=str(out_dir / f"proxy_log_pbs{pbs}"),
+            verbose=(len(pbs_list) == 1),
+        )
+    return trackers
 
 
 def _write_plots(
-    batch_records: list[dict], corruption_boundaries: list[dict], tracker: _SingleModelProxyTracker,
-    out_dir: Path, model_series: list[tuple[str, str, str]], ema_window: int,
-) -> tuple[bool, bool, list[dict]]:
+    batch_records: list[dict], corruption_boundaries: list[dict],
+    trackers: dict[int, _SingleModelProxyTracker],
+    out_dir: Path, model_series: list[tuple[str, str, str, float]], ema_window: int,
+) -> tuple[bool, bool, dict[int, list[dict]]]:
     """Write every diagnostics artifact from whatever has been recorded SO
     FAR, overwriting what's already on disk -- called after every corruption
     (see main()) rather than once at the very end, so a long multi-corruption
@@ -351,6 +397,16 @@ def _write_plots(
     it finishes. Idempotent for corruptions already written (per_corruption's
     own per-corruption files re-render identically); the cost is a handful
     of cheap matplotlib redraws per corruption, not extra model computation.
+
+    With a single tracker (the default, one --calib_config proxy_batch_size),
+    this writes exactly what it always has: proxy_diagnostics.png and the
+    proxy overlay on each per_corruption/corruption_*.png. With more than one
+    (--proxy_batch_sizes), those single-pbs plots don't generalize to N
+    series meaningfully, so they're skipped in favor of
+    plot_proxy_pbs_comparison's per-corruption pbs-reactivity comparison
+    instead (per_corruption/corruption_*_pbs_comparison.png) -- the
+    accuracy/entropy panel on corruption_*.png itself is still written, just
+    without a proxy overlay (proxy_series=[]).
     """
     if batch_records:
         with (out_dir / "batch_diagnostics.csv").open("w", newline="") as f:
@@ -358,10 +414,13 @@ def _write_plots(
             writer.writeheader()
             writer.writerows(batch_records)
 
-    proxy_rows: list[dict] = []
-    if tracker.csv_path is not None and tracker.csv_path.exists():
-        with tracker.csv_path.open() as f:
-            proxy_rows = list(csv.DictReader(f))
+    proxy_rows_by_pbs: dict[int, list[dict]] = {}
+    for pbs, tracker in trackers.items():
+        rows: list[dict] = []
+        if tracker.csv_path is not None and tracker.csv_path.exists():
+            with tracker.csv_path.open() as f:
+                rows = list(csv.DictReader(f))
+        proxy_rows_by_pbs[pbs] = rows
 
     has_batch_plot = False
     if batch_records:
@@ -369,18 +428,29 @@ def _write_plots(
                                 ema_window=ema_window, series=model_series)
         has_batch_plot = True
 
-    has_proxy_plot = plot_single_model_proxy_diagnostics(
-        proxy_rows, out_dir / "proxy_diagnostics.png", ema_window=ema_window,
-    )
-
     per_corruption_dir = out_dir / "per_corruption"
     per_corruption_dir.mkdir(parents=True, exist_ok=True)
-    plot_per_corruption_proxy_vs_accuracy(
-        batch_records, proxy_rows, per_corruption_dir, ema_window=ema_window,
-        series=model_series, proxy_series=[("r", C_LARGE, "r")],
-    )
 
-    return has_batch_plot, has_proxy_plot, proxy_rows
+    if len(trackers) == 1:
+        proxy_rows = next(iter(proxy_rows_by_pbs.values()))
+        has_proxy_plot = plot_single_model_proxy_diagnostics(
+            proxy_rows, out_dir / "proxy_diagnostics.png", ema_window=ema_window,
+        )
+        plot_per_corruption_proxy_vs_accuracy(
+            batch_records, proxy_rows, per_corruption_dir, ema_window=ema_window,
+            series=model_series, proxy_series=[("r", C_LARGE, "r")],
+        )
+    else:
+        has_proxy_plot = False
+        plot_per_corruption_proxy_vs_accuracy(
+            batch_records, [], per_corruption_dir, ema_window=ema_window,
+            series=model_series, proxy_series=[],
+        )
+        plot_proxy_pbs_comparison(
+            batch_records, proxy_rows_by_pbs, per_corruption_dir, ema_window=ema_window,
+        )
+
+    return has_batch_plot, has_proxy_plot, proxy_rows_by_pbs
 
 
 def main() -> None:
@@ -397,9 +467,26 @@ def main() -> None:
     p.add_argument("--lr", type=float, required=True, help="TENT adaptation learning rate.")
     p.add_argument("--bs", type=int, required=True, help="Adaptation batch size.")
     p.add_argument("--steps", type=int, default=1, help="Adaptation steps per batch.")
+    p.add_argument("--track_frozen", action="store_true",
+                    help="Also forward a second, never-adapted copy of --model (configure_model_frozen "
+                         "-- same live batch-stats norm behavior as TENT, just no gradient updates) on "
+                         "every batch, purely as a baseline to compare the adapting model against. Adds "
+                         "a thinner, gray 'frozen' series to batch_diagnostics.png and each "
+                         "per_corruption/corruption_*.png. Roughly doubles the forward-pass cost (no "
+                         "extra backward pass) since it's a full second model.")
     p.add_argument("--calib_config", type=str, required=True,
                     help="Path to a JSON run_cfg dict -- see module docstring. Same shape as "
                          "cfgs/calib_configs/*.json.")
+    p.add_argument("--proxy_batch_sizes", type=int, nargs="+", default=None,
+                    help="Track SEVERAL Section-1 proxy batch sizes b_t from this SAME TENT run "
+                         "instead of just --calib_config's own 'proxy_batch_size' -- proxy scoring "
+                         "is cheap relative to a TENT forward/backward pass, so many b_t values can "
+                         "share one run's model computation instead of needing one run each. Writes "
+                         "one CSV per pbs plus a per-corruption reactivity comparison plot "
+                         "(per_corruption/corruption_*_pbs_comparison.png: actual accuracy vs. each "
+                         "pbs's calibrated score, color-ramped small->large). Default: a single "
+                         "tracker at --calib_config's 'proxy_batch_size' (or 128) -- the original "
+                         "single-pbs behavior, unchanged.")
     p.add_argument("--severity", type=int, default=5)
     p.add_argument("--corruptions", type=str, nargs="+", default=None,
                     help="Defaults to every ImageNet-C corruption except --config's "
@@ -454,11 +541,30 @@ def main() -> None:
     model, preprocess = get_model(args.model)
     model = model.to(device)
 
-    tracker = _build_proxy_tracker(run_cfg, cfg, model, preprocess, device, args, out_dir)
+    proxy_stats = _build_proxy_stats(run_cfg, cfg, model, preprocess, device, args)
+    pbs_list = sorted(set(args.proxy_batch_sizes)) if args.proxy_batch_sizes else \
+        [run_cfg.get("proxy_batch_size", 128)]
+    trackers = _build_trackers(proxy_stats, run_cfg, pbs_list, out_dir)
+    if len(trackers) > 1:
+        print(f"[run_tent] tracking {len(trackers)} proxy_batch_sizes from this one run: {pbs_list} "
+              f"(proxy_kind={run_cfg['proxy_kind']!r}, filter_kind={run_cfg.get('filter_kind', 'none')!r})")
 
     optim_cfg = {"METHOD": "Adam", "STEPS": args.steps, "LR": args.lr, "BETA": 0.9, "WD": 0.0}
     tented_model = setup_tent(model, norm_type=norm_type, cfg=optim_cfg)
     tented_model.eval()
+
+    # --track_frozen: a second, freshly-loaded copy of --model, never
+    # adapted (configure_model_frozen -- see src/tta/tent.py: still uses
+    # live batch stats for BN/LN, just requires_grad_(False), matching how
+    # the duo pipeline evaluates a non-adapting model in _MODES like
+    # no_adapt) -- a baseline to compare the adapting `tented_model` against
+    # on the exact same batches. Must be a separate model instance: `model`
+    # above is mutated in place by TENT's adaptation steps.
+    frozen_model = None
+    if args.track_frozen:
+        frozen_model, _ = get_model(args.model)
+        frozen_model = configure_model_frozen(frozen_model.to(device), norm_type)
+        frozen_model.eval()
 
     need_features = run_cfg["proxy_kind"] == "prototype"
     ext = FeatureExtractor(tented_model.model, args.model) if need_features else None
@@ -482,8 +588,13 @@ def main() -> None:
     corruption_boundaries: list[dict] = []
     results_rows: list[dict] = []
     all_probs_overall, all_labels_overall = [], []
-    model_series = [("model", C_LARGE, args.model)]
-    has_batch_plot, has_proxy_plot, proxy_rows = False, False, []
+    all_probs_frozen_overall: list[torch.Tensor] = []
+    model_series = [("model", C_LARGE, args.model, 1.0)]
+    if frozen_model is not None:
+        # lw_scale=0.55 -- "different color, thinner line" per-series style,
+        # see diagnostics_plots.py's _DEFAULT_SERIES docstring.
+        model_series.append(("frozen", C_FROZEN, f"{args.model} (frozen)", 0.55))
+    has_batch_plot, has_proxy_plot, proxy_rows_by_pbs = False, False, {}
 
     try:
         for corruption in corruptions:
@@ -496,11 +607,14 @@ def main() -> None:
                 num_workers=cfg.get("WORKERS", 4),
                 num_samples=args.num_samples, seed=args.seed,
             )
-            tracker.set_corruption(f"{corruption}/s{args.severity}", total_samples=len(loader.dataset))
+            for tracker in trackers.values():
+                tracker.set_corruption(f"{corruption}/s{args.severity}", total_samples=len(loader.dataset))
             corruption_boundaries.append({"idx": len(batch_records), "label": f"{corruption}/s{args.severity}"})
 
             diag = {"n": 0, "acc_sum": 0.0, "nll_sum": 0.0, "ent_sum": 0.0}
+            diag_frozen = {"n": 0, "acc_sum": 0.0, "nll_sum": 0.0, "ent_sum": 0.0}
             all_probs, all_labels = [], []
+            all_probs_frozen = []
 
             for imgs, labels in tqdm(loader, desc=f"{corruption} s{args.severity}"):
                 x = _preprocess_batch(imgs, preprocess, device)
@@ -517,41 +631,90 @@ def main() -> None:
                 diag["nll_sum"] += nll
                 diag["ent_sum"] += ent
 
-                batch_records.append({
+                record = {
                     "global_idx": len(batch_records), "corruption": f"{corruption}/s{args.severity}",
                     "n": x.shape[0],
                     "model_acc": acc, "model_nll": nll, "model_ent": ent,
                     "model_acc_run": diag["acc_sum"] / diag["n"],
                     "model_nll_run": diag["nll_sum"] / diag["n"],
                     "model_ent_run": diag["ent_sum"] / diag["n"],
-                })
+                }
+
+                probs_frozen = None
+                if frozen_model is not None:
+                    with torch.no_grad():
+                        z_frozen = frozen_model(x)
+                    probs_frozen = F.softmax(z_frozen.detach().cpu(), dim=1)
+                    acc_f = (probs_frozen.argmax(1) == labels).float().mean().item()
+                    nll_f = F.nll_loss(torch.log(probs_frozen.clamp(min=1e-8)), labels).item()
+                    ent_f = softmax_entropy(z_frozen.detach()).mean().item()
+                    diag_frozen["n"] += 1
+                    diag_frozen["acc_sum"] += acc_f
+                    diag_frozen["nll_sum"] += nll_f
+                    diag_frozen["ent_sum"] += ent_f
+                    record.update({
+                        "frozen_acc": acc_f, "frozen_nll": nll_f, "frozen_ent": ent_f,
+                        "frozen_acc_run": diag_frozen["acc_sum"] / diag_frozen["n"],
+                        "frozen_nll_run": diag_frozen["nll_sum"] / diag_frozen["n"],
+                        "frozen_ent_run": diag_frozen["ent_sum"] / diag_frozen["n"],
+                    })
+
+                batch_records.append(record)
 
                 f_feats = ext._feats.detach() if ext is not None else None
-                tracker.observe(z_out.detach(), f_feats, labels_dev)
+                z_out_d = z_out.detach()
+                for tracker in trackers.values():
+                    tracker.observe(z_out_d, f_feats, labels_dev)
 
                 if wandb_run is not None:
-                    wandb_run.log({
+                    log_dict = {
                         f"{corruption}/s{args.severity}/batch_acc": acc,
                         f"{corruption}/s{args.severity}/avg_acc": diag["acc_sum"] / diag["n"],
                         f"{corruption}/s{args.severity}/batch_nll": nll,
                         f"{corruption}/s{args.severity}/batch_ent": ent,
                         f"{corruption}/s{args.severity}/avg_ent": diag["ent_sum"] / diag["n"],
-                        "proxy/r": tracker._cached_r, "proxy/a": tracker._cached_a, "proxy/x": tracker._cached_x,
-                    })
+                    }
+                    if probs_frozen is not None:
+                        log_dict.update({
+                            f"{corruption}/s{args.severity}/frozen_batch_acc": record["frozen_acc"],
+                            f"{corruption}/s{args.severity}/frozen_avg_acc": record["frozen_acc_run"],
+                        })
+                    if len(trackers) == 1:
+                        t = next(iter(trackers.values()))
+                        log_dict.update({"proxy/r": t._cached_r, "proxy/a": t._cached_a, "proxy/x": t._cached_x})
+                    else:
+                        for pbs, t in trackers.items():
+                            log_dict.update({
+                                f"proxy/pbs{pbs}/r": t._cached_r, f"proxy/pbs{pbs}/a": t._cached_a,
+                                f"proxy/pbs{pbs}/x": t._cached_x,
+                            })
+                    wandb_run.log(log_dict)
 
                 all_probs.append(probs); all_labels.append(labels)
                 all_probs_overall.append(probs); all_labels_overall.append(labels)
+                if probs_frozen is not None:
+                    all_probs_frozen.append(probs_frozen)
+                    all_probs_frozen_overall.append(probs_frozen)
 
-            tracker.report_and_reset_corruption_stats(f"{corruption}/s{args.severity}")
+            for tracker in trackers.values():
+                tracker.report_and_reset_corruption_stats(f"{corruption}/s{args.severity}")
 
             metrics = get_metrics_dict(torch.cat(all_probs), torch.cat(all_labels))
             print(f"Results for {corruption} severity {args.severity}: {metrics}")
             if wandb_run is not None:
                 wandb_run.log({f"{corruption}/s{args.severity}/{k}": v for k, v in metrics.items()})
-            results_rows.append({"corruption": corruption, "severity": args.severity, **metrics})
+            result_row = {"corruption": corruption, "severity": args.severity, **metrics}
+            if frozen_model is not None:
+                metrics_frozen = get_metrics_dict(torch.cat(all_probs_frozen), torch.cat(all_labels))
+                print(f"Results for {corruption} severity {args.severity} (frozen): {metrics_frozen}")
+                if wandb_run is not None:
+                    wandb_run.log({f"{corruption}/s{args.severity}/frozen_{k}": v
+                                    for k, v in metrics_frozen.items()})
+                result_row.update({f"frozen_{k}": v for k, v in metrics_frozen.items()})
+            results_rows.append(result_row)
 
-            has_batch_plot, has_proxy_plot, proxy_rows = _write_plots(
-                batch_records, corruption_boundaries, tracker, out_dir, model_series, args.ema_window,
+            has_batch_plot, has_proxy_plot, proxy_rows_by_pbs = _write_plots(
+                batch_records, corruption_boundaries, trackers, out_dir, model_series, args.ema_window,
             )
             print(f"Diagnostics through {corruption}/s{args.severity} written to {out_dir}")
     finally:
@@ -564,14 +727,23 @@ def main() -> None:
     # script only ever runs one --severity across every corruption anyway
     # (unlike the duo pipeline's EVAL.SEVERITIES sweep), so the average
     # row's severity is genuinely just args.severity, not a separate value.
-    results_rows.append({"corruption": "average", "severity": args.severity, **overall_metrics})
+    average_row = {"corruption": "average", "severity": args.severity, **overall_metrics}
+    overall_metrics_frozen = None
+    if frozen_model is not None:
+        overall_metrics_frozen = get_metrics_dict(
+            torch.cat(all_probs_frozen_overall), torch.cat(all_labels_overall),
+        )
+        average_row.update({f"frozen_{k}": v for k, v in overall_metrics_frozen.items()})
+    results_rows.append(average_row)
     print(f"\nFinal average: accuracy={overall_metrics['accuracy']:.4f}")
+    if overall_metrics_frozen is not None:
+        print(f"Final average (frozen): accuracy={overall_metrics_frozen['accuracy']:.4f}")
 
     # Plots/CSVs were already written after each corruption (see the
-    # _write_plots call inside the loop above) -- batch_records/proxy_rows
+    # _write_plots call inside the loop above) -- batch_records/trackers
     # haven't changed since the last one ran, so has_batch_plot/has_proxy_plot/
-    # proxy_rows from that final call are already the complete, final state;
-    # nothing left to (re)write here.
+    # proxy_rows_by_pbs from that final call are already the complete, final
+    # state; nothing left to (re)write here.
     if not batch_records:
         print("No batches were recorded -- nothing was plotted.")
 
@@ -591,6 +763,9 @@ def main() -> None:
         wandb_run.log({"summary/results": table})
         for k, v in overall_metrics.items():
             wandb_run.summary[k] = v
+        if overall_metrics_frozen is not None:
+            for k, v in overall_metrics_frozen.items():
+                wandb_run.summary[f"frozen_{k}"] = v
         wandb_run.finish()
 
     print(f"\nAll outputs in {out_dir}")

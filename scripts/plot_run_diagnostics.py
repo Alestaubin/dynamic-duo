@@ -36,6 +36,12 @@ logging (csv_path=... at construction, see joint_proxy_weighted.py's
 _CSV_FIELDS) -- this script just points that at out_dir and reads it back
 for plotting/wandb, rather than re-deriving the same numbers a second way.
 
+batch_diagnostics.csv and every plot are (re)written after EVERY corruption,
+not just once at the end (see _run's _on_corruption_end / _write_plots) --
+a long run killed mid-way by a SLURM walltime limit still leaves usable,
+up-to-date plots instead of only the calibrator's own incrementally-written
+proxy_log CSV.
+
 Usage
 -----
 Corruptions/severities always come from --config's EVAL.CORRUPTIONS/
@@ -192,6 +198,35 @@ def _boundaries_from_batch_records(batch_records: list[dict]) -> list[dict]:
     return boundaries
 
 
+def _write_plots(
+    batch_records: list[dict], boundaries: list[dict], proxy_rows: list[dict],
+    out_dir: Path, ema_window: int,
+) -> tuple[bool, bool]:
+    """Write every diagnostics artifact from whatever has been recorded SO
+    FAR, overwriting what's already on disk -- called after every corruption
+    (see _run's _on_corruption_end) rather than only once at the very end, so
+    a long multi-corruption run's plots are visible while it's still going,
+    and survive a SLURM walltime kill instead of leaving nothing but a
+    partial proxy_log CSV behind. Mirrors run_tent.py's own _write_plots for
+    the exact same reason (see its docstring). Returns (has_batch_plot,
+    has_proxy_plot), same as the two plotting calls' own return values.
+    """
+    has_batch_plot = False
+    if batch_records:
+        plot_batch_diagnostics(batch_records, boundaries, out_dir / "batch_diagnostics.png",
+                                ema_window=ema_window)
+        has_batch_plot = True
+
+    has_proxy_plot = plot_proxy_diagnostics(proxy_rows, out_dir / "proxy_diagnostics.png",
+                                             ema_window=ema_window)
+
+    per_corruption_dir = out_dir / "per_corruption"
+    per_corruption_dir.mkdir(parents=True, exist_ok=True)
+    plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir,
+                                           ema_window=ema_window)
+    return has_batch_plot, has_proxy_plot
+
+
 def _replot_from_csv_dir(csv_dir: Path, ema_window: int) -> None:
     """Re-run every plotting function against an existing run's own output
     directory instead of re-running the duo -- e.g. after a plotting-only
@@ -207,14 +242,7 @@ def _replot_from_csv_dir(csv_dir: Path, ema_window: int) -> None:
     boundaries = _boundaries_from_batch_records(batch_records)
     proxy_rows = _load_proxy_log_csv(csv_dir)
 
-    plot_batch_diagnostics(batch_records, boundaries, csv_dir / "batch_diagnostics.png",
-                            ema_window=ema_window)
-    plot_proxy_diagnostics(proxy_rows, csv_dir / "proxy_diagnostics.png", ema_window=ema_window)
-
-    per_corruption_dir = csv_dir / "per_corruption"
-    per_corruption_dir.mkdir(parents=True, exist_ok=True)
-    plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir,
-                                           ema_window=ema_window)
+    _write_plots(batch_records, boundaries, proxy_rows, csv_dir, ema_window)
 
     print(f"\nRe-plotted from {csv_dir} (existing PNGs/per-corruption CSVs overwritten).")
 
@@ -252,7 +280,7 @@ def _make_wandb_run(args: argparse.Namespace, run_cfg: dict, cfg: dict, run_name
 
 def _run(
     args: argparse.Namespace, run_cfg: dict, cfg: dict, out_dir: Path, run_name: str, wandb_run,
-) -> tuple[list[dict], list[dict], list[dict], list]:
+) -> tuple[list[dict], list[dict], list[dict], list, bool, bool]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}  |  duo: {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']}  |  "
           f"calib_config: {run_cfg['name']!r} ({run_cfg['calibration_mode']})  |  out_dir: {out_dir}")
@@ -265,6 +293,13 @@ def _run(
         run_cfg, cfg, large_model, large_preprocess, small_model, small_preprocess,
         device, args.num_samples, args.seed, csv_path=str(out_dir / "proxy_log"), verbose=True,
     )
+    # JointProxyWeighted appends its own timestamp suffix to the csv_path
+    # given above and writes to it incrementally as the run progresses (see
+    # _on_corruption_end below) -- so this path is fixed for the whole run
+    # once the calibrator is constructed, unlike _load_proxy_log_csv's glob
+    # (used by --csv_dir re-plotting, where no live calibrator instance is
+    # around to ask directly).
+    proxy_csv_path = getattr(calibrator, "_csv_path", None)
 
     duo = setup_duo(
         large=large_model, large_preprocess=large_preprocess,
@@ -275,6 +310,8 @@ def _run(
 
     batch_records: list[dict] = []
     corruption_boundaries: list[dict] = []
+    proxy_rows: list[dict] = []
+    has_batch_plot, has_proxy_plot = False, False
 
     def _on_corruption_start(corruption, severity):
         corruption_boundaries.append({"idx": len(batch_records), "label": f"{corruption}/s{severity}"})
@@ -311,26 +348,46 @@ def _run(
             if log_dict:
                 wandb_run.log(log_dict, commit=False)
 
+    def _on_corruption_end(corruption, severity, metrics_by_model):
+        # Overwrite batch_diagnostics.csv and every plot from whatever's been
+        # recorded so far, after EVERY corruption rather than only once at
+        # the very end -- see _write_plots' docstring for why (a SLURM
+        # walltime kill mid-run, like logs/5394206_plot_diagnostics.err,
+        # otherwise leaves nothing behind but the calibrator's own
+        # incrementally-written proxy_log CSV).
+        nonlocal proxy_rows, has_batch_plot, has_proxy_plot
+        if batch_records:
+            with (out_dir / "batch_diagnostics.csv").open("w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(batch_records[0].keys()))
+                writer.writeheader()
+                writer.writerows(batch_records)
+
+        if proxy_csv_path is not None and Path(proxy_csv_path).exists():
+            with Path(proxy_csv_path).open() as f:
+                proxy_rows = list(csv.DictReader(f))
+
+        has_batch_plot, has_proxy_plot = _write_plots(
+            batch_records, corruption_boundaries, proxy_rows, out_dir, args.ema_window,
+        )
+        print(f"Diagnostics through {corruption}/s{severity} written to {out_dir}")
+
     results_rows = evaluate_dynamic_duo(
         duo, cfg, num_samples=args.num_samples, seed=args.seed,
         wandb_run=wandb_run, run_name=run_name,
         on_corruption_start=_on_corruption_start, on_batch=_on_batch,
+        on_corruption_end=_on_corruption_end,
     )
 
     if batch_records:
-        with (out_dir / "batch_diagnostics.csv").open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(batch_records[0].keys()))
-            writer.writeheader()
-            writer.writerows(batch_records)
         print(f"Wrote {len(batch_records)} rows to {out_dir / 'batch_diagnostics.csv'}")
+    else:
+        print("No batches were recorded -- nothing was plotted.")
 
-    proxy_rows: list[dict] = []
-    proxy_csv_path = getattr(calibrator, "_csv_path", None)
-    if proxy_csv_path is not None and Path(proxy_csv_path).exists():
-        with Path(proxy_csv_path).open() as f:
-            proxy_rows = list(csv.DictReader(f))
-
-    return batch_records, corruption_boundaries, proxy_rows, results_rows
+    # Plots/CSVs were already written after each corruption (see
+    # _on_corruption_end above) -- batch_records/proxy_rows haven't changed
+    # since the last one ran, so has_batch_plot/has_proxy_plot from that
+    # final call are already the complete, final state.
+    return batch_records, corruption_boundaries, proxy_rows, results_rows, has_batch_plot, has_proxy_plot
 
 
 def _log_wandb_artifacts(
@@ -461,26 +518,13 @@ def main() -> None:
     if wandb_run is not None:
         print(f"wandb run: {wandb_run.url}")
 
-    batch_records, boundaries, proxy_rows, results_rows = _run(args, run_cfg, cfg, out_dir, run_name, wandb_run)
-
-    has_batch_plot = False
-    if batch_records:
-        plot_batch_diagnostics(batch_records, boundaries, out_dir / "batch_diagnostics.png",
-                                ema_window=args.ema_window)
-        has_batch_plot = True
-    else:
-        print("No batches were recorded -- nothing to plot.")
-
-    has_proxy_plot = plot_proxy_diagnostics(proxy_rows, out_dir / "proxy_diagnostics.png",
-                                             ema_window=args.ema_window)
-
-    # One figure (+ aligned CSV) per corruption (saved locally only, not sent
-    # to wandb): EMA-smoothed accuracy for large/small/duo (bold, right
-    # axis) with the raw proxy scores r_l/r_s (light, left axis) overlaid.
-    per_corruption_dir = out_dir / "per_corruption"
-    per_corruption_dir.mkdir(parents=True, exist_ok=True)
-    plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir,
-                                           ema_window=args.ema_window)
+    # Plots/CSVs are written incrementally, after every corruption (see
+    # _run's _on_corruption_end) -- has_batch_plot/has_proxy_plot below
+    # already reflect the final, complete state; nothing left to (re)write
+    # here.
+    _, _, proxy_rows, results_rows, has_batch_plot, has_proxy_plot = _run(
+        args, run_cfg, cfg, out_dir, run_name, wandb_run,
+    )
 
     if wandb_run is not None:
         _log_wandb_artifacts(wandb_run, out_dir, has_batch_plot, has_proxy_plot, proxy_rows, results_rows)

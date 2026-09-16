@@ -28,16 +28,22 @@ for whichever model's real accuracy is dipping.
 
 plot_per_corruption_proxy_vs_accuracy: same question as plot_proxy_diagnostics,
 but one figure per corruption instead of one figure spanning the whole run --
-EMA-smoothed accuracy (bold SOLID, right axis) vs. EMA-smoothed proxy score
-(bold DOTTED, left axis, raw score also shown faint) vs. EMA-smoothed entropy
-(DASH-DOT, its own third axis -- nats, not on [0, 1] like the other two) so a
-collapse and a proxy dip within a single corruption stream are easy to
-eyeball side by side, and so a proxy that's really just tracking entropy (see
-e.g. nuclear_norm -- a near-monotone function of confidence) rather than
-accuracy is visible directly on the plot. Proxy and accuracy get distinct
-line styles (not just distinct axes) deliberately -- once both are EMA-bold
-lines in the same per-model color, style is what keeps them from reading as
-the same line at a glance.
+two axes, not three: EMA-smoothed accuracy (bold SOLID) and EMA-smoothed
+proxy score (bold DOTTED, raw score also shown faint) share one right axis
+and one y-range (see _adaptive_ylim -- computed from the actual data, not a
+fixed [0, 1], so a real but small accuracy swing doesn't get visually
+flattened by a full-range axis, and the two stay directly comparable);
+EMA-smoothed entropy (DASH-DOT, its own left axis -- nats, not on the same
+scale as the other two) is the one series that still needs a separate axis.
+This makes a collapse and a proxy dip within a single corruption stream easy
+to eyeball side by side, and makes a proxy that's really just tracking
+entropy (see e.g. nuclear_norm -- a near-monotone function of confidence)
+rather than accuracy visible directly on the plot. Proxy and accuracy get
+distinct line styles (not just distinct colors) deliberately -- once both
+are EMA-bold lines in the same per-model color on the same axis, style is
+what keeps them from reading as the same line at a glance. Each series also
+gets its plain overall average accuracy for that corruption, tagged bottom-
+right in gray.
 
 All three functions plot every series as an EMA (bold) over the raw
 per-point values (faint), with a shared `ema_window` hyperparameter (see
@@ -67,6 +73,10 @@ import matplotlib.pyplot as plt
 C_LARGE = "#2a78d6"
 C_SMALL = "#eb6834"
 C_GATE = "#4a3aa7"
+# Frozen (non-adapting) baseline overlay -- see scripts/run_tent.py's
+# --track_frozen. Deliberately a neutral gray rather than a categorical color:
+# it's a reference baseline, not a model identity that needs to stand out.
+C_FROZEN = "#6b7280"
 C_INK = "#0b0b0b"
 C_MUTED = "#898781"
 C_GRID = "#e1e0d9"
@@ -104,6 +114,33 @@ def _ema(values: list[float], window: int, reset_idxs: set[int] | None = None) -
     return out
 
 
+def _adaptive_ylim(
+    *value_lists: list[float], pad_frac: float = 0.08, min_span: float = 0.05,
+) -> tuple[float, float]:
+    """Shared y-limits for two or more series meant to be visually compared
+    on the same scale (e.g. proxy score vs. true accuracy in
+    plot_per_corruption_proxy_vs_accuracy) -- computed from the actual data
+    instead of a fixed [0, 1]. A fixed full-range axis makes a real but
+    small accuracy swing (a few points) read as a flat line; zooming to the
+    data's own span makes it visible while still sharing one scale across
+    both axes so the comparison stays apples-to-apples.
+
+    min_span floors the displayed range (e.g. a near-constant corruption
+    doesn't collapse to an unreadably tight band around noise); pad_frac
+    adds breathing room around the (possibly floored) span so the plotted
+    lines never touch the frame.
+    """
+    vals = [v for lst in value_lists for v in lst]
+    if not vals:
+        return (-0.02, 1.02)
+    lo, hi = min(vals), max(vals)
+    if hi - lo < min_span:
+        mid = (lo + hi) / 2
+        lo, hi = mid - min_span / 2, mid + min_span / 2
+    pad = (hi - lo) * pad_frac
+    return (lo - pad, hi + pad)
+
+
 def _mark_corruption_boundaries(ax, boundaries: list[dict], n: int) -> None:
     for b in boundaries:
         if b["idx"] == 0:
@@ -115,21 +152,26 @@ def _mark_corruption_boundaries(ax, boundaries: list[dict], n: int) -> None:
                  fontsize=7, color=C_MUTED, alpha=0.9)
 
 
-def _plot_series(ax, x, batch_vals, ema_vals, color, label) -> None:
-    ax.plot(x, batch_vals, color=color, lw=0.8, alpha=0.30, zorder=2)
-    ax.plot(x, ema_vals, color=color, lw=2.0, alpha=0.95, label=label, zorder=3)
+def _plot_series(ax, x, batch_vals, ema_vals, color, label, lw_scale: float = 1.0) -> None:
+    ax.plot(x, batch_vals, color=color, lw=0.8 * lw_scale, alpha=0.30, zorder=2)
+    ax.plot(x, ema_vals, color=color, lw=2.0 * lw_scale, alpha=0.95, label=label, zorder=3)
 
 
-# Default series for a duo run: (row-key prefix, color, legend label). A
-# single-model run (see scripts/run_tent.py) passes a single-entry list
+# Default series for a duo run: (row-key prefix, color, legend label,
+# lw_scale). lw_scale multiplies every line width this series is drawn with,
+# relative to that plot's own base widths -- 1.0 is the normal bold series;
+# a baseline overlay (e.g. scripts/run_tent.py's --track_frozen) passes a
+# smaller value for a visibly thinner line without hardcoding an absolute
+# width that would need to track each plot function's own base widths. A
+# single-model run (see scripts/run_tent.py) passes a one- or two-entry list
 # instead -- everything below just loops over however many series it gets.
-_DEFAULT_SERIES = [("large", C_LARGE, "large"), ("small", C_SMALL, "small")]
+_DEFAULT_SERIES = [("large", C_LARGE, "large", 1.0), ("small", C_SMALL, "small", 1.0)]
 
 
 def plot_batch_diagnostics(
     batch_records: list[dict], boundaries: list[dict], out_path: Path,
     ema_window: int = DEFAULT_EMA_WINDOW,
-    series: list[tuple[str, str, str]] | None = None,
+    series: list[tuple[str, str, str, float]] | None = None,
 ) -> None:
     series = series or _DEFAULT_SERIES
     x = [r["global_idx"] for r in batch_records]
@@ -141,10 +183,10 @@ def plot_batch_diagnostics(
         ("ent", "Entropy (nats)", axes[2]),
     ]
     for metric, ylabel, ax in specs:
-        for key, color, label in series:
+        for key, color, label, lw_scale in series:
             batch_vals = [r[f"{key}_{metric}"] for r in batch_records]
             ema_vals = _ema(batch_vals, ema_window, reset_idxs)
-            _plot_series(ax, x, batch_vals, ema_vals, color, label)
+            _plot_series(ax, x, batch_vals, ema_vals, color, label, lw_scale)
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.5, lw=0.5)
         _mark_corruption_boundaries(ax, boundaries, len(batch_records))
@@ -306,15 +348,110 @@ def _cumulative_samples(rows: list[dict]) -> list[float] | None:
     return out
 
 
+def plot_proxy_pbs_comparison(
+    batch_records: list[dict], proxy_rows_by_pbs: dict[int, list[dict]], out_dir: Path,
+    ema_window: int = DEFAULT_EMA_WINDOW, model_key: str = "model",
+) -> list[Path]:
+    """One figure per corruption: this model's ACTUAL accuracy (bold, dark,
+    EMA) vs. the CALIBRATED predicted accuracy "a" from every tracked
+    proxy_batch_size (one line per pbs, color-ramped light -> dark for
+    small -> large pbs), sharing ONE [0, 1] y-axis -- both are already on
+    the accuracy scale, so no twin axis is needed like
+    plot_per_corruption_proxy_vs_accuracy -- and a shared x-axis of
+    cumulative samples processed within that corruption (see
+    _cumulative_samples). This is the direct "how reactive is each pbs to a
+    real accuracy swing" comparison: a small pbs reacts fast but noisy, a
+    large pbs is smooth but lags -- eyeball which one tracks the ACTUAL
+    accuracy line most closely.
+
+    Written by scripts/run_tent.py's --proxy_batch_sizes when more than one
+    pbs is tracked from the same TENT run (a single pbs has nothing to
+    compare against and keeps using plot_per_corruption_proxy_vs_accuracy
+    instead). Returns the list of PNG paths written.
+    """
+    if not batch_records or not proxy_rows_by_pbs:
+        print("plot_proxy_pbs_comparison: nothing to plot.")
+        return []
+
+    corruptions: dict[str, list[dict]] = {}
+    for r in batch_records:
+        corruptions.setdefault(r["corruption"], []).append(r)
+
+    pbs_sorted = sorted(proxy_rows_by_pbs)
+    cmap = plt.get_cmap("viridis")
+    color_by_pbs = {
+        pbs: cmap(t) for pbs, t in zip(pbs_sorted, np.linspace(0.15, 0.9, len(pbs_sorted)))
+    }
+
+    proxy_by_pbs_corruption: dict[int, dict[str, list[dict]]] = {}
+    for pbs, rows in proxy_rows_by_pbs.items():
+        by_corr: dict[str, list[dict]] = {}
+        for r in rows:
+            by_corr.setdefault(r["corruption"], []).append(r)
+        proxy_by_pbs_corruption[pbs] = by_corr
+
+    written: list[Path] = []
+    for corruption, rows in corruptions.items():
+        n = len(rows)
+        x_acc = _cumulative_samples(rows)
+        if x_acc is None:
+            x_acc = [i / (n - 1) for i in range(n)] if n > 1 else [0.0]
+        acc_vals = [r[f"{model_key}_acc"] for r in rows]
+        acc_ema = _ema(acc_vals, ema_window)
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(x_acc, acc_vals, color=C_INK, lw=0.6, alpha=0.20, zorder=1)
+        ax.plot(x_acc, acc_ema, color=C_INK, lw=2.4, alpha=0.95,
+                label="actual accuracy (EMA)", zorder=5)
+
+        for pbs in pbs_sorted:
+            prows = proxy_by_pbs_corruption.get(pbs, {}).get(corruption, [])
+            if not prows:
+                continue
+            m = len(prows)
+            x_p = _cumulative_samples(prows)
+            if x_p is None:
+                x_p = [i / (m - 1) for i in range(m)] if m > 1 else [0.0]
+            a_vals = [float(r["a"]) for r in prows]
+            a_ema = _ema(a_vals, ema_window)
+            color = color_by_pbs[pbs]
+            ax.plot(x_p, a_vals, color=color, lw=0.6, alpha=0.15, zorder=2)
+            ax.plot(x_p, a_ema, color=color, lw=1.8, alpha=0.9,
+                    label=f"pbs={pbs} (a, EMA)", zorder=3)
+
+        ax.set_ylim(-0.02, 1.02)
+        ax.set_ylabel("accuracy / calibrated proxy score [0, 1]")
+        ax.set_xlabel("samples processed")
+        ax.set_title(f"Corruption {corruption} -- proxy_batch_size reactivity")
+        ax.grid(True, alpha=0.4, lw=0.5)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), fontsize=7.5,
+                  ncols=min(4, len(pbs_sorted) + 1))
+        fig.subplots_adjust(bottom=0.3)
+
+        safe_name = corruption.replace("/", "_")
+        out_path = out_dir / f"corruption_{safe_name}_pbs_comparison.png"
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"wrote {out_path}")
+        written.append(out_path)
+
+    return written
+
+
 def plot_per_corruption_proxy_vs_accuracy(
     batch_records: list[dict], proxy_rows: list[dict], out_dir: Path,
     ema_window: int = DEFAULT_EMA_WINDOW,
-    series: list[tuple[str, str, str]] | None = None,
+    series: list[tuple[str, str, str, float]] | None = None,
     proxy_series: list[tuple[str, str, str]] | None = None,
 ) -> list[Path]:
-    """One figure per corruption: EMA-smoothed accuracy for large/small/
-    duo (bold, right axis) with the raw proxy scores r_l/r_s (light, left
-    axis, EMA overlaid bold) overlaid.
+    """One figure per corruption, two axes: EMA-smoothed accuracy for
+    large/small/duo (bold) and the raw proxy scores r_l/r_s (light, EMA
+    overlaid bold) share one right axis and one adaptive y-range (see
+    _adaptive_ylim, instead of a fixed [0, 1]) so the two stay on a directly
+    comparable scale and small accuracy swings stay visible. EMA-smoothed
+    entropy gets the left axis (nats, not on the same scale as the other
+    two). Each series' plain overall average accuracy is tagged bottom-right
+    in gray.
 
     batch_records (one row per adaptation batch) and proxy_rows (one row per
     proxy batch) can have different counts within the same corruption --
@@ -352,16 +489,12 @@ def plot_per_corruption_proxy_vs_accuracy(
 
     written: list[Path] = []
     for corruption, rows in corruptions.items():
-        fig, ax_proxy = plt.subplots(figsize=(10, 5))
-        ax_acc = ax_proxy.twinx()
-        # Third axis for entropy (nats -- not on [0, 1] like accuracy or a
-        # typical proxy score, so it can't share either existing axis
-        # without one of the three getting visually squashed). Offset
-        # outward past ax_acc's own ticks/label.
-        ax_ent = ax_proxy.twinx()
-        ax_ent.spines["right"].set_position(("axes", 1.16))
-        ax_ent.set_frame_on(True)
-        ax_ent.patch.set_visible(False)
+        # Two axes, not three: proxy score and accuracy now share one scale
+        # (see _adaptive_ylim below), so they share one axis (right) instead
+        # of each getting its own. Entropy (nats -- not on the same [~0, 1]
+        # scale as the other two) keeps the other axis (left).
+        fig, ax_ent = plt.subplots(figsize=(10, 5))
+        ax_data = ax_ent.twinx()
 
         n = len(rows)
         x_acc = _cumulative_samples(rows)
@@ -369,14 +502,28 @@ def plot_per_corruption_proxy_vs_accuracy(
         if x_acc is None:
             x_acc = [i / (n - 1) for i in range(n)] if n > 1 else [0.0]
         acc_series = {key: _ema([r[f"{key}_acc"] for r in rows], ema_window)
-                      for key, _, _ in series}
+                      for key, _, _, _ in series}
         ent_series = {key: _ema([r[f"{key}_ent"] for r in rows], ema_window)
-                      for key, _, _ in series}
-        for key, color, label in series:
-            ax_acc.plot(x_acc, acc_series[key], color=color, lw=2.2,
-                        alpha=0.95, label=f"{label} acc (EMA)", zorder=3)
-            ax_ent.plot(x_acc, ent_series[key], color=color, lw=1.4, ls="-.",
+                      for key, _, _, _ in series}
+        avg_acc = {key: float(np.mean([r[f"{key}_acc"] for r in rows])) for key, _, _, _ in series}
+        for key, color, label, lw_scale in series:
+            ax_data.plot(x_acc, acc_series[key], color=color, lw=2.2 * lw_scale,
+                         alpha=0.95, label=f"{label} acc (EMA)", zorder=3)
+            ax_ent.plot(x_acc, ent_series[key], color=color, lw=1.4 * lw_scale, ls="-.",
                         alpha=0.75, label=f"{label} entropy (EMA)", zorder=2)
+
+        # Overall average accuracy tag per series (plain mean over this
+        # corruption's rows, not the EMA's tail value) -- stacked bottom-right
+        # in gray (a reference number, not another data series, so it
+        # deliberately doesn't compete with the series' own line colors).
+        avg_acc_lines = [f"{label} avg acc: {avg_acc[key]:.3f}" for key, _, label, _ in series]
+        ax_data.text(
+            0.985, 0.03, "\n".join(avg_acc_lines),
+            transform=ax_data.transAxes, ha="right", va="bottom", fontsize=8,
+            color=C_MUTED, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.3", fc=C_SURFACE, ec=C_MUTED, alpha=0.85),
+            zorder=6,
+        )
 
         safe_name = corruption.replace("/", "_")
         prows = proxy_by_corruption.get(corruption, [])
@@ -393,15 +540,24 @@ def plot_per_corruption_proxy_vs_accuracy(
                 or ([i / (m - 1) for i in range(m)] if m > 1 else [0.0])
             proxy_vals = {pkey: [float(r[pkey]) for r in prows] for pkey, _, _ in proxy_series}
             proxy_ema = {pkey: _ema(vals, ema_window) for pkey, vals in proxy_vals.items()}
+
+            # Proxy score and accuracy share one y-range (computed from
+            # BOTH -- not fixed [0, 1]) so a real but small accuracy swing
+            # isn't visually flattened by an axis sized for the full [0, 1]
+            # span, and the two are still directly comparable at a glance.
+            ax_data.set_ylim(*_adaptive_ylim(
+                *acc_series.values(), *proxy_vals.values(), *proxy_ema.values(),
+            ))
+
             for pkey, color, label in proxy_series:
-                ax_proxy.plot(x_proxy, proxy_vals[pkey], color=color, lw=0.8, ls=":", alpha=0.25, zorder=1)
-                ax_proxy.plot(x_proxy, proxy_ema[pkey], color=color, lw=1.8, ls=":",
-                              alpha=0.9, label=f"{label} (proxy, EMA)", zorder=2)
+                ax_data.plot(x_proxy, proxy_vals[pkey], color=color, lw=0.8, ls=":", alpha=0.25, zorder=1)
+                ax_data.plot(x_proxy, proxy_ema[pkey], color=color, lw=1.8, ls=":",
+                             alpha=0.9, label=f"{label} (proxy, EMA)", zorder=2)
 
             interp_acc = {key: np.interp(x_proxy, x_acc, acc_series[key]).tolist()
-                          for key, _, _ in series}
+                          for key, _, _, _ in series}
             interp_ent = {key: np.interp(x_proxy, x_acc, ent_series[key]).tolist()
-                          for key, _, _ in series}
+                          for key, _, _, _ in series}
             csv_path = out_dir / f"corruption_{safe_name}.csv"
             with csv_path.open("w", newline="") as f:
                 writer = csv.writer(f)
@@ -409,16 +565,16 @@ def plot_per_corruption_proxy_vs_accuracy(
                     ["corruption", "n_samples" if x_is_samples else "t_frac"]
                     + [pkey for pkey, _, _ in proxy_series]
                     + [f"{pkey}_ema" for pkey, _, _ in proxy_series]
-                    + [f"{key}_acc_ema" for key, _, _ in series]
-                    + [f"{key}_ent_ema" for key, _, _ in series]
+                    + [f"{key}_acc_ema" for key, _, _, _ in series]
+                    + [f"{key}_ent_ema" for key, _, _, _ in series]
                 )
                 for i, t in enumerate(x_proxy):
                     writer.writerow(
                         [corruption, t]
                         + [proxy_vals[pkey][i] for pkey, _, _ in proxy_series]
                         + [proxy_ema[pkey][i] for pkey, _, _ in proxy_series]
-                        + [interp_acc[key][i] for key, _, _ in series]
-                        + [interp_ent[key][i] for key, _, _ in series]
+                        + [interp_acc[key][i] for key, _, _, _ in series]
+                        + [interp_ent[key][i] for key, _, _, _ in series]
                     )
             print(f"wrote {csv_path}")
         else:
@@ -428,35 +584,34 @@ def plot_per_corruption_proxy_vs_accuracy(
             # empty, which reads as a bug rather than "there's no data".
             print(f"[{corruption}] no proxy log rows -- proxy overlay skipped "
                   f"(calibration_mode != proxy_weighted, or the proxy CSV wasn't found).")
-            ax_proxy.text(
+            ax_data.text(
                 0.5, 0.5, "no proxy data\n(calibration_mode != proxy_weighted)",
-                transform=ax_proxy.transAxes, ha="center", va="center",
+                transform=ax_data.transAxes, ha="center", va="center",
                 fontsize=9, color=C_MUTED, alpha=0.8, zorder=1,
             )
+            # No proxy series to share a scale with -- still adapt to
+            # accuracy's own range rather than a fixed [0, 1].
+            ax_data.set_ylim(*_adaptive_ylim(*acc_series.values()))
 
-        ax_proxy.set_ylabel("proxy score", color=C_MUTED)
-        ax_acc.set_ylabel("EMA accuracy")
-        ax_acc.set_ylim(-0.02, 1.02)
+        ax_data.set_ylabel("accuracy / proxy score")
         ax_ent.set_ylabel("EMA entropy (nats)", color=C_MUTED)
-        ax_proxy.set_xlabel("samples processed" if x_is_samples else "fraction of corruption stream elapsed")
-        ax_acc.set_title(f"Corruption {corruption}"
-            # f"{corruption} -- accuracy (right, solid bold EMA) vs. proxy score (left, dotted -- "
-            # f"faint raw / bold EMA) vs. entropy (far right, dash-dot EMA) -- window={ema_window}",
+        ax_ent.set_xlabel("samples processed" if x_is_samples else "fraction of corruption stream elapsed")
+        ax_ent.set_title(f"Corruption {corruption}"
+            # f"{corruption} -- accuracy/proxy score (right, solid/dotted bold EMA) vs. "
+            # f"entropy (left, dash-dot EMA) -- window={ema_window}",
             # fontsize=10,
         )
-        ax_proxy.grid(True, alpha=0.4, lw=0.5)
+        ax_ent.grid(True, alpha=0.4, lw=0.5)
 
-        # Below the plot (not "lower left" etc.) -- with 6 series (2 proxy +
-        # 2 accuracy + 2 entropy) any in-axes corner risks covering real
-        # data, and the accuracy lines in particular sit in a narrow band
-        # that a corner legend keeps landing on.
-        lines_proxy, labels_proxy = ax_proxy.get_legend_handles_labels()
-        lines_acc, labels_acc = ax_acc.get_legend_handles_labels()
+        # Below the plot (not "lower left" etc.) -- with up to 4 series (2
+        # proxy + 2 accuracy, before even counting entropy) any in-axes
+        # corner legend risks covering real data.
+        lines_data, labels_data = ax_data.get_legend_handles_labels()
         lines_ent, labels_ent = ax_ent.get_legend_handles_labels()
-        ax_acc.legend(lines_proxy + lines_acc + lines_ent, labels_proxy + labels_acc + labels_ent,
-                      loc="upper center", bbox_to_anchor=(0.5, -0.14), fontsize=7.5, ncols=3)
+        ax_data.legend(lines_data + lines_ent, labels_data + labels_ent,
+                        loc="upper center", bbox_to_anchor=(0.5, -0.14), fontsize=7.5, ncols=3)
 
-        fig.subplots_adjust(right=0.80, bottom=0.24)
+        fig.subplots_adjust(bottom=0.24)
         out_path = out_dir / f"corruption_{safe_name}.png"
         fig.savefig(out_path, dpi=150)
         plt.close(fig)

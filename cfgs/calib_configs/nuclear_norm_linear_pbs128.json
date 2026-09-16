@@ -1,5 +1,5 @@
 {
-    "name": "nuclear_norm_identity_pbs128",
+    "name": "nuclear_norm_linear_pbs128",
     "calibration_mode": "proxy_weighted",
     "proxy_kind": "nuclear_norm",
     "calib_method": "linear",
