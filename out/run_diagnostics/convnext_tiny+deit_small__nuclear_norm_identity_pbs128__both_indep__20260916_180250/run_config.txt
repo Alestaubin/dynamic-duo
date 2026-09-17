@@ -1,0 +1,58 @@
+==============================================================================
+RUN CONFIGURATION
+==============================================================================
+out_dir: out/run_diagnostics/convnext_tiny+deit_small__nuclear_norm_identity_pbs128__both_indep__20260916_180250
+duo: LARGE=convnext_tiny (norm=LN)  SMALL=deit_small (norm=LN)
+mode=both_indep  steps=1
+adaptation_batch_size (cfg.BS)=64  workers=8
+num_samples=50000  fit_num_samples=5000  seed=0
+eval/corruptions=['brightness', 'contrast', 'defocus_blur', 'elastic_transform', 'fog', 'frost', 'gaussian_noise', 'glass_blur', 'impulse_noise', 'jpeg_compression', 'motion_blur', 'pixelate', 'shot_noise', 'snow', 'zoom_blur']
+eval/severities=[5]
+calibrator_dev/corruptions=['gaussian_blur', 'saturate', 'spatter', 'speckle_noise']
+calibrator_dev/severities=[5]
+large/optim={'METHOD': 'Adam', 'STEPS': 1, 'LR': 0.0001, 'BETA': 0.9, 'WD': 0.0}
+small/optim={'METHOD': 'Adam', 'STEPS': 1, 'LR': 0.0001, 'BETA': 0.9, 'WD': 0.0}
+
+------------------------------------------------------------------------------
+PRIMARY calib_config: 'nuclear_norm_identity_pbs128'
+------------------------------------------------------------------------------
+  name: nuclear_norm_identity_pbs128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5, 'q': 0.001, 'r': 0.1}
+  beta: 4.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proto_metric: cosine
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+COMPARE configs (3):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+[coca_ts]
+  name: coca_ts
+  calibration_mode: coca
+  coca_bs: 128
+
+[proxy_weighted_nuclear_norm]
+  name: proxy_weighted_nuclear_norm
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  proxy_batch_size: 128
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 0.01
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+==============================================================================

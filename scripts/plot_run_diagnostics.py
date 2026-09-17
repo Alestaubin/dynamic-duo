@@ -103,8 +103,11 @@ which ones a run covers, rather than passing them on the command line.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import io
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -137,6 +140,71 @@ _GATE_INTERNALS = [
     ("_cached_a_l", "gate/a_l"), ("_cached_a_s", "gate/a_s"),
     ("_cached_x_l", "gate/x_l"), ("_cached_x_s", "gate/x_s"),
 ]
+
+
+def _quiet_mode() -> None:
+    """Suppress noisy default output for THIS SCRIPT specifically, without
+    changing any shared module's own defaults for OTHER callers:
+
+    - dynamic_duo.py's own `logging.basicConfig(level=logging.INFO)` (an
+      import-time side effect -- see its module docstring) makes every
+      `logger.info(...)` call anywhere in the codebase print with a
+      timestamp. Rather than edit that shared file, raise the ROOT logger's
+      level here, in this process only, after the import has already
+      installed its handler.
+    - tqdm progress bars (run_duo's per-batch bar; fit_beta's dev-pass
+      collection bar in src/reliability/setup.py). Patched in two places:
+      dynamic_duo.tqdm (that module did `from tqdm import tqdm` at ITS OWN
+      import time, so the name is already bound there -- patching the tqdm
+      PACKAGE afterward wouldn't reach it) and the tqdm package's own
+      `tqdm` attribute (fit_beta does a LOCAL `from tqdm import tqdm`
+      INSIDE the function body, re-importing fresh on every call, so a
+      package-level patch made before it's called does reach it).
+
+    Called once at the top of a live run (see main()) -- --csv_dir-only
+    replotting/replay never touches the model/eval-loop code paths this
+    guards, so it isn't needed there.
+    """
+    logging.getLogger().setLevel(logging.WARNING)
+
+    import tqdm as _tqdm_pkg
+    _real_tqdm_cls = _tqdm_pkg.tqdm
+
+    def _silent_tqdm(*args, **kwargs):
+        kwargs["disable"] = True
+        return _real_tqdm_cls(*args, **kwargs)
+
+    _tqdm_pkg.tqdm = _silent_tqdm
+    import src.tta.dynamic_duo as _dd_mod
+    _dd_mod.tqdm = _silent_tqdm
+
+
+@contextlib.contextmanager
+def _quiet_stdout(label: str = ""):
+    """Suppress routine stdout chatter from a block of model/calibrator
+    construction code -- get_model's "Loading X..."/"Freezing..." banners,
+    JointFixedTS.load's "Loaded ... trained on ..." print, JointProxyWeighted's
+    ASCII-art config banner, fit_beta's grid-search announcement. These are
+    plain print() calls, not logging, so _quiet_mode's logger-level change
+    can't reach them.
+
+    Any captured line starting with "WARNING" (this codebase's own
+    consistent convention for a real, actionable fallback -- e.g. a missing
+    fixed_ts checkpoint silently defaulting to T=1.0) is still printed
+    afterward, optionally prefixed with `label` for context (e.g. which
+    --compare_configs entry it came from) -- so going quiet never means
+    silently losing something that actually matters. The rescue scan runs
+    in a `finally` so a captured WARNING is never lost even if the wrapped
+    code goes on to raise -- the original exception still propagates after.
+    """
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            yield
+    finally:
+        for line in buf.getvalue().splitlines():
+            if line.strip().upper().startswith("WARNING"):
+                print(f"[{label}] {line}" if label else line)
 
 _CALIB_METHODS = {"identity", "linear", "platt", "beta", "isotonic"}
 _FILTER_KINDS = {"none", "running_mean", "ema", "kalman"}
@@ -333,16 +401,15 @@ def _replay_compare_configs_from_cache(
 
     cfg = load_config(config_path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}  |  duo: {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']}  |  "
-          f"replaying against cached logits in: {cache_dir}")
-    large_model, large_preprocess = get_model(cfg["LARGE"]["NAME"])
-    small_model, small_preprocess = get_model(cfg["SMALL"]["NAME"])
+    with _quiet_stdout("model loading"):
+        large_model, large_preprocess = get_model(cfg["LARGE"]["NAME"])
+        small_model, small_preprocess = get_model(cfg["SMALL"]["NAME"])
     large_model, small_model = large_model.to(device), small_model.to(device)
 
     cmp_run_cfgs = _load_run_configs(compare_configs_path)
-    print(f"Loaded {len(cmp_run_cfgs)} compare-config(s) from {compare_configs_path} to replay")
 
     new_calibrators: list[tuple[str, object]] = []
+    used_cmp_run_cfgs: list[dict] = []
     for cmp_cfg in cmp_run_cfgs:
         if cmp_cfg["calibration_mode"] == "proxy_weighted" and cmp_cfg.get("proxy_kind") == "prototype":
             print(f"Skipping {cmp_cfg['name']!r}: proxy_kind='prototype' needs live features, "
@@ -350,12 +417,14 @@ def _replay_compare_configs_from_cache(
             continue
         if "fixed_ts_config" in cmp_cfg:
             cmp_cfg["fixed_ts_config"] = _resolve_fixed_ts_config(cmp_cfg["fixed_ts_config"])
-        calibrator = _build_calibrator(
-            cmp_cfg, cfg, large_model, large_preprocess, small_model, small_preprocess,
-            device, fit_num_samples, seed,
-            csv_path=str(csv_dir / f"compare_{cmp_cfg['name']}"), verbose=False,
-        )
+        with _quiet_stdout(cmp_cfg["name"]):
+            calibrator = _build_calibrator(
+                cmp_cfg, cfg, large_model, large_preprocess, small_model, small_preprocess,
+                device, fit_num_samples, seed,
+                csv_path=str(csv_dir / f"compare_{cmp_cfg['name']}"), verbose=False,
+            )
         new_calibrators.append((cmp_cfg["name"], calibrator))
+        used_cmp_run_cfgs.append(cmp_cfg)
 
     if not new_calibrators:
         print("No new calibrators to replay -- nothing to do.")
@@ -414,8 +483,72 @@ def _replay_compare_configs_from_cache(
     extra_series = extra_duo_series_from_batch_records(batch_records, main_label="duo")
     _write_plots(batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series)
 
+    # Appended (not overwritten) to the ORIGINAL run's own manifest -- see
+    # _format_run_manifest -- so run_config.txt stays a complete history of
+    # every calibrator ever added to this run's plots, not just the latest.
+    replay_note = [
+        "", "-" * 78,
+        f"REPLAY at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} -- added via --compare_configs "
+        f"{compare_configs_path} (fit_num_samples={fit_num_samples}, seed={seed}):",
+        "-" * 78,
+    ]
+    for cmp_cfg in used_cmp_run_cfgs:
+        replay_note.append(f"[{cmp_cfg['name']}]")
+        replay_note += [f"  {k}: {v}" for k, v in cmp_cfg.items()]
+    with (csv_dir / "run_config.txt").open("a") as f:
+        f.write("\n".join(replay_note) + "\n")
+
     print(f"\nReplayed {[n for n, _ in new_calibrators]} against cached logits and re-plotted "
           f"{csv_dir} -- no model forward passes over the eval set were needed.")
+
+
+def _format_run_manifest(
+    args: argparse.Namespace, run_cfg: dict, cfg: dict, cmp_run_cfgs: list[dict], out_dir: Path,
+) -> str:
+    """One comprehensive, human-readable block covering every hyperparameter
+    this run's plots depend on -- the duo (model names/norm/optimizer per
+    side), adaptation_batch_size (cfg['BS']) vs. each calibrator's own
+    proxy_batch_size (never the same knob -- see JointProxyWeighted's module
+    docstring), mode/steps/num_samples/fit_num_samples/seed, EVAL and
+    CALIBRATOR corruptions/severities, the PRIMARY calib_config's dict
+    verbatim, and every --compare_configs entry's dict verbatim (fixed_ts_
+    config already resolved to its actual path-or-None by the time this is
+    called -- see _run/main).
+
+    Printed once at the start of a run (see _run) AND saved to
+    out_dir/run_config.txt -- one call builds both, so the two can never
+    drift apart the way a separately-maintained log message and file would.
+    """
+    lines = [
+        "=" * 78,
+        "RUN CONFIGURATION",
+        "=" * 78,
+        f"out_dir: {out_dir}",
+        f"duo: LARGE={cfg['LARGE']['NAME']} (norm={cfg['LARGE']['NORM']})  "
+        f"SMALL={cfg['SMALL']['NAME']} (norm={cfg['SMALL']['NORM']})",
+        f"mode={args.mode}  steps={args.steps}",
+        f"adaptation_batch_size (cfg.BS)={cfg['BS']}  workers={cfg['WORKERS']}",
+        f"num_samples={args.num_samples}  fit_num_samples={args.fit_num_samples}  seed={args.seed}",
+        f"eval/corruptions={cfg['EVAL']['CORRUPTIONS']}",
+        f"eval/severities={cfg['EVAL']['SEVERITIES']}",
+        f"calibrator_dev/corruptions={cfg.get('CALIBRATOR', {}).get('CORRUPTIONS')}",
+        f"calibrator_dev/severities={cfg.get('CALIBRATOR', {}).get('SEVERITIES')}",
+        f"large/optim={cfg['LARGE']['OPTIM']}",
+        f"small/optim={cfg['SMALL']['OPTIM']}",
+        "",
+        "-" * 78,
+        f"PRIMARY calib_config: {run_cfg['name']!r}",
+        "-" * 78,
+    ]
+    lines += [f"  {k}: {v}" for k, v in run_cfg.items()]
+    if cmp_run_cfgs:
+        lines += ["", "-" * 78, f"COMPARE configs ({len(cmp_run_cfgs)}):", "-" * 78]
+        for cmp_cfg in cmp_run_cfgs:
+            lines.append(f"[{cmp_cfg['name']}]")
+            lines += [f"  {k}: {v}" for k, v in cmp_cfg.items()]
+            lines.append("")
+    lines.append("=" * 78)
+    return "\n".join(lines)
 
 
 def _wandb_config(args: argparse.Namespace, run_cfg: dict, cfg: dict) -> dict:
@@ -447,6 +580,7 @@ def _make_wandb_run(args: argparse.Namespace, run_cfg: dict, cfg: dict, run_name
         project=args.wandb_project, name=run_name, group=group,
         tags=[cfg["LARGE"]["NAME"], cfg["SMALL"]["NAME"], run_cfg["calibration_mode"], args.mode],
         config=_wandb_config(args, run_cfg, cfg),
+        settings=wandb.Settings(silent=True),  # suppress wandb's own console chatter
     )
 
 
@@ -454,11 +588,10 @@ def _run(
     args: argparse.Namespace, run_cfg: dict, cfg: dict, out_dir: Path, run_name: str, wandb_run,
 ) -> tuple[list[dict], list[dict], list[dict], list, bool, bool]:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}  |  duo: {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']}  |  "
-          f"calib_config: {run_cfg['name']!r} ({run_cfg['calibration_mode']})  |  out_dir: {out_dir}")
 
-    large_model, large_preprocess = get_model(cfg["LARGE"]["NAME"])
-    small_model, small_preprocess = get_model(cfg["SMALL"]["NAME"])
+    with _quiet_stdout("model loading"):
+        large_model, large_preprocess = get_model(cfg["LARGE"]["NAME"])
+        small_model, small_preprocess = get_model(cfg["SMALL"]["NAME"])
     large_model, small_model = large_model.to(device), small_model.to(device)
 
     # --cache_logits: one file per COMPLETED corruption under out_dir/
@@ -487,10 +620,11 @@ def _run(
     # fit_beta=true run_cfg re-ran its ENTIRE dev pass at eval-sized
     # num_samples for no benefit (e.g. 50000 samples x 4 dev corruptions to
     # grid-search 7 beta scalars).
-    calibrator = _build_calibrator(
-        run_cfg, cfg, large_model, large_preprocess, small_model, small_preprocess,
-        device, args.fit_num_samples, args.seed, csv_path=str(out_dir / "proxy_log"), verbose=True,
-    )
+    with _quiet_stdout(run_cfg["name"]):
+        calibrator = _build_calibrator(
+            run_cfg, cfg, large_model, large_preprocess, small_model, small_preprocess,
+            device, args.fit_num_samples, args.seed, csv_path=str(out_dir / "proxy_log"), verbose=False,
+        )
     # JointProxyWeighted appends its own timestamp suffix to the csv_path
     # given above and writes to it incrementally as the run progresses (see
     # _on_corruption_end below) -- so this path is fixed for the whole run
@@ -514,21 +648,26 @@ def _run(
     # several fit_beta=true entries makes this decoupling matter even more,
     # since each one otherwise re-ran its own full-sized dev pass.
     compare_calibrators: list[tuple[str, object]] = []
+    cmp_run_cfgs: list[dict] = []
     if args.compare_configs:
         cmp_run_cfgs = _load_run_configs(args.compare_configs)
-        print(f"Loaded {len(cmp_run_cfgs)} compare-config(s) from {args.compare_configs}")
         for cmp_cfg in cmp_run_cfgs:
             if "fixed_ts_config" in cmp_cfg:
                 cmp_cfg["fixed_ts_config"] = _resolve_fixed_ts_config(cmp_cfg["fixed_ts_config"])
-            cmp_calibrator = _build_calibrator(
-                cmp_cfg, cfg, large_model, large_preprocess, small_model, small_preprocess,
-                device, args.fit_num_samples, args.seed,
-                csv_path=str(out_dir / f"compare_{cmp_cfg['name']}"), verbose=False,
-            )
+            with _quiet_stdout(cmp_cfg["name"]):
+                cmp_calibrator = _build_calibrator(
+                    cmp_cfg, cfg, large_model, large_preprocess, small_model, small_preprocess,
+                    device, args.fit_num_samples, args.seed,
+                    csv_path=str(out_dir / f"compare_{cmp_cfg['name']}"), verbose=False,
+                )
             if (cmp_cfg["calibration_mode"] == "proxy_weighted"
                     and getattr(cmp_calibrator, "proxy_kind", None) == "prototype"):
                 cmp_calibrator.register_hooks(large_model, small_model)
             compare_calibrators.append((cmp_cfg["name"], cmp_calibrator))
+
+    manifest = _format_run_manifest(args, run_cfg, cfg, cmp_run_cfgs, out_dir)
+    print(manifest)
+    (out_dir / "run_config.txt").write_text(manifest + "\n")
 
     duo = setup_duo(
         large=large_model, large_preprocess=large_preprocess,
@@ -634,17 +773,21 @@ def _run(
                 "z_s": torch.cat(cache_buf["z_s"]),
                 "labels": torch.cat(cache_buf["labels"]),
             }, cache_file)
-            print(f"[cache_logits] wrote {cache_file}")
 
         if proxy_csv_path is not None and Path(proxy_csv_path).exists():
             with Path(proxy_csv_path).open() as f:
                 proxy_rows = list(csv.DictReader(f))
 
-        has_batch_plot, has_proxy_plot = _write_plots(
-            batch_records, corruption_boundaries, proxy_rows, out_dir, args.ema_window,
-            extra_series,
-        )
-        print(f"Diagnostics through {corruption}/s{severity} written to {out_dir}")
+        # Quiet: _write_plots (re)writes EVERY plot/CSV seen so far, called
+        # after EVERY corruption -- its own per-file "wrote ..." lines would
+        # otherwise dominate the log with a growing, mostly-redundant flood.
+        # evaluate_dynamic_duo's own "{corruption}/s{severity}: duo=... "
+        # line (unaffected by this) is this run's per-corruption heartbeat.
+        with _quiet_stdout("plots"):
+            has_batch_plot, has_proxy_plot = _write_plots(
+                batch_records, corruption_boundaries, proxy_rows, out_dir, args.ema_window,
+                extra_series,
+            )
 
     results_rows = evaluate_dynamic_duo(
         duo, cfg, num_samples=args.num_samples, seed=args.seed,
@@ -793,6 +936,7 @@ def main() -> None:
                     "ungrouped (a standalone run).",
     )
     args = p.parse_args()
+    _quiet_mode()
 
     if args.csv_dir is not None:
         csv_dir = Path(args.csv_dir)

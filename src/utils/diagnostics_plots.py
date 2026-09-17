@@ -549,12 +549,21 @@ def plot_per_corruption_proxy_vs_accuracy(
 
     written: list[Path] = []
     for corruption, rows in corruptions.items():
-        # Two axes, not three: proxy score and accuracy now share one scale
-        # (see _adaptive_ylim below), so they share one axis (right) instead
-        # of each getting its own. Entropy (nats -- not on the same [~0, 1]
-        # scale as the other two) keeps the other axis (left).
-        fig, ax_ent = plt.subplots(figsize=(10, 5))
+        # Two DATA axes, not three: proxy score and accuracy now share one
+        # scale (see _adaptive_ylim below), so they share one axis (right)
+        # instead of each getting its own. Entropy (nats -- not on the same
+        # [~0, 1] scale as the other two) keeps the other axis (left). A
+        # third, narrow sidebar axis (ax_info, no ticks/spines) holds the
+        # avg-accuracy tag OUTSIDE the plotting area -- with the main duo
+        # plus every --compare_configs entry now also drawn here (see
+        # extra_series), that tag grew to 7+ stacked lines and started
+        # covering real data lines when it lived inside ax_data itself.
+        fig = plt.figure(figsize=(13, 5))
+        gs = fig.add_gridspec(1, 2, width_ratios=[3.3, 1], wspace=0.4)
+        ax_ent = fig.add_subplot(gs[0, 0])
         ax_data = ax_ent.twinx()
+        ax_info = fig.add_subplot(gs[0, 1])
+        ax_info.axis("off")
 
         n = len(rows)
         x_acc = _cumulative_samples(rows)
@@ -583,19 +592,20 @@ def plot_per_corruption_proxy_vs_accuracy(
                          alpha=0.9, label=f"{label} (duo, EMA)", zorder=4)
 
         # Overall average accuracy tag per series (plain mean over this
-        # corruption's rows, not the EMA's tail value) -- stacked bottom-right
-        # in gray (a reference number, not another data series, so it
-        # deliberately doesn't compete with the series' own line colors).
+        # corruption's rows, not the EMA's tail value) -- in the sidebar
+        # (ax_info), OUTSIDE the plot's own data area, so it never covers a
+        # real line no matter how many series (independent models + main
+        # duo + every --compare_configs entry) are stacked into it.
         avg_acc_lines = [f"{label} avg acc: {avg_acc[key]:.3f}" for key, _, label, _ in series]
         avg_acc_lines += [
             f"{label} (duo) avg acc: {float(np.mean([r[row_key] for r in rows])):.3f}"
             for row_key, _, label in extra_series
         ]
-        ax_data.text(
-            0.985, 0.03, "\n".join(avg_acc_lines),
-            transform=ax_data.transAxes, ha="right", va="bottom", fontsize=8,
-            color=C_MUTED, fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.3", fc=C_SURFACE, ec=C_MUTED, alpha=0.85),
+        ax_info.text(
+            0.02, 0.98, "avg accuracy\n(this corruption)\n\n" + "\n".join(avg_acc_lines),
+            transform=ax_info.transAxes, ha="left", va="top", fontsize=8,
+            color=C_MUTED, fontweight="bold", wrap=True,
+            bbox=dict(boxstyle="round,pad=0.4", fc=C_SURFACE, ec=C_MUTED, alpha=0.85),
             zorder=6,
         )
 
@@ -690,7 +700,7 @@ def plot_per_corruption_proxy_vs_accuracy(
         ax_data.legend(lines_data + lines_ent, labels_data + labels_ent,
                         loc="upper center", bbox_to_anchor=(0.5, -0.14), fontsize=7.5, ncols=3)
 
-        fig.subplots_adjust(bottom=0.24)
+        fig.subplots_adjust(bottom=0.24, left=0.07, right=0.98, top=0.92)
         out_path = out_dir / f"corruption_{safe_name}.png"
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
