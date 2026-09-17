@@ -1,0 +1,19 @@
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-17 13:11:39 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[proxy_weighted_nuclear_norm]
+  name: proxy_weighted_nuclear_norm
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5, 'q': 0.001, 'r': 0.1}
+  beta: 4.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proto_metric: cosine
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
