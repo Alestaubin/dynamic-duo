@@ -77,13 +77,48 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap, to_hex
 
-# Palette (dataviz skill's validated categorical slots 1/2/7 -- blue/orange
-# for large/small identity everywhere, violet for the gate weight w_l so it
-# never collides with a model color).
-C_LARGE = "#2a78d6"
-C_SMALL = "#eb6834"
-C_GATE = "#4a3aa7"
+# MATLAB's "parula" colormap, reconstructed from its standard 64-point control
+# table (matplotlib has no built-in "parula") -- dark blue/purple -> teal ->
+# green -> yellow. large/small/duo each sample one fixed point from it rather
+# than an arbitrary hand-picked hex, so the three stay a coherent low/mid/high
+# progression along one perceptually-graded map instead of three unrelated
+# categorical colors.
+_PARULA_STOPS = [
+    (0.2081, 0.1663, 0.5292), (0.2116, 0.1898, 0.5777), (0.2123, 0.2138, 0.6270),
+    (0.2081, 0.2386, 0.6771), (0.1959, 0.2645, 0.7279), (0.1707, 0.2919, 0.7792),
+    (0.1253, 0.3242, 0.8303), (0.0591, 0.3598, 0.8683), (0.0117, 0.3875, 0.8820),
+    (0.0060, 0.4086, 0.8828), (0.0165, 0.4266, 0.8786), (0.0329, 0.4430, 0.8720),
+    (0.0498, 0.4586, 0.8641), (0.0629, 0.4737, 0.8554), (0.0723, 0.4887, 0.8467),
+    (0.0779, 0.5040, 0.8384), (0.0793, 0.5200, 0.8312), (0.0749, 0.5375, 0.8263),
+    (0.0641, 0.5570, 0.8240), (0.0488, 0.5772, 0.8228), (0.0343, 0.5966, 0.8199),
+    (0.0265, 0.6137, 0.8135), (0.0239, 0.6287, 0.8038), (0.0231, 0.6418, 0.7913),
+    (0.0228, 0.6535, 0.7768), (0.0267, 0.6642, 0.7607), (0.0384, 0.6743, 0.7436),
+    (0.0590, 0.6838, 0.7254), (0.0843, 0.6928, 0.7062), (0.1133, 0.7015, 0.6859),
+    (0.1453, 0.7098, 0.6646), (0.1801, 0.7177, 0.6424), (0.2178, 0.7250, 0.6193),
+    (0.2586, 0.7317, 0.5954), (0.3022, 0.7376, 0.5712), (0.3482, 0.7424, 0.5473),
+    (0.3953, 0.7459, 0.5244), (0.4420, 0.7481, 0.5033), (0.4871, 0.7491, 0.4840),
+    (0.5300, 0.7491, 0.4661), (0.5709, 0.7485, 0.4494), (0.6099, 0.7473, 0.4337),
+    (0.6473, 0.7456, 0.4188), (0.6834, 0.7435, 0.4044), (0.7184, 0.7411, 0.3905),
+    (0.7525, 0.7384, 0.3768), (0.7858, 0.7356, 0.3633), (0.8185, 0.7327, 0.3498),
+    (0.8507, 0.7299, 0.3360), (0.8824, 0.7274, 0.3217), (0.9139, 0.7258, 0.3063),
+    (0.9449, 0.7261, 0.2886), (0.9739, 0.7314, 0.2666), (0.9938, 0.7455, 0.2403),
+    (0.9990, 0.7653, 0.2164), (0.9955, 0.7861, 0.1967), (0.9880, 0.8066, 0.1794),
+    (0.9789, 0.8271, 0.1633), (0.9697, 0.8481, 0.1475), (0.9626, 0.8705, 0.1309),
+    (0.9589, 0.8949, 0.1132), (0.9598, 0.9218, 0.0948), (0.9661, 0.9514, 0.0755),
+    (0.9763, 0.9831, 0.0538),
+]
+_PARULA = LinearSegmentedColormap.from_list("parula", _PARULA_STOPS, N=256)
+
+# large = cool/dark end, small = mid (teal-green), duo/gate = warm/bright end
+# -- also, deliberately, the plot's most OPAQUE line everywhere it appears
+# (see every alpha= below): duo is the thing every one of these plots exists
+# to judge, so it should read as the foreground signal, not one of three
+# equally-weighted lines.
+C_LARGE = to_hex(_PARULA(0.05))
+C_SMALL = to_hex(_PARULA(0.50))
+C_GATE = to_hex(_PARULA(0.85))  # gold, not pure yellow -- stays legible on the off-white C_SURFACE
 # Frozen (non-adapting) baseline overlay -- see scripts/run_tent.py's
 # --track_frozen. Deliberately a neutral gray rather than a categorical color:
 # it's a reference baseline, not a model identity that needs to stand out.
@@ -252,8 +287,8 @@ def plot_proxy_diagnostics(
 
     ax = axes[0]
     for vals, color, label in ((r_l, C_LARGE, "r_l"), (r_s, C_SMALL, "r_s")):
-        ax.plot(x, vals, color=color, lw=0.8, alpha=0.30, zorder=2)
-        ax.plot(x, _ema(vals, ema_window, reset_idxs), color=color, lw=2.0, alpha=0.95,
+        ax.plot(x, vals, color=color, lw=0.8, alpha=0.18, zorder=2)
+        ax.plot(x, _ema(vals, ema_window, reset_idxs), color=color, lw=2.0, alpha=0.6,
                  label=f"{label} (EMA proxy score)", zorder=3)
     ax.set_ylabel("proxy score")
     ax.grid(True, alpha=0.5, lw=0.5)
@@ -267,14 +302,14 @@ def plot_proxy_diagnostics(
     _mark_corruption_boundaries(ax, boundaries, len(proxy_rows))
 
     ax = axes[1]
-    ax.plot(x, w_l, color=C_GATE, lw=0.8, alpha=0.30, zorder=2)
-    ax.plot(x, _ema(w_l, ema_window, reset_idxs), color=C_GATE, lw=2.0,
+    ax.plot(x, w_l, color=C_GATE, lw=0.8, alpha=0.35, zorder=2)
+    ax.plot(x, _ema(w_l, ema_window, reset_idxs), color=C_GATE, lw=2.2, alpha=1.0,
              label="w_l (EMA gate weight on large model)", zorder=3)
     ax.axhline(0.5, color=C_MUTED, lw=0.8, ls=":", alpha=0.7, zorder=1)
     for vals, color, ls, label in (
         (acc_l, C_LARGE, "--", "acc_l"), (acc_s, C_SMALL, "--", "acc_s"),
     ):
-        ax.plot(x, _ema(vals, ema_window, reset_idxs), color=color, lw=1.2, ls=ls, alpha=0.85,
+        ax.plot(x, _ema(vals, ema_window, reset_idxs), color=color, lw=1.2, ls=ls, alpha=0.5,
                  label=f"{label} (EMA, this proxy batch)")
     ax.set_ylim(-0.02, 1.02)
     ax.set_ylabel("weight / accuracy [0, 1]")
@@ -357,7 +392,8 @@ _CMP_ACC_RE = re.compile(r"^cmp_(.+)_acc$")
 
 def extra_duo_series_from_batch_records(
     batch_records: list[dict], main_label: str | None = None,
-) -> list[tuple[str, str, str]]:
+    calib_mode_by_name: dict[str, str] | None = None,
+) -> list[tuple[str, str, str, str | None]]:
     """Reconstruct plot_per_corruption_proxy_vs_accuracy's `extra_series` from
     a REPLAYED batch_diagnostics.csv (see scripts/plot_run_diagnostics.py's
     --csv_dir) -- cmp_<name>_acc columns (one per --compare_configs entry,
@@ -368,15 +404,27 @@ def extra_duo_series_from_batch_records(
     docstring for why it's opt-in everywhere else). Column order (not an
     alphabetical resort) drives color order via EXTRA_SERIES_PALETTE, so
     replotting from disk assigns the same colors the live run used.
+
+    calib_mode_by_name (optional): maps each entry's label/name to its
+    calibration_mode ("proxy_weighted", "fixed_ts", ...), threaded through as
+    each tuple's 4th element -- see extra_series' own docstring for how
+    plot_per_corruption_proxy_vs_accuracy uses it. A caller with no run_cfg
+    dicts on hand (e.g. a plain --csv_dir replot with no --compare_configs)
+    can omit this; every entry's mode is then None, which draws as "not
+    proxy_weighted" (thin/faint) -- correct as a default even when wrong,
+    since there's no way to recover the original calibration_mode from
+    batch_diagnostics.csv's column names alone.
     """
     if not batch_records:
         return []
-    out: list[tuple[str, str, str]] = []
+    calib_mode_by_name = calib_mode_by_name or {}
+    out: list[tuple[str, str, str, str | None]] = []
     if main_label is not None and "duo_acc" in batch_records[0]:
-        out.append(("duo_acc", C_GATE, main_label))
+        out.append(("duo_acc", C_GATE, main_label, calib_mode_by_name.get(main_label)))
     names = [m.group(1) for k in batch_records[0] if (m := _CMP_ACC_RE.match(k))]
     for i, name in enumerate(names):
-        out.append((f"cmp_{name}_acc", EXTRA_SERIES_PALETTE[i % len(EXTRA_SERIES_PALETTE)], name))
+        out.append((f"cmp_{name}_acc", EXTRA_SERIES_PALETTE[i % len(EXTRA_SERIES_PALETTE)], name,
+                    calib_mode_by_name.get(name)))
     return out
 
 
@@ -486,12 +534,83 @@ def plot_proxy_pbs_comparison(
     return written
 
 
+def plot_per_corruption_gate_weight(
+    proxy_rows: list[dict], out_dir: Path, ema_window: int = DEFAULT_EMA_WINDOW,
+) -> list[Path]:
+    """One figure per corruption: the gate weight w_l JointProxyWeighted
+    actually assigned the large model (EMA, solid) against each model's TRUE
+    accuracy over that same proxy batch (acc_l/acc_s, EMA, dashed) -- the
+    direct "is the gate putting weight where the accuracy actually is" check,
+    zoomed to one corruption instead of plot_proxy_diagnostics' whole-run,
+    all-corruptions-concatenated view.
+
+    Reads proxy_rows only (not batch_records): w_l/acc_l/acc_s are computed
+    once per PROXY batch (see JointProxyWeighted._flush_bucket and the
+    proxy_batch_size gotcha in CLAUDE.md), the natural granularity for "did
+    the gate move when it should have" -- a per-adaptation-batch view would
+    just repeat the same w_l between refreshes whenever proxy_batch_size >
+    the adaptation batch size. No-op (returns []) for a non-proxy_weighted
+    run, same as plot_proxy_diagnostics.
+
+    All three series already live in [0, 1] (a weight and two accuracies),
+    so unlike plot_per_corruption_proxy_vs_accuracy they share one axis and a
+    fixed range instead of an adaptive one -- a real w_l swing is already
+    visible at that scale.
+    """
+    if not proxy_rows:
+        print("plot_per_corruption_gate_weight: no proxy log rows (calibration_mode != "
+              "proxy_weighted) -- skipping.")
+        return []
+
+    by_corruption: dict[str, list[dict]] = {}
+    for r in proxy_rows:
+        by_corruption.setdefault(r["corruption"], []).append(r)
+
+    written: list[Path] = []
+    for corruption, rows in by_corruption.items():
+        w_l = [float(r["w_l"]) for r in rows]
+        acc_l = [float(r["acc_l"]) for r in rows]
+        acc_s = [float(r["acc_s"]) for r in rows]
+        n = len(rows)
+        x = _cumulative_samples(rows)
+        x_is_samples = x is not None
+        if x is None:
+            x = [i / (n - 1) for i in range(n)] if n > 1 else [0.0]
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(x, w_l, color=C_GATE, lw=0.8, alpha=0.35, zorder=2)
+        ax.plot(x, _ema(w_l, ema_window), color=C_GATE, lw=2.4, alpha=1.0,
+                 label="w_l (EMA gate weight on large model)", zorder=3)
+        ax.axhline(0.5, color=C_MUTED, lw=0.8, ls=":", alpha=0.7, zorder=1)
+        for vals, color, label in ((acc_l, C_LARGE, "large"), (acc_s, C_SMALL, "small")):
+            ax.plot(x, vals, color=color, lw=0.8, alpha=0.15, zorder=2)
+            ax.plot(x, _ema(vals, ema_window), color=color, lw=1.4, ls="--", alpha=0.5,
+                     label=f"{label} acc (EMA, this proxy batch)", zorder=3)
+        ax.set_ylim(-0.02, 1.02)
+        ax.set_ylabel("gate weight / accuracy [0, 1]")
+        ax.set_xlabel("samples processed" if x_is_samples else "fraction of corruption stream elapsed")
+        ax.set_title(f"Corruption {corruption} -- gate weight vs. true accuracy")
+        ax.grid(True, alpha=0.4, lw=0.5)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.14), fontsize=8, ncols=3)
+
+        fig.subplots_adjust(bottom=0.22, left=0.08, right=0.97, top=0.92)
+        safe_name = corruption.replace("/", "_")
+        out_path = out_dir / f"gate_weight_{safe_name}.png"
+        fig.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"wrote {out_path}")
+        written.append(out_path)
+
+    return written
+
+
 def plot_per_corruption_proxy_vs_accuracy(
     batch_records: list[dict], proxy_rows: list[dict], out_dir: Path,
     ema_window: int = DEFAULT_EMA_WINDOW,
     series: list[tuple[str, str, str, float]] | None = None,
     proxy_series: list[tuple[str, str, str]] | None = None,
-    extra_series: list[tuple[str, str, str]] | None = None,
+    extra_series: list[tuple[str, str, str, str | None]] | None = None,
+    show_gate_weight: bool = False,
 ) -> list[Path]:
     """One figure per corruption, two axes: EMA-smoothed accuracy for
     large/small/duo (bold) and the raw proxy scores r_l/r_s (light, EMA
@@ -502,15 +621,32 @@ def plot_per_corruption_proxy_vs_accuracy(
     two). Each series' plain overall average accuracy is tagged bottom-right
     in gray.
 
-    extra_series, if given, is a list of (row_key, color, label) -- one
-    dashed accuracy-only line (no entropy) per named "calibrated duo",
-    reading batch_records[row_key] directly (unlike `series`, whose entries
-    are a prefix combined with "_acc"/"_ent") -- see
+    show_gate_weight (opt-in, off by default -- see
+    scripts/plot_run_diagnostics.py's --show_gate_weight): overlays w_l, the
+    gate weight the MAIN duo's own JointProxyWeighted calibrator actually
+    assigned the large model (proxy_rows, same source as
+    plot_per_corruption_gate_weight, NOT any --compare_configs alternative),
+    as a faint gray line on its OWN third y-axis -- unlike everything else on
+    this figure, w_l isn't an accuracy or a proxy score, so it doesn't belong
+    sharing either existing axis' scale. Silently skipped (no third axis
+    drawn) for a corruption with no proxy rows or a non-proxy_weighted run.
+
+    extra_series, if given, is a list of (row_key, color, label,
+    calibration_mode) -- one accuracy-only line (no entropy) per named
+    "calibrated duo", reading batch_records[row_key] directly (unlike
+    `series`, whose entries are a prefix combined with "_acc"/"_ent") -- see
     scripts/plot_run_diagnostics.py's --compare_configs and
     extra_duo_series_from_batch_records. Each also gets an avg-accuracy tag
     appended to the same bottom-right text block as `series`, and is folded
     into the shared adaptive y-range and the per-corruption CSV export
     alongside `series`.
+
+    calibration_mode (the tuple's 4th element, possibly None if unknown --
+    see extra_duo_series_from_batch_records) drives that line's own width/
+    alpha: "proxy_weighted" draws bold and fully opaque (lw=2.0, alpha=1.0)
+    -- the method actually under test -- anything else (a fixed_ts/coca_ts/
+    oracle_ts/optimal_w_oracle baseline, or an unknown mode) draws thin and
+    faint (lw=1.2, alpha=0.5) as a reference line, not the main subject.
 
     batch_records (one row per adaptation batch) and proxy_rows (one row per
     proxy batch) can have different counts within the same corruption --
@@ -576,20 +712,27 @@ def plot_per_corruption_proxy_vs_accuracy(
                       for key, _, _, _ in series}
         avg_acc = {key: float(np.mean([r[f"{key}_acc"] for r in rows])) for key, _, _, _ in series}
         for key, color, label, lw_scale in series:
-            ax_data.plot(x_acc, acc_series[key], color=color, lw=2.2 * lw_scale,
-                         alpha=0.95, label=f"{label} acc (EMA)", zorder=3)
+            ax_data.plot(x_acc, acc_series[key], color=color, lw=1.4 * lw_scale,ls=(0, (5, 5)),
+                         alpha=0.75, label=f"{label} acc (EMA)", zorder=6)
             ax_ent.plot(x_acc, ent_series[key], color=color, lw=1.4 * lw_scale, ls="-.",
-                        alpha=0.75, label=f"{label} entropy (EMA)", zorder=2)
+                        alpha=0.4, label=f"{label} entropy (EMA)", zorder=2)
 
-        # extra_series: accuracy-only, dashed -- visually distinct from the
-        # solid `series` accuracy lines and the dotted proxy overlay below,
-        # since these are a different KIND of comparison (calibrated duo
-        # outputs, not input models) sharing the same axis/scale.
+        # extra_series: accuracy-only -- a different KIND of comparison
+        # (calibrated duo outputs, not input models) sharing the same axis/
+        # scale as `series` and the proxy overlay below. Width/alpha are
+        # keyed off each entry's OWN calibration_mode (its 4th tuple element,
+        # see extra_series' own docstring), not whether it's "duo_acc" --
+        # this run's main --calib_config might not be proxy_weighted, and one
+        # of the --compare_configs alternatives might be, so the highlighting
+        # follows the METHOD, not which line happens to be the main duo.
         extra_acc_series = {row_key: _ema([r[row_key] for r in rows], ema_window)
-                             for row_key, _, _ in extra_series}
-        for row_key, color, label in extra_series:
-            ax_data.plot(x_acc, extra_acc_series[row_key], color=color, lw=2.0, ls="--",
-                         alpha=0.9, label=f"{label} (duo, EMA)", zorder=4)
+                             for row_key, _, _, _ in extra_series}
+        for row_key, color, label, calib_mode in extra_series:
+            is_proxy_weighted = calib_mode == "proxy_weighted"
+            ax_data.plot(x_acc, extra_acc_series[row_key], color=color,
+                         lw=2.0 if is_proxy_weighted else 1.2,
+                         alpha=1.0 if is_proxy_weighted else 0.5,
+                         label=f"{label} (duo, EMA)", zorder=5 if is_proxy_weighted else 4)
 
         # Overall average accuracy tag per series (plain mean over this
         # corruption's rows, not the EMA's tail value) -- in the sidebar
@@ -599,7 +742,7 @@ def plot_per_corruption_proxy_vs_accuracy(
         avg_acc_lines = [f"{label} avg acc: {avg_acc[key]:.3f}" for key, _, label, _ in series]
         avg_acc_lines += [
             f"{label} (duo) avg acc: {float(np.mean([r[row_key] for r in rows])):.3f}"
-            for row_key, _, label in extra_series
+            for row_key, _, label, _ in extra_series
         ]
         ax_info.text(
             0.02, 0.98, "avg accuracy\n(this corruption)\n\n" + "\n".join(avg_acc_lines),
@@ -611,6 +754,8 @@ def plot_per_corruption_proxy_vs_accuracy(
 
         safe_name = corruption.replace("/", "_")
         prows = proxy_by_corruption.get(corruption, [])
+        ax_gate = None
+        lines_gate, labels_gate = [], []
         if prows:
             m = len(prows)
             # Gated on x_is_samples (the ACCURACY series' own units), not
@@ -635,16 +780,40 @@ def plot_per_corruption_proxy_vs_accuracy(
             ))
 
             for pkey, color, label in proxy_series:
-                ax_data.plot(x_proxy, proxy_vals[pkey], color=color, lw=0.8, ls=":", alpha=0.25, zorder=1)
+                ax_data.plot(x_proxy, proxy_vals[pkey], color=color, lw=0.8, ls=":", alpha=0.15, zorder=1)
                 ax_data.plot(x_proxy, proxy_ema[pkey], color=color, lw=1.8, ls=":",
-                             alpha=0.9, label=f"{label} (proxy, EMA)", zorder=2)
+                             alpha=0.5, label=f"{label} (proxy, EMA)", zorder=2)
+
+            # --show_gate_weight: w_l on its OWN axis -- a weight isn't an
+            # accuracy or a proxy score, so it doesn't belong on ax_data's
+            # shared scale, and it isn't in nats like ax_ent's entropy either.
+            # A third spine, pushed out past ax_data's own right edge, keeps
+            # all three readable without overlapping ticks/labels.
+            if show_gate_weight and "w_l" in prows[0]:
+                w_l_vals = [float(r["w_l"]) for r in prows]
+                w_l_ema = _ema(w_l_vals, ema_window)
+                ax_gate = ax_ent.twinx()
+                ax_gate.spines["right"].set_position(("axes", 1.12))
+                ax_gate.set_frame_on(True)
+                ax_gate.patch.set_visible(False)
+                for spine in ax_gate.spines.values():
+                    spine.set_visible(False)
+                ax_gate.spines["right"].set_visible(True)
+                ax_gate.spines["right"].set_color(C_MUTED)
+                ax_gate.plot(x_proxy, w_l_vals, color=C_MUTED, lw=0.8, alpha=0.2, zorder=1)
+                ax_gate.plot(x_proxy, w_l_ema, color=C_MUTED, lw=1.6, alpha=0.55,
+                             label="w_l (EMA gate weight, main duo)", zorder=2)
+                ax_gate.set_ylim(-0.02, 1.02)
+                ax_gate.set_ylabel("gate weight w_l (main duo)", color=C_MUTED)
+                ax_gate.tick_params(axis="y", colors=C_MUTED)
+                lines_gate, labels_gate = ax_gate.get_legend_handles_labels()
 
             interp_acc = {key: np.interp(x_proxy, x_acc, acc_series[key]).tolist()
                           for key, _, _, _ in series}
             interp_ent = {key: np.interp(x_proxy, x_acc, ent_series[key]).tolist()
                           for key, _, _, _ in series}
             interp_extra = {row_key: np.interp(x_proxy, x_acc, extra_acc_series[row_key]).tolist()
-                             for row_key, _, _ in extra_series}
+                             for row_key, _, _, _ in extra_series}
             csv_path = out_dir / f"corruption_{safe_name}.csv"
             with csv_path.open("w", newline="") as f:
                 writer = csv.writer(f)
@@ -654,7 +823,7 @@ def plot_per_corruption_proxy_vs_accuracy(
                     + [f"{pkey}_ema" for pkey, _, _ in proxy_series]
                     + [f"{key}_acc_ema" for key, _, _, _ in series]
                     + [f"{key}_ent_ema" for key, _, _, _ in series]
-                    + [f"{label}_duo_acc_ema" for _, _, label in extra_series]
+                    + [f"{label}_duo_acc_ema" for _, _, label, _ in extra_series]
                 )
                 for i, t in enumerate(x_proxy):
                     writer.writerow(
@@ -663,7 +832,7 @@ def plot_per_corruption_proxy_vs_accuracy(
                         + [proxy_ema[pkey][i] for pkey, _, _ in proxy_series]
                         + [interp_acc[key][i] for key, _, _, _ in series]
                         + [interp_ent[key][i] for key, _, _, _ in series]
-                        + [interp_extra[row_key][i] for row_key, _, _ in extra_series]
+                        + [interp_extra[row_key][i] for row_key, _, _, _ in extra_series]
                     )
             print(f"wrote {csv_path}")
         else:
@@ -697,10 +866,13 @@ def plot_per_corruption_proxy_vs_accuracy(
         # corner legend risks covering real data.
         lines_data, labels_data = ax_data.get_legend_handles_labels()
         lines_ent, labels_ent = ax_ent.get_legend_handles_labels()
-        ax_data.legend(lines_data + lines_ent, labels_data + labels_ent,
+        ax_data.legend(lines_data + lines_ent + lines_gate, labels_data + labels_ent + labels_gate,
                         loc="upper center", bbox_to_anchor=(0.5, -0.14), fontsize=7.5, ncols=3)
 
-        fig.subplots_adjust(bottom=0.24, left=0.07, right=0.98, top=0.92)
+        # Narrower right margin when the gate-weight axis pushed a third
+        # spine out past ax_data's own -- otherwise its axis label is
+        # clipped by the figure edge.
+        fig.subplots_adjust(bottom=0.24, left=0.07, right=0.90 if ax_gate is not None else 0.98, top=0.92)
         out_path = out_dir / f"corruption_{safe_name}.png"
         fig.savefig(out_path, dpi=150)
         plt.close(fig)

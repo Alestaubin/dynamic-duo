@@ -124,6 +124,7 @@ from src.reliability.proxies.stats import PROXY_KINDS
 from src.calibrators.joint_proxy_weighted import JointProxyWeighted
 from src.utils.diagnostics_plots import (
     plot_batch_diagnostics, plot_proxy_diagnostics, plot_per_corruption_proxy_vs_accuracy,
+    plot_per_corruption_gate_weight,
     extra_duo_series_from_batch_records, DEFAULT_EMA_WINDOW, C_GATE, EXTRA_SERIES_PALETTE,
 )
 from scripts._cli import (
@@ -291,6 +292,36 @@ def _load_proxy_log_csv(csv_dir: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
+def _prune_stale_cmp_columns(
+    batch_records: list[dict], wanted_names: set[str], source_label: str,
+) -> list[str]:
+    """Drop any cmp_<name>_acc column already baked into `batch_records`
+    (from a PAST --compare_configs run on this same csv_dir) whose name isn't
+    in `wanted_names` -- batch_diagnostics.csv is the only place that column
+    list lives, and extra_duo_series_from_batch_records (which drives the
+    plot legend) just replays whatever cmp_* columns happen to be present, so
+    without this compare-config lines only ever accumulate across
+    invocations and a pruned/absent --compare_configs silently keeps
+    plotting ones you removed. `wanted_names` (the current --compare_configs
+    file's entries, or the empty set when --compare_configs wasn't given at
+    all) is the source of truth for what should be shown, never a
+    ever-growing union. Mutates batch_records in place; returns the dropped
+    names (empty if none were stale) for the caller to log."""
+    if not batch_records:
+        return []
+    stale_names = sorted({
+        name for k in batch_records[0]
+        if k.startswith("cmp_") and k.endswith("_acc")
+        and (name := k[len("cmp_"):-len("_acc")]) not in wanted_names
+    })
+    if stale_names:
+        print(f"Dropping stale compare-config column(s) not in {source_label}: {stale_names}")
+        for r in batch_records:
+            for name in stale_names:
+                del r[f"cmp_{name}_acc"]
+    return stale_names
+
+
 def _boundaries_from_batch_records(batch_records: list[dict]) -> list[dict]:
     """Recover corruption boundaries (see _run's on_corruption_start hook)
     from batch_records alone -- they aren't a column in batch_diagnostics.csv,
@@ -308,7 +339,8 @@ def _boundaries_from_batch_records(batch_records: list[dict]) -> list[dict]:
 def _write_plots(
     batch_records: list[dict], boundaries: list[dict], proxy_rows: list[dict],
     out_dir: Path, ema_window: int,
-    extra_series: list[tuple[str, str, str]] | None = None,
+    extra_series: list[tuple[str, str, str, str | None]] | None = None,
+    show_gate_weight: bool = False,
 ) -> tuple[bool, bool]:
     """Write every diagnostics artifact from whatever has been recorded SO
     FAR, overwriting what's already on disk -- called after every corruption
@@ -324,6 +356,10 @@ def _write_plots(
     which is the one place a "calibrated duo" comparison line makes sense --
     see plot_per_corruption_proxy_vs_accuracy's own docstring for why this
     isn't the default everywhere.
+
+    show_gate_weight (--show_gate_weight) likewise only affects the
+    per-corruption plot -- see plot_per_corruption_proxy_vs_accuracy's own
+    docstring.
     """
     has_batch_plot = False
     if batch_records:
@@ -337,7 +373,12 @@ def _write_plots(
     per_corruption_dir = out_dir / "per_corruption"
     per_corruption_dir.mkdir(parents=True, exist_ok=True)
     plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir,
-                                           ema_window=ema_window, extra_series=extra_series)
+                                           ema_window=ema_window, extra_series=extra_series,
+                                           show_gate_weight=show_gate_weight)
+    # gate_weight_<corruption>.png: w_l vs. true acc_l/acc_s, one per
+    # corruption -- a no-op (returns []) for non-proxy_weighted runs, same
+    # guard as plot_proxy_diagnostics above.
+    plot_per_corruption_gate_weight(proxy_rows, per_corruption_dir, ema_window=ema_window)
     return has_batch_plot, has_proxy_plot
 
 
@@ -406,20 +447,44 @@ def _replot_from_csv_dir(args: argparse.Namespace, csv_dir: Path, ema_window: in
     change (line styles, --ema_window) that doesn't need fresh model
     forward passes. Overwrites every PNG (and the per-corruption CSVs,
     which are themselves a plot-data export -- see
-    plot_per_corruption_proxy_vs_accuracy's docstring) already there."""
+    plot_per_corruption_proxy_vs_accuracy's docstring) already there. Called
+    with no --compare_configs, so any cmp_<name>_acc column left over from an
+    EARLIER --compare_configs replay on this csv_dir is dropped (see
+    _prune_stale_cmp_columns) -- a plain replot shows only this run's own
+    duo/large/small lines, never a comparison line you didn't ask for this
+    time."""
     batch_csv = csv_dir / "batch_diagnostics.csv"
     batch_records = _load_batch_diagnostics_csv(batch_csv) if batch_csv.exists() else []
     if not batch_records:
         print(f"No {batch_csv} -- nothing to plot.")
         return
+
+    # No --compare_configs given at all here -- the wanted set is empty, so
+    # ANY cmp_<name>_acc column baked in from an earlier --compare_configs
+    # replay on this csv_dir is stale and gets dropped (see
+    # _prune_stale_cmp_columns) rather than silently kept forever.
+    if _prune_stale_cmp_columns(batch_records, set(), "this invocation (no --compare_configs given)"):
+        with batch_csv.open("w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(batch_records[0].keys()))
+            writer.writeheader()
+            writer.writerows(batch_records)
+
     boundaries = _boundaries_from_batch_records(batch_records)
     proxy_rows = _load_proxy_log_csv(csv_dir)
     # No run_cfg available here to name the main duo line -- "duo" is a
     # generic stand-in; cmp_<name>_acc columns (if any) keep their own names.
-    extra_series = extra_duo_series_from_batch_records(batch_records, main_label="duo")
+    # --hide_duo_line: main_label=None makes extra_duo_series_from_batch_records
+    # skip the duo_acc entry entirely (see its own docstring). No
+    # calib_mode_by_name either -- a plain replot has no run_cfg dicts on
+    # hand, so every line (duo included) falls back to the "not
+    # proxy_weighted" thin/faint style regardless of its actual method.
+    extra_series = extra_duo_series_from_batch_records(
+        batch_records, main_label=None if args.hide_duo_line else "duo",
+    )
 
     has_batch_plot, has_proxy_plot = _write_plots(
         batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series,
+        show_gate_weight=args.show_gate_weight,
     )
 
     wandb_run = _make_replot_wandb_run(args, csv_dir)
@@ -439,7 +504,7 @@ def _replay_compare_configs_from_cache(
     run's plots WITHOUT rerunning the duo -- compare_configs_path's contents
     become the complete, exact set of cmp_<name>_acc lines plotted (any
     cmp_<name>_acc column from a PAST invocation whose name isn't in this file
-    is dropped -- see the stale_names block below), not a union accumulated
+    is dropped -- see _prune_stale_cmp_columns), not a union accumulated
     across every replay call. Valid because --compare_configs calibrators (see
     _run's _on_batch) only ever re-calibrate the SAME z_large/z_small a batch
     already produced -- if those were saved during the original run
@@ -514,16 +579,7 @@ def _replay_compare_configs_from_cache(
     # keeps plotting the ones you removed. compare_configs_path's contents are
     # the source of truth for what should be shown, not an ever-growing union.
     wanted_names = {cmp_cfg["name"] for cmp_cfg in cmp_run_cfgs}
-    stale_names = sorted({
-        name for k in batch_records[0]
-        if k.startswith("cmp_") and k.endswith("_acc")
-        and (name := k[len("cmp_"):-len("_acc")]) not in wanted_names
-    })
-    if stale_names:
-        print(f"Dropping stale compare-config column(s) not in {compare_configs_path}: {stale_names}")
-        for r in batch_records:
-            for name in stale_names:
-                del r[f"cmp_{name}_acc"]
+    _prune_stale_cmp_columns(batch_records, wanted_names, compare_configs_path)
 
     # Every row gets every new column, defaulted to NaN first, so the CSV
     # stays rectangular even for a corruption whose cache file is missing
@@ -575,9 +631,19 @@ def _replay_compare_configs_from_cache(
     print(f"Merged {len(new_calibrators)} new calibrator column(s) into {batch_csv}")
 
     proxy_rows = _load_proxy_log_csv(csv_dir)
-    extra_series = extra_duo_series_from_batch_records(batch_records, main_label="duo")
+    # calib_mode_by_name: from the --compare_configs file just loaded above,
+    # so THOSE lines get their real calibration_mode (bold/opaque if
+    # proxy_weighted -- see plot_per_corruption_proxy_vs_accuracy). The main
+    # duo's own calibration_mode still isn't known here (this replay path
+    # never reloads the original run's --calib_config), so "duo_acc" falls
+    # back to the thin/faint default regardless of what it actually was.
+    extra_series = extra_duo_series_from_batch_records(
+        batch_records, main_label=None if args.hide_duo_line else "duo",
+        calib_mode_by_name={c["name"]: c["calibration_mode"] for c in used_cmp_run_cfgs},
+    )
     has_batch_plot, has_proxy_plot = _write_plots(
         batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series,
+        show_gate_weight=args.show_gate_weight,
     )
 
     wandb_run = _make_replot_wandb_run(args, csv_dir, extra_tags=["compare_replay"])
@@ -779,13 +845,20 @@ def _run(
         cfg=cfg, steps=args.steps,
     )
 
-    # This run's own duo (always shown -- see the module docstring) plus one
-    # dashed line per --compare_configs entry, in the file's own order, from
-    # EXTRA_SERIES_PALETTE (cycled past 5 entries) -- fed to every
-    # per-corruption plot via _write_plots below.
-    extra_series: list[tuple[str, str, str]] = [("duo_acc", C_GATE, run_cfg["name"])]
+    # This run's own duo (shown by default -- see the module docstring --
+    # unless --hide_duo_line) plus one line per --compare_configs entry, in
+    # the file's own order, from EXTRA_SERIES_PALETTE (cycled past 5 entries)
+    # -- fed to every per-corruption plot via _write_plots below. Each tuple's
+    # 4th element (calibration_mode) is what plot_per_corruption_proxy_vs_
+    # accuracy uses to draw a proxy_weighted line bold/opaque and everything
+    # else thin/faint -- see that function's own docstring.
+    extra_series: list[tuple[str, str, str, str]] = (
+        [] if args.hide_duo_line else [("duo_acc", C_GATE, run_cfg["name"], run_cfg["calibration_mode"])]
+    )
     for i, (name, _) in enumerate(compare_calibrators):
-        extra_series.append((f"cmp_{name}_acc", EXTRA_SERIES_PALETTE[i % len(EXTRA_SERIES_PALETTE)], name))
+        cmp_cfg = next(c for c in cmp_run_cfgs if c["name"] == name)
+        extra_series.append((f"cmp_{name}_acc", EXTRA_SERIES_PALETTE[i % len(EXTRA_SERIES_PALETTE)], name,
+                              cmp_cfg["calibration_mode"]))
 
     batch_records: list[dict] = []
     corruption_boundaries: list[dict] = []
@@ -889,7 +962,7 @@ def _run(
         with _quiet_stdout("plots"):
             has_batch_plot, has_proxy_plot = _write_plots(
                 batch_records, corruption_boundaries, proxy_rows, out_dir, args.ema_window,
-                extra_series,
+                extra_series, show_gate_weight=args.show_gate_weight,
             )
 
     results_rows = evaluate_dynamic_duo(
@@ -1034,6 +1107,23 @@ def main() -> None:
                          "unrelated to a proxy_weighted calib_config's own 'filter_kind': 'ema' "
                          "gate-smoothing knob (Section 4), which affects the logged values "
                          "themselves, not just how they're plotted.")
+    p.add_argument("--show_gate_weight", action="store_true",
+                    help="Overlay w_l -- the gate weight the MAIN duo's own JointProxyWeighted "
+                         "calibrator assigned the large model (never a --compare_configs "
+                         "alternative) -- on every per-corruption plot (corruption_<name>.png), as "
+                         "a faint gray line on its own third y-axis. Off by default: this plot "
+                         "already has two axes (accuracy/proxy score, entropy), and w_l already "
+                         "gets its own dedicated plot (gate_weight_<name>.png, always written for "
+                         "proxy_weighted runs) -- this flag is for looking at the gate weight "
+                         "alongside accuracy/entropy/proxy score all on one figure instead. "
+                         "No-op for a non-proxy_weighted run or a corruption with no proxy rows.")
+    p.add_argument("--hide_duo_line", action="store_true",
+                    help="Omit this run's own main duo accuracy line (the 'duo_acc' dashed line, "
+                         "always this run's --calib_config calibrator, never a --compare_configs "
+                         "alternative) from every per-corruption plot (corruption_<name>.png). "
+                         "Shown by default. Any --compare_configs lines are unaffected -- this only "
+                         "hides the primary duo's own line, e.g. to compare --compare_configs "
+                         "alternatives against each other and the input models without it.")
 
     wandb_group_args = p.add_argument_group("wandb options")
     wandb_group_args.add_argument("--use_wandb", dest="use_wandb", action="store_true", default=True,
