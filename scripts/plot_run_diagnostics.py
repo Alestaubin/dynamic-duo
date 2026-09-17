@@ -68,15 +68,18 @@ and a --compare_configs file with several such entries multiplies that cost.
 
 --cache_logits (optional, off by default) saves every batch's z_large/
 z_small/labels to out_dir/logits_cache/ (one file per completed corruption).
-This is the ONLY thing that lets you add MORE calibrators to a run's plots
-LATER without rerunning the duo: pass --csv_dir <run's out_dir> together
+This is the ONLY thing that lets you change which calibrators a run's plots
+show LATER without rerunning the duo: pass --csv_dir <run's out_dir> together
 with --compare_configs (instead of --calib_config) and every listed
 calibrator is built fresh and replayed against those cached logits -- see
-_replay_compare_configs_from_cache. Zero model forward passes over the eval
-set either way; only a --fit_num_samples-sized dev pass if a calibrator
-needs fit_beta/a calib_map fit. Without --cache_logits on the original run,
-there's nothing to replay against and adding a calibrator later needs a
-full rerun with an updated --compare_configs instead.
+_replay_compare_configs_from_cache. The --compare_configs file's contents
+become the COMPLETE set of compare-config lines plotted (any cmp_<name>_acc
+column from an earlier replay whose name isn't in the new file is dropped),
+not an ever-growing union across replay calls. Zero model forward passes
+over the eval set either way; only a --fit_num_samples-sized dev pass if a
+calibrator needs fit_beta/a calib_map fit. Without --cache_logits on the
+original run, there's nothing to replay against and changing a calibrator
+later needs a full rerun with an updated --compare_configs instead.
 
 Usage
 -----
@@ -338,7 +341,66 @@ def _write_plots(
     return has_batch_plot, has_proxy_plot
 
 
-def _replot_from_csv_dir(csv_dir: Path, ema_window: int) -> None:
+def _make_replot_wandb_run(args: argparse.Namespace, csv_dir: Path, extra_tags: list[str] | None = None):
+    """A wandb run for the --csv_dir (no live duo) paths -- _replot_from_csv_dir
+    and _replay_compare_configs_from_cache have no `cfg`/`run_cfg` the way a
+    live run's _make_wandb_run does, so the duo tag is parsed back out of
+    csv_dir's own name instead (see main()'s run_name construction: always
+    "<duo_tag>__<calib_name>__<mode>__<timestamp>")."""
+    if not args.use_wandb:
+        return None
+    duo_tag = csv_dir.name.split("__")[0]
+    group = f"{duo_tag}__{args.wandb_group}" if args.wandb_group else None
+    return wandb.init(
+        project=args.wandb_project,
+        name=f"{csv_dir.name}__replot_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        group=group,
+        tags=[duo_tag, "replot"] + (extra_tags or []),
+        settings=wandb.Settings(silent=True),
+    )
+
+
+def _log_replot_to_wandb(
+    wandb_run, batch_records: list[dict], proxy_rows: list[dict], out_dir: Path,
+    has_batch_plot: bool, has_proxy_plot: bool,
+) -> None:
+    """Log every batch record as ITS OWN wandb step (keyed by global_idx) so
+    every accuracy/NLL/entropy/cmp_<name>_acc column becomes its own line in
+    the W&B UI -- unlike the static PNGs _log_wandb_artifacts uploads (also
+    done here, for a quick-glance reference), a wandb line chart lets you
+    click legend entries to toggle individual series on/off, which is the
+    whole point of sending a --compare_configs replay to wandb instead of
+    only looking at the local PNG."""
+    for row in batch_records:
+        wandb_run.log(
+            {k: v for k, v in row.items() if k not in ("corruption", "global_idx")},
+            step=row["global_idx"],
+        )
+
+    media = {}
+    if has_batch_plot:
+        media["plots/batch_diagnostics"] = wandb.Image(str(out_dir / "batch_diagnostics.png"))
+    if has_proxy_plot:
+        media["plots/proxy_diagnostics"] = wandb.Image(str(out_dir / "proxy_diagnostics.png"))
+    if media:
+        wandb_run.log(media)
+
+    if proxy_rows:
+        # proxy_rows came back from csv.DictReader -- every value is still a
+        # str; cast back to int/float (except "corruption") so the table's
+        # columns are numeric/sortable/plottable, matching _log_wandb_artifacts.
+        _INT_FIELDS = {"n_refreshes", "n"}
+        columns = list(proxy_rows[0].keys())
+        table = wandb.Table(columns=columns)
+        for row in proxy_rows:
+            table.add_data(*[
+                row[c] if c == "corruption" else (int(row[c]) if c in _INT_FIELDS else float(row[c]))
+                for c in columns
+            ])
+        wandb_run.log({"proxy_diagnostics_table": table})
+
+
+def _replot_from_csv_dir(args: argparse.Namespace, csv_dir: Path, ema_window: int) -> None:
     """Re-run every plotting function against an existing run's own output
     directory instead of re-running the duo -- e.g. after a plotting-only
     change (line styles, --ema_window) that doesn't need fresh model
@@ -356,24 +418,36 @@ def _replot_from_csv_dir(csv_dir: Path, ema_window: int) -> None:
     # generic stand-in; cmp_<name>_acc columns (if any) keep their own names.
     extra_series = extra_duo_series_from_batch_records(batch_records, main_label="duo")
 
-    _write_plots(batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series)
+    has_batch_plot, has_proxy_plot = _write_plots(
+        batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series,
+    )
+
+    wandb_run = _make_replot_wandb_run(args, csv_dir)
+    if wandb_run is not None:
+        print(f"wandb run: {wandb_run.url}")
+        _log_replot_to_wandb(wandb_run, batch_records, proxy_rows, csv_dir, has_batch_plot, has_proxy_plot)
+        wandb_run.finish()
 
     print(f"\nRe-plotted from {csv_dir} (existing PNGs/per-corruption CSVs overwritten).")
 
 
 def _replay_compare_configs_from_cache(
-    csv_dir: Path, config_path: str, compare_configs_path: str,
+    args: argparse.Namespace, csv_dir: Path, config_path: str, compare_configs_path: str,
     fit_num_samples: int | None, seed: int | None, ema_window: int,
 ) -> None:
-    """Add MORE --compare_configs calibrators to an already-finished run's
-    plots WITHOUT rerunning the duo. Valid because --compare_configs
-    calibrators (see _run's _on_batch) only ever re-calibrate the SAME
-    z_large/z_small a batch already produced -- if those were saved during
-    the original run (--cache_logits, one file per COMPLETED corruption
-    under csv_dir/logits_cache/), a brand new calibrator can be built fresh
-    and replayed against them here with ZERO model forward passes over the
-    eval set (only a small --fit_num_samples-sized dev pass if it needs
-    fit_beta or a calib_map fit).
+    """(Re)build the --compare_configs calibrators shown on an already-finished
+    run's plots WITHOUT rerunning the duo -- compare_configs_path's contents
+    become the complete, exact set of cmp_<name>_acc lines plotted (any
+    cmp_<name>_acc column from a PAST invocation whose name isn't in this file
+    is dropped -- see the stale_names block below), not a union accumulated
+    across every replay call. Valid because --compare_configs calibrators (see
+    _run's _on_batch) only ever re-calibrate the SAME z_large/z_small a batch
+    already produced -- if those were saved during the original run
+    (--cache_logits, one file per COMPLETED corruption under
+    csv_dir/logits_cache/), a brand new calibrator can be built fresh and
+    replayed against them here with ZERO model forward passes over the eval
+    set (only a small --fit_num_samples-sized dev pass if it needs fit_beta or
+    a calib_map fit).
 
     Raises if csv_dir/logits_cache/ doesn't exist -- a run from before
     --cache_logits existed, or one that didn't pass it, has nothing to
@@ -430,6 +504,27 @@ def _replay_compare_configs_from_cache(
         print("No new calibrators to replay -- nothing to do.")
         return
 
+    # Drop any cmp_<name>_acc column left over from a PREVIOUS --compare_configs
+    # replay on this csv_dir whose name isn't in THIS file. batch_diagnostics.csv
+    # is the only place that column list lives, and extra_duo_series_from_
+    # batch_records (which drives the plot legend) just replays whatever cmp_*
+    # columns happen to be present -- without this, compare-config columns only
+    # ever accumulate across invocations and a pruned --compare_configs file
+    # (e.g. going from default.json's 6 entries down to just one) silently
+    # keeps plotting the ones you removed. compare_configs_path's contents are
+    # the source of truth for what should be shown, not an ever-growing union.
+    wanted_names = {cmp_cfg["name"] for cmp_cfg in cmp_run_cfgs}
+    stale_names = sorted({
+        name for k in batch_records[0]
+        if k.startswith("cmp_") and k.endswith("_acc")
+        and (name := k[len("cmp_"):-len("_acc")]) not in wanted_names
+    })
+    if stale_names:
+        print(f"Dropping stale compare-config column(s) not in {compare_configs_path}: {stale_names}")
+        for r in batch_records:
+            for name in stale_names:
+                del r[f"cmp_{name}_acc"]
+
     # Every row gets every new column, defaulted to NaN first, so the CSV
     # stays rectangular even for a corruption whose cache file is missing
     # (e.g. one from before --cache_logits was added mid-run, or a run
@@ -481,7 +576,15 @@ def _replay_compare_configs_from_cache(
 
     proxy_rows = _load_proxy_log_csv(csv_dir)
     extra_series = extra_duo_series_from_batch_records(batch_records, main_label="duo")
-    _write_plots(batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series)
+    has_batch_plot, has_proxy_plot = _write_plots(
+        batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series,
+    )
+
+    wandb_run = _make_replot_wandb_run(args, csv_dir, extra_tags=["compare_replay"])
+    if wandb_run is not None:
+        print(f"wandb run: {wandb_run.url}")
+        _log_replot_to_wandb(wandb_run, batch_records, proxy_rows, csv_dir, has_batch_plot, has_proxy_plot)
+        wandb_run.finish()
 
     # Appended (not overwritten) to the ORIGINAL run's own manifest -- see
     # _format_run_manifest -- so run_config.txt stays a complete history of
@@ -865,7 +968,12 @@ def main() -> None:
                          "--compare_configs is ALSO given, which instead replays those new "
                          "calibrators against that run's cached logits (requires the original "
                          "run to have used --cache_logits) and merges the new columns in before "
-                         "plotting -- see --compare_configs and _replay_compare_configs_from_cache.")
+                         "plotting -- see --compare_configs and _replay_compare_configs_from_cache. "
+                         "Also logs to wandb (respecting --use_wandb/--no_wandb/--wandb_project/"
+                         "--wandb_group below) as its own run: every batch record is logged at its "
+                         "own step so every accuracy/NLL/entropy/cmp_<name>_acc column becomes an "
+                         "interactive line you can toggle on/off in the W&B UI, plus the two PNGs "
+                         "and the proxy log as a Table for reference.")
     add_duo_config_arg(p)
     p.add_argument("--calib_config", type=str, default=None,
                     help="Path to a JSON file holding ONE run_cfg dict -- calibration_mode plus "
@@ -881,10 +989,13 @@ def main() -> None:
                          "this run's own duo accuracy and the two input models, as one dashed line "
                          "(plus an avg-accuracy tag) per calibrator in every per-corruption plot -- "
                          "see plot_per_corruption_proxy_vs_accuracy's extra_series. Optional. Also "
-                         "usable WITH --csv_dir (instead of --calib_config) to add these calibrators "
-                         "to an already-finished run's plots without rerunning the duo -- requires "
-                         "that run to have used --cache_logits; --config must point at the SAME "
-                         "duo config that run used (for model names + CALIBRATOR corruptions).")
+                         "usable WITH --csv_dir (instead of --calib_config) to (re)build the "
+                         "compare-config lines on an already-finished run's plots without rerunning "
+                         "the duo -- requires that run to have used --cache_logits; --config must "
+                         "point at the SAME duo config that run used (for model names + CALIBRATOR "
+                         "corruptions). This file's contents become the COMPLETE set of "
+                         "compare-config lines shown -- entries from an earlier --csv_dir replay "
+                         "that aren't in this file are dropped, not kept alongside the new ones.")
     p.add_argument("--cache_logits", action="store_true",
                     help="Save z_large/z_small/labels for every batch to out_dir/logits_cache/ "
                          "(one file per COMPLETED corruption). Lets a LATER invocation "
@@ -944,11 +1055,11 @@ def main() -> None:
             p.error(f"--csv_dir {csv_dir} is not a directory.")
         if args.compare_configs:
             _replay_compare_configs_from_cache(
-                csv_dir, args.config, args.compare_configs,
+                args, csv_dir, args.config, args.compare_configs,
                 args.fit_num_samples, args.seed, args.ema_window,
             )
         else:
-            _replot_from_csv_dir(csv_dir, args.ema_window)
+            _replot_from_csv_dir(args, csv_dir, args.ema_window)
         return
 
     if args.calib_config is None:
