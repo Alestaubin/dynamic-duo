@@ -124,7 +124,7 @@ from src.reliability.proxies.stats import PROXY_KINDS
 from src.calibrators.joint_proxy_weighted import JointProxyWeighted
 from src.utils.diagnostics_plots import (
     plot_batch_diagnostics, plot_proxy_diagnostics, plot_per_corruption_proxy_vs_accuracy,
-    plot_per_corruption_gate_weight,
+    plot_per_corruption_gate_weight, write_accuracy_latex_table,
     extra_duo_series_from_batch_records, DEFAULT_EMA_WINDOW, C_GATE, EXTRA_SERIES_PALETTE,
 )
 from scripts._cli import (
@@ -276,20 +276,42 @@ def _load_batch_diagnostics_csv(path: Path) -> list[dict]:
     return rows
 
 
-def _load_proxy_log_csv(csv_dir: Path) -> list[dict]:
-    """The proxy log's filename carries a timestamp suffix (JointProxyWeighted
-    appends one at construction) so it can't be located by a fixed name --
-    glob for it instead. Empty (not an error) when the run wasn't
-    calibration_mode=proxy_weighted, matching plot_proxy_diagnostics' own
-    graceful no-proxy-data handling."""
-    matches = sorted(csv_dir.glob("proxy_log_*.csv"))
+def _load_proxy_log_csv_by_prefix(csv_dir: Path, prefix: str) -> list[dict]:
+    """A JointProxyWeighted proxy log's filename carries a timestamp suffix
+    (appended at construction) so it can't be located by a fixed name --
+    glob for it instead. `prefix` is "proxy_log" for the MAIN calibrator's
+    own log, or "compare_<name>" for a --compare_configs entry's log (only
+    written when THAT entry's calibration_mode is proxy_weighted -- see
+    compare_calibrators._build_calibrator, which only passes csv_path
+    through in the proxy_weighted branch). Empty (not an error) when no such
+    file exists -- either the run/entry wasn't proxy_weighted, or (for a
+    --compare_configs entry replayed via --csv_dir) it predates this file
+    being written at all."""
+    matches = sorted(csv_dir.glob(f"{prefix}_*.csv"))
     if not matches:
         return []
     if len(matches) > 1:
-        print(f"WARNING: {len(matches)} proxy_log_*.csv files in {csv_dir}; "
+        print(f"WARNING: {len(matches)} {prefix}_*.csv files in {csv_dir}; "
               f"using the most recent: {matches[-1].name}")
     with matches[-1].open() as f:
         return list(csv.DictReader(f))
+
+
+def _load_proxy_log_csv(csv_dir: Path) -> list[dict]:
+    return _load_proxy_log_csv_by_prefix(csv_dir, "proxy_log")
+
+
+def _load_compare_proxy_logs(csv_dir: Path, names: list[str]) -> dict[str, list[dict]]:
+    """One proxy log per --compare_configs entry NAME that turns out to be
+    proxy_weighted (see _load_proxy_log_csv_by_prefix) -- entries that
+    aren't (fixed_ts/coca/oracle_ts/optimal_w_oracle) simply have no
+    compare_<name>_*.csv file and are silently omitted from the result."""
+    result = {}
+    for name in names:
+        rows = _load_proxy_log_csv_by_prefix(csv_dir, f"compare_{name}")
+        if rows:
+            result[name] = rows
+    return result
 
 
 def _prune_stale_cmp_columns(
@@ -341,6 +363,9 @@ def _write_plots(
     out_dir: Path, ema_window: int,
     extra_series: list[tuple[str, str, str, str | None]] | None = None,
     show_gate_weight: bool = False,
+    duo_label: str = "duo",
+    compare_proxy_logs: dict[str, list[dict]] | None = None,
+    hide_duo_line: bool = False,
 ) -> tuple[bool, bool]:
     """Write every diagnostics artifact from whatever has been recorded SO
     FAR, overwriting what's already on disk -- called after every corruption
@@ -360,6 +385,29 @@ def _write_plots(
     show_gate_weight (--show_gate_weight) likewise only affects the
     per-corruption plot -- see plot_per_corruption_proxy_vs_accuracy's own
     docstring.
+
+    duo_label names the main duo's row in accuracy_table.tex (see
+    write_accuracy_latex_table) -- unlike extra_series, that table ALWAYS
+    includes the main duo's row regardless of --hide_duo_line (a plotting-
+    only declutter flag), so it needs its own label independent of whatever
+    extra_series happens to contain this call. It also names the main duo's
+    own line in gate_weight_<corruption>.png, when hide_duo_line doesn't
+    suppress it (see below).
+
+    compare_proxy_logs (name -> that --compare_configs entry's own proxy log
+    rows, see _load_compare_proxy_logs) is combined with the main duo's own
+    proxy_rows into ONE gate_weight_<corruption>.png per corruption, all
+    methods' w_l overlaid on the same axes (see
+    plot_per_corruption_gate_weight) -- every --compare_configs entry that's
+    itself calibration_mode=proxy_weighted has its own gate weight worth
+    comparing against the one actually driving this run's adaptation, not
+    just inspecting in isolation.
+
+    hide_duo_line, unlike its effect on accuracy_table.tex above, DOES
+    suppress the main duo's own w_l line from gate_weight_<corruption>.png
+    (compare_proxy_logs entries are unaffected) -- the gate-weight plot is a
+    pure visual/comparison aid like the per-corruption accuracy plot
+    extra_series feeds, not a completeness-guaranteed record like the table.
     """
     has_batch_plot = False
     if batch_records:
@@ -370,15 +418,23 @@ def _write_plots(
     has_proxy_plot = plot_proxy_diagnostics(proxy_rows, out_dir / "proxy_diagnostics.png",
                                              ema_window=ema_window)
 
+    write_accuracy_latex_table(batch_records, out_dir / "accuracy_table.tex", duo_label=duo_label)
+
     per_corruption_dir = out_dir / "per_corruption"
     per_corruption_dir.mkdir(parents=True, exist_ok=True)
     plot_per_corruption_proxy_vs_accuracy(batch_records, proxy_rows, per_corruption_dir,
                                            ema_window=ema_window, extra_series=extra_series,
                                            show_gate_weight=show_gate_weight)
-    # gate_weight_<corruption>.png: w_l vs. true acc_l/acc_s, one per
-    # corruption -- a no-op (returns []) for non-proxy_weighted runs, same
-    # guard as plot_proxy_diagnostics above.
-    plot_per_corruption_gate_weight(proxy_rows, per_corruption_dir, ema_window=ema_window)
+    # gate_weight_<corruption>.png: every proxy_weighted method's w_l
+    # overlaid on ONE figure per corruption -- the main duo (tagged
+    # duo_label, omitted if hide_duo_line) plus every --compare_configs
+    # entry that's itself proxy_weighted (compare_proxy_logs). A no-op
+    # (returns []) if none of them are proxy_weighted, same guard as
+    # plot_proxy_diagnostics above.
+    plot_per_corruption_gate_weight(
+        {**({} if hide_duo_line else {duo_label: proxy_rows}), **(compare_proxy_logs or {})},
+        per_corruption_dir, ema_window=ema_window,
+    )
     return has_batch_plot, has_proxy_plot
 
 
@@ -481,10 +537,18 @@ def _replot_from_csv_dir(args: argparse.Namespace, csv_dir: Path, ema_window: in
     extra_series = extra_duo_series_from_batch_records(
         batch_records, main_label=None if args.hide_duo_line else "duo",
     )
+    # No cmp_run_cfgs here either (see above) -- discover which
+    # --compare_configs entries exist from batch_records' own cmp_*_acc
+    # columns (already resolved into extra_series' labels) and glob for
+    # each one's own proxy log by name; a name with no such file just means
+    # that entry wasn't proxy_weighted (see _load_compare_proxy_logs).
+    cmp_names = [label for row_key, _, label, _ in extra_series if row_key != "duo_acc"]
+    compare_proxy_logs = _load_compare_proxy_logs(csv_dir, cmp_names)
 
     has_batch_plot, has_proxy_plot = _write_plots(
         batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series,
-        show_gate_weight=args.show_gate_weight,
+        show_gate_weight=args.show_gate_weight, compare_proxy_logs=compare_proxy_logs,
+        hide_duo_line=args.hide_duo_line,
     )
 
     wandb_run = _make_replot_wandb_run(args, csv_dir)
@@ -641,9 +705,14 @@ def _replay_compare_configs_from_cache(
         batch_records, main_label=None if args.hide_duo_line else "duo",
         calib_mode_by_name={c["name"]: c["calibration_mode"] for c in used_cmp_run_cfgs},
     )
+    # Each proxy_weighted entry's own log was just written (or overwritten,
+    # in this replay) to csv_dir/compare_<name>_<timestamp>.csv above -- glob
+    # for them now that the replay loop has finished writing every row.
+    compare_proxy_logs = _load_compare_proxy_logs(csv_dir, [name for name, _ in new_calibrators])
     has_batch_plot, has_proxy_plot = _write_plots(
         batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series,
-        show_gate_weight=args.show_gate_weight,
+        show_gate_weight=args.show_gate_weight, compare_proxy_logs=compare_proxy_logs,
+        hide_duo_line=args.hide_duo_line,
     )
 
     wandb_run = _make_replot_wandb_run(args, csv_dir, extra_tags=["compare_replay"])
@@ -954,6 +1023,12 @@ def _run(
             with Path(proxy_csv_path).open() as f:
                 proxy_rows = list(csv.DictReader(f))
 
+        # Each --compare_configs entry that's itself proxy_weighted has been
+        # writing its own compare_<name>_<timestamp>.csv incrementally too
+        # (see compare_calibrators._build_calibrator) -- glob for whichever
+        # of them exist now, same as the --csv_dir replay paths.
+        compare_proxy_logs = _load_compare_proxy_logs(out_dir, [name for name, _ in compare_calibrators])
+
         # Quiet: _write_plots (re)writes EVERY plot/CSV seen so far, called
         # after EVERY corruption -- its own per-file "wrote ..." lines would
         # otherwise dominate the log with a growing, mostly-redundant flood.
@@ -962,7 +1037,8 @@ def _run(
         with _quiet_stdout("plots"):
             has_batch_plot, has_proxy_plot = _write_plots(
                 batch_records, corruption_boundaries, proxy_rows, out_dir, args.ema_window,
-                extra_series, show_gate_weight=args.show_gate_weight,
+                extra_series, show_gate_weight=args.show_gate_weight, duo_label=run_cfg["name"],
+                compare_proxy_logs=compare_proxy_logs, hide_duo_line=args.hide_duo_line,
             )
 
     results_rows = evaluate_dynamic_duo(
@@ -1118,12 +1194,16 @@ def main() -> None:
                          "alongside accuracy/entropy/proxy score all on one figure instead. "
                          "No-op for a non-proxy_weighted run or a corruption with no proxy rows.")
     p.add_argument("--hide_duo_line", action="store_true",
-                    help="Omit this run's own main duo accuracy line (the 'duo_acc' dashed line, "
-                         "always this run's --calib_config calibrator, never a --compare_configs "
-                         "alternative) from every per-corruption plot (corruption_<name>.png). "
-                         "Shown by default. Any --compare_configs lines are unaffected -- this only "
-                         "hides the primary duo's own line, e.g. to compare --compare_configs "
-                         "alternatives against each other and the input models without it.")
+                    help="Omit this run's own main duo line (always this run's --calib_config "
+                         "calibrator, never a --compare_configs alternative) from every "
+                         "per-corruption plot: the 'duo_acc' dashed line in corruption_<name>.png, "
+                         "AND its w_l line in gate_weight_<corruption>.png (only if it's itself "
+                         "proxy_weighted). Shown by default. Any --compare_configs lines/methods "
+                         "are unaffected -- this only hides the primary duo's own line, e.g. to "
+                         "compare --compare_configs alternatives against each other and the input "
+                         "models without it. accuracy_table.tex is unaffected either way -- it "
+                         "always includes the main duo's row, as a completeness-guaranteed record "
+                         "rather than a plotting preference.")
 
     wandb_group_args = p.add_argument_group("wandb options")
     wandb_group_args.add_argument("--use_wandb", dest="use_wandb", action="store_true", default=True,

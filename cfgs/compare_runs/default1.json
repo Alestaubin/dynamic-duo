@@ -4,8 +4,54 @@
         "calibration_mode": "fixed_ts",
         "fixed_ts_config": "checkpoints/fixed_ts/default"
     }, 
+        {
+    "name": "Proxy-weighted Nuclear Norm - beta = 0.1",
+    "calibration_mode": "proxy_weighted",
+    "proxy_kind": "nuclear_norm",
+    "calib_method": "identity",
+    "calib_map": null,
+    "filter_kind": "ema",
+    "filter_kwargs": {"alpha": 0.5},
+    "beta": 0.1,
+    "prior_l": 0.5,
+    "prior_s": 0.5,
+    "proxy_batch_size": 128,
+    "fit_beta": false,
+    "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+
     {
-    "name": "ProxyWeightedNuclearNorm",
+    "name": "Proxy-weighted Nuclear Norm - beta = 0.25",
+    "calibration_mode": "proxy_weighted",
+    "proxy_kind": "nuclear_norm",
+    "calib_method": "identity",
+    "calib_map": null,
+    "filter_kind": "ema",
+    "filter_kwargs": {"alpha": 0.5},
+    "beta": 0.25,
+    "prior_l": 0.5,
+    "prior_s": 0.5,
+    "proxy_batch_size": 128,
+    "fit_beta": false,
+    "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+    "name": "Proxy-weighted Nuclear Norm - beta = 0.5",
+    "calibration_mode": "proxy_weighted",
+    "proxy_kind": "nuclear_norm",
+    "calib_method": "identity",
+    "calib_map": null,
+    "filter_kind": "ema",
+    "filter_kwargs": {"alpha": 0.5},
+    "beta": 0.5,
+    "prior_l": 0.5,
+    "prior_s": 0.5,
+    "proxy_batch_size": 128,
+    "fit_beta": false,
+    "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+    "name": "Proxy-weighted Nuclear Norm - beta = 1.0",
     "calibration_mode": "proxy_weighted",
     "proxy_kind": "nuclear_norm",
     "calib_method": "identity",
@@ -18,5 +64,35 @@
     "proxy_batch_size": 128,
     "fit_beta": false,
     "fixed_ts_config": "checkpoints/fixed_ts/default"
-}
+    },    
+    {
+    "name": "Proxy-weighted Nuclear Norm - beta = 2.0",
+    "calibration_mode": "proxy_weighted",
+    "proxy_kind": "nuclear_norm",
+    "calib_method": "identity",
+    "calib_map": null,
+    "filter_kind": "ema",
+    "filter_kwargs": {"alpha": 0.5},
+    "beta": 2.0,
+    "prior_l": 0.5,
+    "prior_s": 0.5,
+    "proxy_batch_size": 128,
+    "fit_beta": false,
+    "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },    
+    {
+    "name": "Proxy-weighted Nuclear Norm - beta = 4.0",
+    "calibration_mode": "proxy_weighted",
+    "proxy_kind": "nuclear_norm",
+    "calib_method": "identity",
+    "calib_map": null,
+    "filter_kind": "ema",
+    "filter_kwargs": {"alpha": 0.5},
+    "beta": 4.0,
+    "prior_l": 0.5,
+    "prior_s": 0.5,
+    "proxy_batch_size": 128,
+    "fit_beta": false,
+    "fixed_ts_config": "checkpoints/fixed_ts/default"
+    }   
 ]

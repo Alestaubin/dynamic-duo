@@ -289,7 +289,7 @@ def plot_proxy_diagnostics(
     for vals, color, label in ((r_l, C_LARGE, "r_l"), (r_s, C_SMALL, "r_s")):
         ax.plot(x, vals, color=color, lw=0.8, alpha=0.18, zorder=2)
         ax.plot(x, _ema(vals, ema_window, reset_idxs), color=color, lw=2.0, alpha=0.6,
-                 label=f"{label} (EMA proxy score)", zorder=3)
+                 label=f"{label} (proxy score)", zorder=3)
     ax.set_ylabel("proxy score")
     ax.grid(True, alpha=0.5, lw=0.5)
     ax.legend(loc="upper right", fontsize=8)
@@ -304,13 +304,13 @@ def plot_proxy_diagnostics(
     ax = axes[1]
     ax.plot(x, w_l, color=C_GATE, lw=0.8, alpha=0.35, zorder=2)
     ax.plot(x, _ema(w_l, ema_window, reset_idxs), color=C_GATE, lw=2.2, alpha=1.0,
-             label="w_l (EMA gate weight on large model)", zorder=3)
+             label="w_l (gate weight on large model)", zorder=3)
     ax.axhline(0.5, color=C_MUTED, lw=0.8, ls=":", alpha=0.7, zorder=1)
     for vals, color, ls, label in (
         (acc_l, C_LARGE, "--", "acc_l"), (acc_s, C_SMALL, "--", "acc_s"),
     ):
         ax.plot(x, _ema(vals, ema_window, reset_idxs), color=color, lw=1.2, ls=ls, alpha=0.5,
-                 label=f"{label} (EMA, this proxy batch)")
+                 label=f"{label} (this proxy batch)")
     ax.set_ylim(-0.02, 1.02)
     ax.set_ylabel("weight / accuracy [0, 1]")
     ax.set_xlabel("proxy batch (n_refreshes, global index across all corruptions)")
@@ -357,7 +357,7 @@ def plot_single_model_proxy_diagnostics(
     ax = axes[0]
     ax.plot(x, r, color=C_LARGE, lw=0.8, alpha=0.30, zorder=2)
     ax.plot(x, _ema(r, ema_window, reset_idxs), color=C_LARGE, lw=2.0, alpha=0.95,
-             label="r (EMA raw proxy score)", zorder=3)
+             label="r (raw proxy score)", zorder=3)
     ax.set_ylabel("proxy score")
     ax.grid(True, alpha=0.5, lw=0.5)
     ax.legend(loc="upper right", fontsize=8)
@@ -365,9 +365,9 @@ def plot_single_model_proxy_diagnostics(
 
     ax = axes[1]
     ax.plot(x, _ema(a, ema_window, reset_idxs), color=C_GATE, lw=2.0, ls="-",
-             alpha=0.95, label="a (EMA calibrated predicted acc)", zorder=3)
+             alpha=0.95, label="a (calibrated predicted acc)", zorder=3)
     ax.plot(x, _ema(acc, ema_window, reset_idxs), color=C_LARGE, lw=1.6, ls="--",
-             alpha=0.9, label="acc (EMA actual accuracy)", zorder=3)
+             alpha=0.9, label="acc (actual accuracy)", zorder=3)
     ax.set_ylim(-0.02, 1.02)
     ax.set_ylabel("accuracy [0, 1]")
     ax.set_xlabel("proxy batch (n_refreshes, global index across all corruptions)")
@@ -426,6 +426,211 @@ def extra_duo_series_from_batch_records(
         out.append((f"cmp_{name}_acc", EXTRA_SERIES_PALETTE[i % len(EXTRA_SERIES_PALETTE)], name,
                     calib_mode_by_name.get(name)))
     return out
+
+
+_LATEX_ESCAPES = {
+    "\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$",
+    "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}",
+    "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
+}
+
+
+def _latex_escape(s: str) -> str:
+    """Escape LaTeX special characters in a plain string -- corruption names
+    (e.g. 'gaussian_noise') and calib_config/compare_configs names (e.g.
+    'nuclear_norm_identity_pbs128') routinely contain underscores, which
+    LaTeX would otherwise read as a subscript outside math mode."""
+    return "".join(_LATEX_ESCAPES.get(ch, ch) for ch in s)
+
+
+# Hendrycks & Dietterich's standard ImageNet-C grouping/abbreviations, plus
+# this repo's own "held-out" extras (used as CALIBRATOR.CORRUPTIONS in most
+# configs, so they show up as EVAL corruptions in a _heldout config instead).
+# base corruption name -> (family, column abbreviation).
+_CORRUPTION_FAMILIES: dict[str, tuple[str, str]] = {
+    "gaussian_noise": ("Noise", "Gauss."),
+    "shot_noise": ("Noise", "Shot"),
+    "impulse_noise": ("Noise", "Impulse"),
+    "defocus_blur": ("Blur", "Defocus"),
+    "glass_blur": ("Blur", "Glass"),
+    "motion_blur": ("Blur", "Motion"),
+    "zoom_blur": ("Blur", "Zoom"),
+    "snow": ("Weather", "Snow"),
+    "frost": ("Weather", "Frost"),
+    "fog": ("Weather", "Fog"),
+    "brightness": ("Weather", "Bright."),
+    "contrast": ("Digital", "Contrast"),
+    "elastic_transform": ("Digital", "Elastic"),
+    "pixelate": ("Digital", "Pixel."),
+    "jpeg_compression": ("Digital", "JPEG"),
+    "gaussian_blur": ("Extra", "G.Blur"),
+    "saturate": ("Extra", "Saturate"),
+    "spatter": ("Extra", "Spatter"),
+    "speckle_noise": ("Extra", "Speckle"),
+}
+_FAMILY_ORDER = ["Noise", "Blur", "Weather", "Digital", "Extra", "Other"]
+
+
+def write_accuracy_latex_table(
+    batch_records: list[dict], out_path: Path, duo_label: str = "duo",
+) -> bool:
+    """Write a standalone LaTeX table* (out_path, e.g. accuracy_table.tex) of
+    per-corruption accuracy for every method this run tracked, in the
+    ImageNet-C-paper style: corruption columns grouped into Noise/Blur/
+    Weather/Digital families (\\multicolumn header + \\cmidrule, standard
+    Hendrycks & Dietterich abbreviations -- see _CORRUPTION_FAMILIES; a
+    corruption this repo uses as a held-out CALIBRATOR set falls under
+    "Extra", anything else under "Other"), a two-level row header
+    (\\multirow "Models" for large/small, "Calibrators" for the main duo
+    ("duo_acc", included regardless of --hide_duo_line -- that flag only
+    declutters the PNG legend, not this table) and every --compare_configs
+    alternative), and a trailing Avg. column. Only families/corruptions
+    actually present in batch_records get a column -- e.g. a config missing
+    zoom_blur just gets a 3-wide Blur group instead of 4.
+
+    Values are percentages (matching the ImageNet-C literature convention),
+    each the SAMPLE-WEIGHTED accuracy over that corruption's adaptation
+    batches (sum(acc_i * n_i) / sum(n_i), using each row's own "n") -- the
+    same arithmetic evaluate_dynamic_duo uses internally (via the
+    concatenated probs), just reconstructed from batch_records instead, so a
+    corruption whose last batch is smaller than the rest is still weighted
+    correctly. The Avg. column/row-tail is the plain mean over corruption
+    columns (matching evaluate_dynamic_duo's own "average" row convention,
+    not a further sample-weighted global figure). Works identically for a
+    live run or a --csv_dir replot/replay -- batch_records always carries
+    "n"/"*_acc"/"cmp_*_acc" regardless of which path produced it. If the same
+    base corruption appears at more than one severity in this run, its
+    column header disambiguates with "(sN)" instead of colliding.
+
+    Requires \\usepackage{graphicx}, \\usepackage{booktabs}, and
+    \\usepackage{multirow} wherever this file is \\input{}'d. The caption
+    only states the corruption count/severities and sample count actually
+    present in this run -- add any paper-specific detail (e.g. exactly how a
+    fixed_ts baseline included in --compare_configs was fitted) by hand.
+
+    Returns False (writes nothing) if batch_records is empty.
+    """
+    if not batch_records:
+        print("write_accuracy_latex_table: no batch records -- skipping.")
+        return False
+
+    corr_order: list[str] = []
+    rows_by_corruption: dict[str, list[dict]] = {}
+    for r in batch_records:
+        c = r["corruption"]
+        if c not in rows_by_corruption:
+            corr_order.append(c)
+            rows_by_corruption[c] = []
+        rows_by_corruption[c].append(r)
+
+    def _split(c: str) -> tuple[str, str | None]:
+        base, _, sev = c.partition("/")
+        return (base, sev) if sev else (base, None)
+
+    base_names = [_split(c)[0] for c in corr_order]
+    base_counts = {b: base_names.count(b) for b in set(base_names)}
+
+    # (family, column label, corruption key), family order fixed
+    # (_FAMILY_ORDER), corruptions within a family kept in their
+    # first-seen/EVAL.CORRUPTIONS order rather than resorted alphabetically.
+    tagged = []
+    for c in corr_order:
+        base, sev = _split(c)
+        family, abbrev = _CORRUPTION_FAMILIES.get(base, ("Other", base.replace("_", " ").title()))
+        label = abbrev if base_counts[base] <= 1 or sev is None else f"{abbrev} ({sev})"
+        tagged.append((family, label, c))
+    families_present = sorted(
+        {f for f, _, _ in tagged},
+        key=lambda f: _FAMILY_ORDER.index(f) if f in _FAMILY_ORDER else len(_FAMILY_ORDER),
+    )
+    ordered_cols = [t for fam in families_present for t in tagged if t[0] == fam]
+    corruptions = [c for _, _, c in ordered_cols]
+
+    methods: list[tuple[str, str]] = [("large_acc", "Large"), ("small_acc", "Small")]
+    duo_methods: list[tuple[str, str]] = []
+    if "duo_acc" in batch_records[0]:
+        duo_methods.append(("duo_acc", duo_label))
+    cmp_names = [m.group(1) for k in batch_records[0] if (m := _CMP_ACC_RE.match(k))]
+    duo_methods += [(f"cmp_{name}_acc", name) for name in cmp_names]
+
+    def _weighted_acc(rows: list[dict], key: str) -> float:
+        total_n = sum(r["n"] for r in rows)
+        return sum(r[key] * r["n"] for r in rows) / total_n if total_n > 0 else float("nan")
+
+    per_corr_acc: dict[str, dict[str, float]] = {
+        c: {key: _weighted_acc(rows, key) for key, _ in methods + duo_methods}
+        for c, rows in rows_by_corruption.items()
+    }
+
+    def _fmt(v: float) -> str:
+        return f"{100 * v:.1f}" if v == v else "--"  # v == v is False only for NaN
+
+    def _row_line(group_cell: str, label: str, key: str) -> str:
+        vals = [per_corr_acc[c][key] for c in corruptions]
+        finite = [v for v in vals if v == v]
+        avg = sum(finite) / len(finite) if finite else float("nan")
+        cells = " & ".join(_fmt(v) for v in vals)
+        return f"        {group_cell}{_latex_escape(label)} & {cells} & {_fmt(avg)} \\\\"
+
+    body_lines: list[str] = []
+    for group_label, group_methods in (("Models", methods), ("Calibrators", duo_methods)):
+        if not group_methods:
+            continue
+        for i, (key, label) in enumerate(group_methods):
+            group_cell = f"\\multirow{{{len(group_methods)}}}{{*}}{{\\textit{{{group_label}}}}} & " \
+                if i == 0 else "& "
+            body_lines.append(_row_line(group_cell, label, key))
+        body_lines.append("        \\midrule")
+    if body_lines and body_lines[-1].strip() == "\\midrule":
+        body_lines.pop()
+
+    col_groups = ["c" * sum(1 for f, _, _ in ordered_cols if f == fam) for fam in families_present]
+    col_spec = "ll | " + " | ".join(col_groups) + " | c"
+
+    cmidrules, col_cursor = [], 3
+    family_header_cells = []
+    for fam in families_present:
+        n = sum(1 for f, _, _ in ordered_cols if f == fam)
+        family_header_cells.append(f"\\multicolumn{{{n}}}{{c}}{{{fam}}}")
+        cmidrules.append(f"\\cmidrule(lr){{{col_cursor}-{col_cursor + n - 1}}}")
+        col_cursor += n
+
+    n_samples = sum(r["n"] for r in rows_by_corruption[corruptions[0]]) if corruptions else 0
+    severities = sorted({_split(c)[1] for c in corruptions if _split(c)[1] is not None})
+    sev_phrase = (f"severity {severities[0].lstrip('s')}" if len(severities) == 1
+                  else f"severities {', '.join(s.lstrip('s') for s in severities)}" if severities
+                  else "unlabeled severity")
+
+    lines = [
+        "% Auto-generated by plot_run_diagnostics.py -- see",
+        "% src/utils/diagnostics_plots.py's write_accuracy_latex_table.",
+        "% Requires \\usepackage{graphicx}, \\usepackage{booktabs}, \\usepackage{multirow}.",
+        "% \\newpage matches this table's reference style (a full-width table*",
+        "% in a two-column document) -- delete it if that doesn't apply here.",
+        "\\newpage",
+        "\\begin{table*}[t]",
+        "    \\centering",
+        f"    \\caption{{Top-1 accuracy (\\%) at {sev_phrase} across ImageNet-C "
+        f"corruptions ({n_samples} samples per corruption), grouped by family.}}",
+        "    \\label{tab:accuracy}",
+        "    \\resizebox{\\textwidth}{!}{%",
+        f"    \\begin{{tabular}}{{{col_spec}}}",
+        "        \\toprule",
+        "        & & " + " & ".join(family_header_cells) + " & \\\\",
+        "        " + "".join(cmidrules),
+        "        Method & Models & " + " & ".join(_latex_escape(l) for _, l, _ in ordered_cols) + " & Avg. \\\\",
+        "        \\midrule",
+    ] + body_lines + [
+        "        \\bottomrule",
+        "    \\end{tabular}%",
+        "    }",
+        "\\end{table*}",
+    ]
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines) + "\n")
+    print(f"wrote {out_path}")
+    return True
 
 
 def _cumulative_samples(rows: list[dict]) -> list[float] | None:
@@ -498,7 +703,7 @@ def plot_proxy_pbs_comparison(
         fig, ax = plt.subplots(figsize=(10, 5))
         ax.plot(x_acc, acc_vals, color=C_INK, lw=0.6, alpha=0.20, zorder=1)
         ax.plot(x_acc, acc_ema, color=C_INK, lw=2.4, alpha=0.95,
-                label="actual accuracy (EMA)", zorder=5)
+                label="actual accuracy", zorder=5)
 
         for pbs in pbs_sorted:
             prows = proxy_by_pbs_corruption.get(pbs, {}).get(corruption, [])
@@ -513,7 +718,7 @@ def plot_proxy_pbs_comparison(
             color = color_by_pbs[pbs]
             ax.plot(x_p, a_vals, color=color, lw=0.6, alpha=0.15, zorder=2)
             ax.plot(x_p, a_ema, color=color, lw=1.8, alpha=0.9,
-                    label=f"pbs={pbs} (a, EMA)", zorder=3)
+                    label=f"pbs={pbs} (a)", zorder=3)
 
         ax.set_ylim(-0.02, 1.02)
         ax.set_ylabel("accuracy / calibrated proxy score [0, 1]")
@@ -535,65 +740,125 @@ def plot_proxy_pbs_comparison(
 
 
 def plot_per_corruption_gate_weight(
-    proxy_rows: list[dict], out_dir: Path, ema_window: int = DEFAULT_EMA_WINDOW,
+    proxy_rows_by_method: dict[str, list[dict]], out_dir: Path, ema_window: int = DEFAULT_EMA_WINDOW,
 ) -> list[Path]:
-    """One figure per corruption: the gate weight w_l JointProxyWeighted
-    actually assigned the large model (EMA, solid) against each model's TRUE
-    accuracy over that same proxy batch (acc_l/acc_s, EMA, dashed) -- the
-    direct "is the gate putting weight where the accuracy actually is" check,
+    """One figure per corruption: EVERY proxy_weighted method's gate weight
+    w_l overlaid on the SAME axes -- one line per method, distinctly colored
+    and labeled -- against a single true-accuracy reference (large/small,
+    dashed, thin). The direct "is each method's gate putting weight where
+    the accuracy actually is, and how do they compare to EACH OTHER" check,
     zoomed to one corruption instead of plot_proxy_diagnostics' whole-run,
-    all-corruptions-concatenated view.
+    all-corruptions-concatenated, single-method view.
 
-    Reads proxy_rows only (not batch_records): w_l/acc_l/acc_s are computed
-    once per PROXY batch (see JointProxyWeighted._flush_bucket and the
-    proxy_batch_size gotcha in CLAUDE.md), the natural granularity for "did
-    the gate move when it should have" -- a per-adaptation-batch view would
-    just repeat the same w_l between refreshes whenever proxy_batch_size >
-    the adaptation batch size. No-op (returns []) for a non-proxy_weighted
-    run, same as plot_proxy_diagnostics.
+    proxy_rows_by_method: {method_name: proxy_rows}, one entry per
+    proxy_weighted source -- the main duo plus any --compare_configs entry
+    that's itself proxy_weighted (see scripts/plot_run_diagnostics.py's
+    _load_compare_proxy_logs; entries using another calibration_mode simply
+    have no proxy log and never reach here). Insertion order matters: the
+    first entry's color is C_GATE (matching the "main duo" convention used
+    elsewhere in this module) and it supplies the true-accuracy reference if
+    it has rows for a given corruption, falling through to the next entry
+    otherwise; the rest cycle through EXTRA_SERIES_PALETTE. Entries with no
+    rows at all are dropped up front.
 
-    All three series already live in [0, 1] (a weight and two accuracies),
-    so unlike plot_per_corruption_proxy_vs_accuracy they share one axis and a
-    fixed range instead of an adaptive one -- a real w_l swing is already
-    visible at that scale.
+    Reads proxy log rows only (not batch_records): w_l/acc_l/acc_s are
+    computed once per PROXY batch (see JointProxyWeighted._flush_bucket and
+    the proxy_batch_size gotcha in CLAUDE.md) -- the natural granularity for
+    "did the gate move when it should have". Different methods can use
+    different proxy_batch_size, so their x-values (cumulative samples
+    processed) land at different points along the SAME corruption stream --
+    matplotlib overlays them correctly regardless, since each line supplies
+    its own x array rather than assuming a shared one.
+
+    Deliberately drops the raw per-model proxy score (r_l/r_s) overlay the
+    single-method version of this plot used to have: different methods can
+    use different proxy_kind, whose raw scores live on incomparable scales
+    (a nuclear_norm score and an ac_mc score mean different things), so
+    overlaying them together would compare apples to oranges. See
+    plot_proxy_diagnostics for a single method's own raw-score-vs-gate view.
+
+    No-op (returns []) if proxy_rows_by_method is empty or every entry is.
     """
-    if not proxy_rows:
-        print("plot_per_corruption_gate_weight: no proxy log rows (calibration_mode != "
-              "proxy_weighted) -- skipping.")
+    proxy_rows_by_method = {name: rows for name, rows in proxy_rows_by_method.items() if rows}
+    if not proxy_rows_by_method:
+        print("plot_per_corruption_gate_weight: no proxy_weighted methods with proxy log "
+              "rows -- skipping.")
         return []
 
-    by_corruption: dict[str, list[dict]] = {}
-    for r in proxy_rows:
-        by_corruption.setdefault(r["corruption"], []).append(r)
+    method_names = list(proxy_rows_by_method.keys())
+    color_by_method = {
+        name: (C_GATE if i == 0 else EXTRA_SERIES_PALETTE[(i - 1) % len(EXTRA_SERIES_PALETTE)])
+        for i, name in enumerate(method_names)
+    }
 
-    written: list[Path] = []
-    for corruption, rows in by_corruption.items():
-        w_l = [float(r["w_l"]) for r in rows]
-        acc_l = [float(r["acc_l"]) for r in rows]
-        acc_s = [float(r["acc_s"]) for r in rows]
+    # corruption -> {method_name: that method's rows for this corruption}
+    corr_order: list[str] = []
+    by_corruption: dict[str, dict[str, list[dict]]] = {}
+    for name in method_names:
+        for r in proxy_rows_by_method[name]:
+            c = r["corruption"]
+            if c not in by_corruption:
+                corr_order.append(c)
+                by_corruption[c] = {}
+            by_corruption[c].setdefault(name, []).append(r)
+
+    def _x_axis(rows: list[dict]) -> tuple[list[float], bool]:
         n = len(rows)
         x = _cumulative_samples(rows)
-        x_is_samples = x is not None
-        if x is None:
-            x = [i / (n - 1) for i in range(n)] if n > 1 else [0.0]
+        if x is not None:
+            return x, True
+        return ([i / (n - 1) for i in range(n)] if n > 1 else [0.0]), False
 
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(x, w_l, color=C_GATE, lw=0.8, alpha=0.35, zorder=2)
-        ax.plot(x, _ema(w_l, ema_window), color=C_GATE, lw=2.4, alpha=1.0,
-                 label="w_l (EMA gate weight on large model)", zorder=3)
+    written: list[Path] = []
+    for corruption in corr_order:
+        methods_here = by_corruption[corruption]
+        fig, ax = plt.subplots(figsize=(6, 5))
+
+        # True-accuracy reference: from the first method (in the dict's own
+        # order) that actually has rows for this corruption -- the ground
+        # truth doesn't depend on which method is gating, only its exact
+        # proxy-batch chunking might differ slightly across methods with
+        # different proxy_batch_size.
+        ref_name = next((n for n in method_names if n in methods_here), None)
+        x_is_samples = True
+        if ref_name is not None:
+            ref_rows = methods_here[ref_name]
+            x_ref, x_is_samples = _x_axis(ref_rows)
+            for key, color, lbl in (("acc_l", C_LARGE, "large"), ("acc_s", C_SMALL, "small")):
+                vals = [float(r[key]) for r in ref_rows]
+                ax.plot(x_ref, vals, color=color, lw=0.8, alpha=0.15, zorder=1)
+                ax.plot(x_ref, _ema(vals, ema_window), color=color, lw=1.4, ls="--", alpha=0.5,
+                        label=f"{lbl} acc (this proxy batch)", zorder=2)
+
+        for name in method_names:
+            rows = methods_here.get(name)
+            if not rows:
+                continue
+            w_l = [float(r["w_l"]) for r in rows]
+            x, _ = _x_axis(rows)
+            color = color_by_method[name]
+            ax.plot(x, w_l, color=color, lw=0.8, alpha=0.25, zorder=2)
+            ax.plot(x, _ema(w_l, ema_window), color=color, lw=2.0, alpha=0.9,
+                    label=f"w_l ({name})", zorder=3)
+
         ax.axhline(0.5, color=C_MUTED, lw=0.8, ls=":", alpha=0.7, zorder=1)
-        for vals, color, label in ((acc_l, C_LARGE, "large"), (acc_s, C_SMALL, "small")):
-            ax.plot(x, vals, color=color, lw=0.8, alpha=0.15, zorder=2)
-            ax.plot(x, _ema(vals, ema_window), color=color, lw=1.4, ls="--", alpha=0.5,
-                     label=f"{label} acc (EMA, this proxy batch)", zorder=3)
         ax.set_ylim(-0.02, 1.02)
         ax.set_ylabel("gate weight / accuracy [0, 1]")
         ax.set_xlabel("samples processed" if x_is_samples else "fraction of corruption stream elapsed")
-        ax.set_title(f"Corruption {corruption} -- gate weight vs. true accuracy")
+        ax.set_title(f"Corruption {corruption} -- gate weight by method vs. true accuracy")
         ax.grid(True, alpha=0.4, lw=0.5)
-        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.14), fontsize=8, ncols=3)
+        # Fixed at 2 COLUMNS (not a row target) -- this figure is narrow on
+        # purpose (to fit a constrained layout, e.g. a paper column), and
+        # method names (e.g. "nuclear_norm_identity_pbs128") are long, so
+        # width is the scarce resource here, not height: more methods just
+        # grow the legend downward instead of widening it.
+        n_legend_items = len(method_names) + 2
+        ncols = 2
+        n_rows = -(-n_legend_items // ncols)  # ceil(n_legend_items / ncols)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.14 - 0.07 * n_rows),
+                  fontsize=7, ncols=ncols)
 
-        fig.subplots_adjust(bottom=0.22, left=0.08, right=0.97, top=0.92)
+        fig.subplots_adjust(bottom=0.2 + 0.07 * n_rows, left=0.12, right=0.95, top=0.92)
         safe_name = corruption.replace("/", "_")
         out_path = out_dir / f"gate_weight_{safe_name}.png"
         fig.savefig(out_path, dpi=150)
@@ -713,9 +978,9 @@ def plot_per_corruption_proxy_vs_accuracy(
         avg_acc = {key: float(np.mean([r[f"{key}_acc"] for r in rows])) for key, _, _, _ in series}
         for key, color, label, lw_scale in series:
             ax_data.plot(x_acc, acc_series[key], color=color, lw=1.4 * lw_scale,ls=(0, (5, 5)),
-                         alpha=0.75, label=f"{label} acc (EMA)", zorder=6)
+                         alpha=0.75, label=f"{label} acc", zorder=6)
             ax_ent.plot(x_acc, ent_series[key], color=color, lw=1.4 * lw_scale, ls="-.",
-                        alpha=0.4, label=f"{label} entropy (EMA)", zorder=2)
+                        alpha=0.4, label=f"{label} entropy", zorder=2)
 
         # extra_series: accuracy-only -- a different KIND of comparison
         # (calibrated duo outputs, not input models) sharing the same axis/
@@ -729,10 +994,11 @@ def plot_per_corruption_proxy_vs_accuracy(
                              for row_key, _, _, _ in extra_series}
         for row_key, color, label, calib_mode in extra_series:
             is_proxy_weighted = calib_mode == "proxy_weighted"
+            duo_label = f"{label} (ours)" if is_proxy_weighted else label
             ax_data.plot(x_acc, extra_acc_series[row_key], color=color,
                          lw=2.0 if is_proxy_weighted else 1.2,
                          alpha=1.0 if is_proxy_weighted else 0.5,
-                         label=f"{label} (duo, EMA)", zorder=5 if is_proxy_weighted else 4)
+                         label=f"{duo_label} (duo)", zorder=5 if is_proxy_weighted else 4)
 
         # Overall average accuracy tag per series (plain mean over this
         # corruption's rows, not the EMA's tail value) -- in the sidebar
@@ -782,7 +1048,7 @@ def plot_per_corruption_proxy_vs_accuracy(
             for pkey, color, label in proxy_series:
                 ax_data.plot(x_proxy, proxy_vals[pkey], color=color, lw=0.8, ls=":", alpha=0.15, zorder=1)
                 ax_data.plot(x_proxy, proxy_ema[pkey], color=color, lw=1.8, ls=":",
-                             alpha=0.5, label=f"{label} (proxy, EMA)", zorder=2)
+                             alpha=0.5, label=f"{label} (proxy)", zorder=2)
 
             # --show_gate_weight: w_l on its OWN axis -- a weight isn't an
             # accuracy or a proxy score, so it doesn't belong on ax_data's
@@ -802,7 +1068,7 @@ def plot_per_corruption_proxy_vs_accuracy(
                 ax_gate.spines["right"].set_color(C_MUTED)
                 ax_gate.plot(x_proxy, w_l_vals, color=C_MUTED, lw=0.8, alpha=0.2, zorder=1)
                 ax_gate.plot(x_proxy, w_l_ema, color=C_MUTED, lw=1.6, alpha=0.55,
-                             label="w_l (EMA gate weight, main duo)", zorder=2)
+                             label="w_l (gate weight, main duo)", zorder=2)
                 ax_gate.set_ylim(-0.02, 1.02)
                 ax_gate.set_ylabel("gate weight w_l (main duo)", color=C_MUTED)
                 ax_gate.tick_params(axis="y", colors=C_MUTED)
