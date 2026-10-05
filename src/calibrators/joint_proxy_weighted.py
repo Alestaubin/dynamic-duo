@@ -38,9 +38,14 @@ Every adaptation batch (Section 5 combination) then:
      only sets the weight ratio between the two models, not their base
      scale (unidentifiable together, so T_l/T_s stay FIXED here; do not
      also fit temperatures inside this calibrator):
+     pool="log" (default) — product-of-experts logit pooling, matching the
+     aggregation used elsewhere in this codebase (JointFixedTS.combine_logits):
        z_duo = w_l*(z_l/T_l) + w_s*(z_s/T_s)
-     Product-of-experts logit pooling, matching the aggregation used
-     elsewhere in this codebase (JointFixedTS.combine_logits).
+     pool="linear" — mixture of softmaxes, returned as log-probabilities so
+     every downstream softmax/entropy/NLL still works unchanged:
+       z_duo = log(w_l*softmax(z_l/T_l) + w_s*softmax(z_s/T_s))
+     Unlike "log", a collapsed (near-uniform or wrong-and-confident) model
+     can never dominate the prediction beyond its own weight.
 
 Records per-batch diagnostics and GT accuracies (when labels are injected via
 set_labels). After each corruption, report_and_reset_corruption_stats()
@@ -57,6 +62,7 @@ from typing import Literal
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from src.calibrators.base import BaseJointCalibrator, _NoOpModule
 from src.calibrators.joint_fixed_TS import JointFixedTS
@@ -70,6 +76,7 @@ from src.reliability.filters.kalman import Kalman
 
 _PROXY_KINDS = PROXY_KINDS  # "agreement" is intentionally excluded (pair-level, no r_l/r_s split)
 _FILTER_KINDS = {"none", "running_mean", "ema", "kalman"}
+_POOL_KINDS = {"log", "linear"}
 
 
 def _corr_stats(xs: list[float], ys: list[float]) -> dict:
@@ -129,6 +136,9 @@ class JointProxyWeighted(BaseJointCalibrator):
         initial gate weight (via the sigmoid) before the first proxy batch
         completes.
     base_ts : frozen JointFixedTS supplying T_l, T_s. If None, T_l = T_s = 1.0.
+    pool : "log" (default; weighted sum of temperature-scaled logits, i.e.
+        product-of-experts) | "linear" (weighted mixture of the two
+        temperature-scaled softmaxes, returned as log-probabilities).
     eps : clip predicted accuracies into (eps, 1-eps) before the logit
         transform (eq. 6).
     proxy_batch_size : number of samples to aggregate into one proxy
@@ -156,6 +166,7 @@ class JointProxyWeighted(BaseJointCalibrator):
         base_ts: JointFixedTS | None = None,
         eps: float = 1e-3,
         proxy_batch_size: int = 1,
+        pool: Literal["log", "linear"] = "log",
         csv_path: str | None = None,
         log_every: int = 10,
         verbose: bool = True,
@@ -166,7 +177,9 @@ class JointProxyWeighted(BaseJointCalibrator):
         assert filter_kind in _FILTER_KINDS, \
             f"filter_kind must be one of {_FILTER_KINDS}, got '{filter_kind}'"
         assert proxy_batch_size >= 1, f"proxy_batch_size must be >= 1, got {proxy_batch_size}"
+        assert pool in _POOL_KINDS, f"pool must be one of {sorted(_POOL_KINDS)}, got '{pool}'"
 
+        self.pool = pool
         self.proxy_kind = proxy_kind
         self.cfg_l = cfg_l
         self.cfg_s = cfg_s
@@ -258,7 +271,7 @@ class JointProxyWeighted(BaseJointCalibrator):
             print(
                 f"\n{'#' * 78}\n"
                 f"# JointProxyWeighted CONFIG\n"
-                f"#   proxy_kind={proxy_kind}  PROXY_BATCH_SIZE={proxy_batch_size}  beta={beta}\n"
+                f"#   proxy_kind={proxy_kind}  PROXY_BATCH_SIZE={proxy_batch_size}  beta={beta}  pool={pool}\n"
                 f"#   filter_kind={filter_kind}  filter_kwargs={self.filter_kwargs}\n"
                 f"#   prior_l={prior_l}  prior_s={prior_s}  eps={eps}  verbose={verbose}\n"
                 f"#   base_ts: T_l={T_l:.4f}  T_s={T_s:.4f}"
@@ -337,12 +350,20 @@ class JointProxyWeighted(BaseJointCalibrator):
         return a_l, a_s, x_l, x_s, w_l
 
     def _combine(self, z_l: torch.Tensor, z_s: torch.Tensor, w_l: float) -> torch.Tensor:
-        """Section 5: combine a slice of logits at a given gate weight.
-        Product-of-experts logit pooling (see module docstring)."""
+        """Section 5: combine a slice of logits at a given gate weight
+        (see module docstring for the two pool modes)."""
         w_s = 1.0 - w_l
         T_l = float(self.base_ts.Tl.item()) if self.base_ts is not None else 1.0
         T_s = float(self.base_ts.Ts.item()) if self.base_ts is not None else 1.0
-        return w_l * (z_l / T_l) + w_s * (z_s / T_s)
+        if self.pool == "log":
+            return w_l * (z_l / T_l) + w_s * (z_s / T_s)
+        # Clamp the log-weights: sigmoid can saturate to exactly 0/1 in fp32.
+        log_w = torch.log(torch.tensor([w_l, w_s], device=z_l.device, dtype=z_l.dtype).clamp_min(1e-12))
+        return torch.logsumexp(
+            torch.stack([log_w[0] + F.log_softmax(z_l / T_l, dim=1),
+                         log_w[1] + F.log_softmax(z_s / T_s, dim=1)]),
+            dim=0,
+        )
 
     def _flush_bucket(self) -> None:
         """Run the proxy pipeline (Sections 2-4) on everything currently
@@ -544,3 +565,32 @@ class JointProxyWeighted(BaseJointCalibrator):
         return _NoOpModule()
 
 
+
+
+if __name__ == "__main__":
+    torch.manual_seed(0)
+    z_l, z_s = torch.randn(8, 10), torch.randn(8, 10)
+
+    def _mk(pool):
+        jpw = JointProxyWeighted.__new__(JointProxyWeighted)  # skip proxy/filter setup
+        jpw.pool, jpw.base_ts = pool, None
+        return jpw
+
+    lin, log = _mk("linear"), _mk("log")
+    # w_l=1 / w_l=0 recover a single model under both pools.
+    for jpw in (lin, log):
+        assert torch.allclose(F.softmax(jpw._combine(z_l, z_s, 1.0), 1), F.softmax(z_l, 1), atol=1e-5)
+        assert torch.allclose(F.softmax(jpw._combine(z_l, z_s, 0.0), 1), F.softmax(z_s, 1), atol=1e-5)
+    # linear pool == explicit mixture of softmaxes, and is a normalised log-prob.
+    out = lin._combine(z_l, z_s, 0.3)
+    mix = 0.3 * F.softmax(z_l, 1) + 0.7 * F.softmax(z_s, 1)
+    assert torch.allclose(F.softmax(out, 1), mix, atol=1e-5)
+    assert torch.allclose(out.exp().sum(1), torch.ones(8), atol=1e-5)
+    # w_l=0.5: the two pools genuinely differ.
+    assert not torch.allclose(F.softmax(lin._combine(z_l, z_s, 0.5), 1),
+                              F.softmax(log._combine(z_l, z_s, 0.5), 1), atol=1e-3)
+    # Gradients flow and stay finite.
+    zl = z_l.clone().requires_grad_(True)
+    lin._combine(zl, z_s, 0.3).logsumexp(1).sum().backward()
+    assert torch.isfinite(zl.grad).all()
+    print("JointProxyWeighted pool self-test passed")

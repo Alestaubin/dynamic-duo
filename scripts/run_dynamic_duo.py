@@ -120,6 +120,10 @@ if __name__ == "__main__":
     parser.add_argument("--prior_s", type=float, default=0.5,
                         help="Small model's clean-source accuracy, used as the "
                              "ema/kalman filter's reset prior. Defaults to a neutral 0.5.")
+    parser.add_argument("--pool", type=str, default="log", choices=["log", "linear"],
+                        help="How the gate weights combine the two models: 'log' = weighted "
+                             "sum of temperature-scaled logits (product-of-experts), 'linear' "
+                             "= weighted mixture of the two softmaxes.")
     parser.add_argument("--fit_beta", action="store_true",
                         help="Grid-search --gate_beta against held-out dev-shift NLL "
                              "(config's CALIBRATOR corruptions/severities) before eval.")
@@ -212,6 +216,7 @@ if __name__ == "__main__":
                 seed=args.seed,
                 proto_metric=args.proto_metric,
                 proxy_batch_size=args.proxy_batch_size,
+                pool=args.pool,
             )
         except ValueError as e:
             parser.error(str(e))

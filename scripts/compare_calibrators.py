@@ -153,6 +153,7 @@ def _build_calibrator(
             num_samples=num_samples, seed=seed,
             proto_metric=run_cfg.get("proto_metric", "cosine"),
             proxy_batch_size=run_cfg.get("proxy_batch_size", 1),
+            pool=run_cfg.get("pool", "log"),
         )
         if run_cfg.get("fit_beta"):
             # Stay quiet for fit_beta's own dev-corruption pass (many

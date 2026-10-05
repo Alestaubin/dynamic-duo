@@ -68,6 +68,7 @@ rows at a time, so its EMA needs no explicit reset.
 
 from __future__ import annotations
 
+import colorsys
 import csv
 import re
 from pathlib import Path
@@ -134,9 +135,23 @@ C_SURFACE = "#fcfcfb"
 # an arbitrary-length list of "calibrated duo" comparison lines (see
 # scripts/plot_run_diagnostics.py's --compare_configs), assigned in this
 # fixed order rather than cycled, matching the compare-configs file's own
-# ordering. Past 5 entries colors repeat -- a comparison with more
-# calibrators than that on one figure is already pushing legibility.
-EXTRA_SERIES_PALETTE = ["#1baf7a", "#eda100", "#e87ba4", "#008300", "#e34948"]
+# ordering. Past the fixed list (12 colors) extra_series_color falls back to
+# golden-angle hues, so no two lines ever share a color however many
+# configs are compared -- though past ~12 lines they get hard to tell apart.
+EXTRA_SERIES_PALETTE = [
+    "#1baf7a", "#eda100", "#e87ba4", "#008300", "#e34948",
+    "#8e44ad", "#8c5a3c", "#ff7043", "#8a9a00", "#c2185b", "#5d6d7e", "#00838f",
+]
+
+
+def extra_series_color(i: int) -> str:
+    """i-th comparison-line color: fixed palette first, then distinct
+    golden-angle HSV hues (alternating lightness) instead of repeating."""
+    if i < len(EXTRA_SERIES_PALETTE):
+        return EXTRA_SERIES_PALETTE[i]
+    j = i - len(EXTRA_SERIES_PALETTE)
+    return to_hex(colorsys.hsv_to_rgb((0.11 + 0.618034 * j) % 1.0, 0.65, 0.55 if j % 2 else 0.85))
+
 
 plt.rcParams.update({
     "figure.facecolor": C_SURFACE, "axes.facecolor": C_SURFACE,
@@ -402,7 +417,7 @@ def extra_duo_series_from_batch_records(
     --compare_configs, but only surfaced as a series here since a caller has
     explicitly asked for the duo-comparison view -- see extra_series' own
     docstring for why it's opt-in everywhere else). Column order (not an
-    alphabetical resort) drives color order via EXTRA_SERIES_PALETTE, so
+    alphabetical resort) drives color order via extra_series_color, so
     replotting from disk assigns the same colors the live run used.
 
     calib_mode_by_name (optional): maps each entry's label/name to its
@@ -423,7 +438,7 @@ def extra_duo_series_from_batch_records(
         out.append(("duo_acc", C_GATE, main_label, calib_mode_by_name.get(main_label)))
     names = [m.group(1) for k in batch_records[0] if (m := _CMP_ACC_RE.match(k))]
     for i, name in enumerate(names):
-        out.append((f"cmp_{name}_acc", EXTRA_SERIES_PALETTE[i % len(EXTRA_SERIES_PALETTE)], name,
+        out.append((f"cmp_{name}_acc", extra_series_color(i), name,
                     calib_mode_by_name.get(name)))
     return out
 
@@ -473,6 +488,7 @@ _FAMILY_ORDER = ["Noise", "Blur", "Weather", "Digital", "Extra", "Other"]
 
 def write_accuracy_latex_table(
     batch_records: list[dict], out_path: Path, duo_label: str = "duo",
+    ece_records: list[dict] | None = None,
 ) -> bool:
     """Write a standalone LaTeX table* (out_path, e.g. accuracy_table.tex) of
     per-corruption accuracy for every method this run tracked, in the
@@ -507,6 +523,14 @@ def write_accuracy_latex_table(
     only states the corruption count/severities and sample count actually
     present in this run -- add any paper-specific detail (e.g. exactly how a
     fixed_ts baseline included in --compare_configs was fitted) by hand.
+
+    ece_records (a list of {"corruption", "key", "ece"} rows, as written to
+    ece_per_corruption.csv -- key is "large"/"small"/"duo"/"cmp_<name>") switches
+    the SAME layout to a per-corruption Expected Calibration Error table
+    instead (values already full-stream, one per corruption, so no batch
+    weighting is needed; lower is better). batch_records is still required
+    for corruption order and which --compare_configs names exist. A method
+    with no ECE row for a corruption prints "--".
 
     Returns False (writes nothing) if batch_records is empty.
     """
@@ -546,21 +570,36 @@ def write_accuracy_latex_table(
     ordered_cols = [t for fam in families_present for t in tagged if t[0] == fam]
     corruptions = [c for _, _, c in ordered_cols]
 
-    methods: list[tuple[str, str]] = [("large_acc", "Large"), ("small_acc", "Small")]
-    duo_methods: list[tuple[str, str]] = []
-    if "duo_acc" in batch_records[0]:
-        duo_methods.append(("duo_acc", duo_label))
+    as_ece = ece_records is not None
     cmp_names = [m.group(1) for k in batch_records[0] if (m := _CMP_ACC_RE.match(k))]
-    duo_methods += [(f"cmp_{name}_acc", name) for name in cmp_names]
+    if as_ece:
+        methods: list[tuple[str, str]] = [("large", "Large"), ("small", "Small")]
+        duo_methods: list[tuple[str, str]] = (
+            [("duo", duo_label)] if any(r["key"] == "duo" for r in ece_records) else []
+        )
+        duo_methods += [(f"cmp_{name}", name) for name in cmp_names]
+        per_corr_acc: dict[str, dict[str, float]] = {c: {} for c in corr_order}
+        for rec in ece_records:
+            if rec["corruption"] in per_corr_acc:
+                per_corr_acc[rec["corruption"]][rec["key"]] = float(rec["ece"])
+        for c in corr_order:
+            for key, _ in methods + duo_methods:
+                per_corr_acc[c].setdefault(key, float("nan"))
+    else:
+        methods = [("large_acc", "Large"), ("small_acc", "Small")]
+        duo_methods = []
+        if "duo_acc" in batch_records[0]:
+            duo_methods.append(("duo_acc", duo_label))
+        duo_methods += [(f"cmp_{name}_acc", name) for name in cmp_names]
 
-    def _weighted_acc(rows: list[dict], key: str) -> float:
-        total_n = sum(r["n"] for r in rows)
-        return sum(r[key] * r["n"] for r in rows) / total_n if total_n > 0 else float("nan")
+        def _weighted_acc(rows: list[dict], key: str) -> float:
+            total_n = sum(r["n"] for r in rows)
+            return sum(r[key] * r["n"] for r in rows) / total_n if total_n > 0 else float("nan")
 
-    per_corr_acc: dict[str, dict[str, float]] = {
-        c: {key: _weighted_acc(rows, key) for key, _ in methods + duo_methods}
-        for c, rows in rows_by_corruption.items()
-    }
+        per_corr_acc = {
+            c: {key: _weighted_acc(rows, key) for key, _ in methods + duo_methods}
+            for c, rows in rows_by_corruption.items()
+        }
 
     def _fmt(v: float) -> str:
         return f"{100 * v:.1f}" if v == v else "--"  # v == v is False only for NaN
@@ -595,7 +634,7 @@ def write_accuracy_latex_table(
         cmidrules.append(f"\\cmidrule(lr){{{col_cursor}-{col_cursor + n - 1}}}")
         col_cursor += n
 
-    n_samples = sum(r["n"] for r in rows_by_corruption[corruptions[0]]) if corruptions else 0
+    n_samples = int(sum(r["n"] for r in rows_by_corruption[corruptions[0]])) if corruptions else 0
     severities = sorted({_split(c)[1] for c in corruptions if _split(c)[1] is not None})
     sev_phrase = (f"severity {severities[0].lstrip('s')}" if len(severities) == 1
                   else f"severities {', '.join(s.lstrip('s') for s in severities)}" if severities
@@ -610,9 +649,12 @@ def write_accuracy_latex_table(
         "\\newpage",
         "\\begin{table*}[t]",
         "    \\centering",
-        f"    \\caption{{Top-1 accuracy (\\%) at {sev_phrase} across ImageNet-C "
-        f"corruptions ({n_samples} samples per corruption), grouped by family.}}",
-        "    \\label{tab:accuracy}",
+        (f"    \\caption{{Top-label expected calibration error (ECE, \\%, 15 bins; lower is "
+         f"better) at {sev_phrase} across ImageNet-C corruptions ({n_samples} samples per "
+         f"corruption), grouped by family.}}" if as_ece else
+         f"    \\caption{{Top-1 accuracy (\\%) at {sev_phrase} across ImageNet-C "
+         f"corruptions ({n_samples} samples per corruption), grouped by family.}}"),
+        "    \\label{tab:ece}" if as_ece else "    \\label{tab:accuracy}",
         "    \\resizebox{\\textwidth}{!}{%",
         f"    \\begin{{tabular}}{{{col_spec}}}",
         "        \\toprule",
@@ -731,7 +773,7 @@ def plot_proxy_pbs_comparison(
 
         safe_name = corruption.replace("/", "_")
         out_path = out_dir / f"corruption_{safe_name}_pbs_comparison.png"
-        fig.savefig(out_path, dpi=150)
+        fig.savefig(out_path, dpi=150, bbox_inches="tight", pad_inches=0.15)
         plt.close(fig)
         print(f"wrote {out_path}")
         written.append(out_path)
@@ -758,7 +800,7 @@ def plot_per_corruption_gate_weight(
     first entry's color is C_GATE (matching the "main duo" convention used
     elsewhere in this module) and it supplies the true-accuracy reference if
     it has rows for a given corruption, falling through to the next entry
-    otherwise; the rest cycle through EXTRA_SERIES_PALETTE. Entries with no
+    otherwise; the rest get extra_series_color(i - 1). Entries with no
     rows at all are dropped up front.
 
     Reads proxy log rows only (not batch_records): w_l/acc_l/acc_s are
@@ -787,7 +829,7 @@ def plot_per_corruption_gate_weight(
 
     method_names = list(proxy_rows_by_method.keys())
     color_by_method = {
-        name: (C_GATE if i == 0 else EXTRA_SERIES_PALETTE[(i - 1) % len(EXTRA_SERIES_PALETTE)])
+        name: (C_GATE if i == 0 else extra_series_color(i - 1))
         for i, name in enumerate(method_names)
     }
 
@@ -855,13 +897,12 @@ def plot_per_corruption_gate_weight(
         n_legend_items = len(method_names) + 2
         ncols = 2
         n_rows = -(-n_legend_items // ncols)  # ceil(n_legend_items / ncols)
-        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.14 - 0.07 * n_rows),
-                  fontsize=7, ncols=ncols)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), fontsize=7, ncols=ncols)
 
-        fig.subplots_adjust(bottom=0.2 + 0.07 * n_rows, left=0.12, right=0.95, top=0.92)
+        fig.subplots_adjust(bottom=0.2, left=0.12, right=0.95, top=0.92)
         safe_name = corruption.replace("/", "_")
         out_path = out_dir / f"gate_weight_{safe_name}.png"
-        fig.savefig(out_path, dpi=150)
+        fig.savefig(out_path, dpi=150, bbox_inches="tight", pad_inches=0.15)
         plt.close(fig)
         print(f"wrote {out_path}")
         written.append(out_path)
@@ -1140,7 +1181,7 @@ def plot_per_corruption_proxy_vs_accuracy(
         # clipped by the figure edge.
         fig.subplots_adjust(bottom=0.24, left=0.07, right=0.90 if ax_gate is not None else 0.98, top=0.92)
         out_path = out_dir / f"corruption_{safe_name}.png"
-        fig.savefig(out_path, dpi=150)
+        fig.savefig(out_path, dpi=150, bbox_inches="tight", pad_inches=0.15)
         plt.close(fig)
         print(f"wrote {out_path}")
         written.append(out_path)

@@ -45,6 +45,16 @@ def _compute_rc_metrics(probs: np.ndarray, labels: np.ndarray):
     return aurc, e_aurc, augrc
 
 
+def top_label_ece(conf, correct, num_bins: int = 15) -> float:
+    """Top-label ECE from per-sample max-confidence and 0/1 correctness --
+    identical to get_metrics_dict's own `ece` (cal.get_ece on the full probs)
+    but only needs those two vectors, so callers can buffer 8 bytes/sample
+    instead of a full (N, C) probability matrix."""
+    conf = np.asarray(conf.detach().cpu() if torch.is_tensor(conf) else conf, dtype=np.float64)
+    correct = np.asarray(correct.detach().cpu() if torch.is_tensor(correct) else correct).astype(int)
+    return float(cal.get_ece(conf, correct, num_bins=num_bins))
+
+
 def get_metrics_dict(probs, labels) -> dict:
 
     if torch.is_tensor(probs):

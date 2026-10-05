@@ -1,15 +1,14 @@
 {
-    "name": "nuclear_norm_identity_pbs128",
+    "name": "Proxy-weighted NN - β=0.5, pbs=128",
     "calibration_mode": "proxy_weighted",
     "proxy_kind": "nuclear_norm",
     "calib_method": "identity",
     "calib_map": null,
     "filter_kind": "ema",
-    "filter_kwargs": {"alpha": 0.5, "q": 1e-3, "r": 1e-1},
-    "beta": 4.0,
+    "filter_kwargs": {"alpha": 0.9999},
+    "beta": 0.5,
     "prior_l": 0.5,
     "prior_s": 0.5,
-    "proto_metric": "cosine",
     "proxy_batch_size": 128,
     "fit_beta": false,
     "fixed_ts_config": "checkpoints/fixed_ts/default"

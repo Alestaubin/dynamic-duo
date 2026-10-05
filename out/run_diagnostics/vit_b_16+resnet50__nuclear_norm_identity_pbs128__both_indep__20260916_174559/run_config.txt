@@ -767,3 +767,1399 @@ REPLAY at 2026-09-18 20:44:39 -- added via --compare_configs cfgs/compare_runs/d
   proxy_batch_size: 128
   fit_beta: False
   fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-22 12:21:02 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted Nuclear Norm - beta = 0.01]
+  name: Proxy-weighted Nuclear Norm - beta = 0.01
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 0.01
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted Nuclear Norm - beta = 0.1]
+  name: Proxy-weighted Nuclear Norm - beta = 0.1
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 0.1
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted Nuclear Norm - beta = 0.25]
+  name: Proxy-weighted Nuclear Norm - beta = 0.25
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 0.25
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted Nuclear Norm - beta = 0.5]
+  name: Proxy-weighted Nuclear Norm - beta = 0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted Nuclear Norm - beta = 1.0]
+  name: Proxy-weighted Nuclear Norm - beta = 1.0
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 1.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted Nuclear Norm - beta = 2.0]
+  name: Proxy-weighted Nuclear Norm - beta = 2.0
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 2.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted Nuclear Norm - beta = 4.0]
+  name: Proxy-weighted Nuclear Norm - beta = 4.0
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 4.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-22 15:26:15 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted Nuclear Norm - beta = 0.5]
+  name: Proxy-weighted Nuclear Norm - beta = 0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-22 18:44:50 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.1]
+  name: Proxy-weighted NN - β=0.5, α=0.1
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.1}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.5]
+  name: Proxy-weighted NN - β=0.5, α=0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.9]
+  name: Proxy-weighted NN - β=0.5, α=0.9
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.99]
+  name: Proxy-weighted NN - β=0.5, α=0.99
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.99}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.999]
+  name: Proxy-weighted NN - β=0.5, α=0.999
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-22 19:41:40 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=2.0, α=0.1]
+  name: Proxy-weighted NN - β=2.0, α=0.1
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.1}
+  beta: 2.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=2.0, α=0.5]
+  name: Proxy-weighted NN - β=2.0, α=0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 2.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=2.0, α=0.9]
+  name: Proxy-weighted NN - β=2.0, α=0.9
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9}
+  beta: 2.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=2.0, α=0.99]
+  name: Proxy-weighted NN - β=2.0, α=0.99
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.99}
+  beta: 2.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=2.0, α=0.999]
+  name: Proxy-weighted NN - β=2.0, α=0.999
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.999}
+  beta: 2.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-22 19:55:06 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.0001]
+  name: Proxy-weighted NN - β=0.5, α=0.0001
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.0001}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.5]
+  name: Proxy-weighted NN - β=0.5, α=0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.5}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.9999]
+  name: Proxy-weighted NN - β=0.5, α=0.9999
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-22 20:01:19 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.0001]
+  name: Proxy-weighted NN - β=0.5, α=0.0001
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.0001}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.01]
+  name: Proxy-weighted NN - β=0.5, α=0.01
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.01}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.9999]
+  name: Proxy-weighted NN - β=0.5, α=0.9999
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-23 22:23:48 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.0001]
+  name: Proxy-weighted NN - β=0.5, α=0.0001
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.0001}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.01]
+  name: Proxy-weighted NN - β=0.5, α=0.01
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.01}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.05]
+  name: Proxy-weighted NN - β=0.5, α=0.05
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.9]
+  name: Proxy-weighted NN - β=0.5, α=0.9
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.9999]
+  name: Proxy-weighted NN - β=0.5, α=0.9999
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-23 22:46:06 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=4.0, α=0.0001]
+  name: Proxy-weighted NN - β=4.0, α=0.0001
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.0001}
+  beta: 4.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=4.0, α=0.01]
+  name: Proxy-weighted NN - β=4.0, α=0.01
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.01}
+  beta: 4.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=4.0, α=0.05]
+  name: Proxy-weighted NN - β=4.0, α=0.05
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 4.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=4.0, α=0.9]
+  name: Proxy-weighted NN - β=4.0, α=0.9
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9}
+  beta: 4.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=4.0, α=0.9999]
+  name: Proxy-weighted NN - β=4.0, α=0.9999
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 4.0
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-23 22:58:15 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.0001, pbs=16]
+  name: Proxy-weighted NN - β=0.5, α=0.0001, pbs=16
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.0001}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 16
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.01, pbs=16]
+  name: Proxy-weighted NN - β=0.5, α=0.01, pbs=16
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.01}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 16
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.05, pbs=16]
+  name: Proxy-weighted NN - β=0.5, α=0.05, pbs=16
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 16
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.9, pbs=16]
+  name: Proxy-weighted NN - β=0.5, α=0.9, pbs=16
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 16
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, α=0.9999, pbs=16]
+  name: Proxy-weighted NN - β=0.5, α=0.9999, pbs=16
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 16
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-23 23:13:12 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=16]
+  name: Proxy-weighted NN - β=0.5, pbs=16
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 16
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=32]
+  name: Proxy-weighted NN - β=0.5, pbs=32
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 32
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=64]
+  name: Proxy-weighted NN - β=0.5, pbs=64
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 64
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=128]
+  name: Proxy-weighted NN - β=0.5, pbs=128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=256]
+  name: Proxy-weighted NN - β=0.5, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=512]
+  name: Proxy-weighted NN - β=0.5, pbs=512
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 512
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-24 08:59:46 -- added via --compare_configs cfgs/compare_runs/default1.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=16]
+  name: Proxy-weighted NN - β=0.5, pbs=16
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 16
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=32]
+  name: Proxy-weighted NN - β=0.5, pbs=32
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 32
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=64]
+  name: Proxy-weighted NN - β=0.5, pbs=64
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 64
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=128]
+  name: Proxy-weighted NN - β=0.5, pbs=128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=256]
+  name: Proxy-weighted NN - β=0.5, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=512]
+  name: Proxy-weighted NN - β=0.5, pbs=512
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 512
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=1024]
+  name: Proxy-weighted NN - β=0.5, pbs=1024
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 1024
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[Proxy-weighted NN - β=0.5, pbs=2048]
+  name: Proxy-weighted NN - β=0.5, pbs=2048
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 2048
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-24 22:37:14 -- added via --compare_configs cfgs/compare_runs/log_vs_linear.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW-log_b0.5]
+  name: PW-log_b0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 0.5
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW-linear_b0.5]
+  name: PW-linear_b0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW-log_b4.0]
+  name: PW-log_b4.0
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 4.0
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW-linear_b4.0]
+  name: PW-linear_b4.0
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 4.0
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-24 22:49:28 -- added via --compare_configs cfgs/compare_runs/log_vs_linear.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW-log_b0.5]
+  name: PW-log_b0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 0.5
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW-linear_b0.5]
+  name: PW-linear_b0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-24 22:52:29 -- added via --compare_configs cfgs/compare_runs/log_vs_linear.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW-log_b0.5]
+  name: PW-log_b0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 0.5
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW-linear_b0.5]
+  name: PW-linear_b0.5
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.05}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-24 23:06:05 -- added via --compare_configs cfgs/compare_runs/default2.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.01, pbs=256]
+  name: PW NN - β=0.01, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.01
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.1, pbs=256]
+  name: PW NN - β=0.1, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.1
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=256]
+  name: PW NN - β=0.5, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=1, pbs=256]
+  name: PW NN - β=1, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 1
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=2, pbs=256]
+  name: PW NN - β=2, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 2
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=4, pbs=256]
+  name: PW NN - β=4, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 4
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-24 23:15:57 -- added via --compare_configs cfgs/compare_runs/default2.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.01, pbs=256]
+  name: PW NN - β=0.01, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.01
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.1, pbs=256]
+  name: PW NN - β=0.1, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.1
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=256]
+  name: PW NN - β=0.5, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=1, pbs=256]
+  name: PW NN - β=1, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 1
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=2, pbs=256]
+  name: PW NN - β=2, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 2
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=4, pbs=256]
+  name: PW NN - β=4, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 4
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-24 23:27:55 -- added via --compare_configs cfgs/compare_runs/default3.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=16]
+  name: PW NN - β=0.5, pbs=16
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 16
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=32]
+  name: PW NN - β=0.5, pbs=32
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 32
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=64]
+  name: PW NN - β=0.5, pbs=64
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 64
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=128]
+  name: PW NN - β=0.5, pbs=128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=256]
+  name: PW NN - β=0.5, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=512]
+  name: PW NN - β=0.5, pbs=512
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 512
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=1024]
+  name: PW NN - β=0.5, pbs=1024
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 1024
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=2048]
+  name: PW NN - β=0.5, pbs=2048
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: linear
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 2048
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+REPLAY at 2026-09-24 23:42:27 -- added via --compare_configs cfgs/compare_runs/default2.json (fit_num_samples=5000, seed=0):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.01, pbs=256]
+  name: PW NN - β=0.01, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.01
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.1, pbs=256]
+  name: PW NN - β=0.1, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.1
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=0.5, pbs=256]
+  name: PW NN - β=0.5, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=1, pbs=256]
+  name: PW NN - β=1, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 1
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=2, pbs=256]
+  name: PW NN - β=2, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 2
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+[PW NN - β=4, pbs=256]
+  name: PW NN - β=4, pbs=256
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 4
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 256
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default

@@ -119,13 +119,14 @@ import wandb
 
 from src.tta.dynamic_duo import setup_duo, evaluate_dynamic_duo, _MODES, _CALIB_MODES
 from src.utils.data import load_config
+from src.utils.metrics import top_label_ece
 from src.utils.model import get_model
 from src.reliability.proxies.stats import PROXY_KINDS
 from src.calibrators.joint_proxy_weighted import JointProxyWeighted
 from src.utils.diagnostics_plots import (
     plot_batch_diagnostics, plot_proxy_diagnostics, plot_per_corruption_proxy_vs_accuracy,
     plot_per_corruption_gate_weight, write_accuracy_latex_table,
-    extra_duo_series_from_batch_records, DEFAULT_EMA_WINDOW, C_GATE, EXTRA_SERIES_PALETTE,
+    extra_duo_series_from_batch_records, DEFAULT_EMA_WINDOW, C_GATE, extra_series_color,
 )
 from scripts._cli import (
     add_duo_config_arg, add_num_samples_arg, add_seed_arg,
@@ -358,6 +359,24 @@ def _boundaries_from_batch_records(batch_records: list[dict]) -> list[dict]:
     return boundaries
 
 
+def _load_ece_csv(csv_dir: Path) -> list[dict]:
+    """ece_per_corruption.csv -> [{"corruption", "key", "ece"}], [] if absent
+    (a run from before ECE tracking -- its ece_table.tex is then just skipped)."""
+    path = csv_dir / "ece_per_corruption.csv"
+    if not path.exists():
+        return []
+    with path.open() as f:
+        return [{"corruption": r["corruption"], "key": r["key"], "ece": float(r["ece"])}
+                for r in csv.DictReader(f)]
+
+
+def _save_ece_csv(csv_dir: Path, records: list[dict]) -> None:
+    with (csv_dir / "ece_per_corruption.csv").open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["corruption", "key", "ece"])
+        writer.writeheader()
+        writer.writerows(records)
+
+
 def _write_plots(
     batch_records: list[dict], boundaries: list[dict], proxy_rows: list[dict],
     out_dir: Path, ema_window: int,
@@ -366,6 +385,7 @@ def _write_plots(
     duo_label: str = "duo",
     compare_proxy_logs: dict[str, list[dict]] | None = None,
     hide_duo_line: bool = False,
+    ece_records: list[dict] | None = None,
 ) -> tuple[bool, bool]:
     """Write every diagnostics artifact from whatever has been recorded SO
     FAR, overwriting what's already on disk -- called after every corruption
@@ -375,6 +395,10 @@ def _write_plots(
     partial proxy_log CSV behind. Mirrors run_tent.py's own _write_plots for
     the exact same reason (see its docstring). Returns (has_batch_plot,
     has_proxy_plot), same as the two plotting calls' own return values.
+
+    ece_records (see _load_ece_csv) additionally writes ece_table.tex: the
+    same layout as accuracy_table.tex but per-corruption ECE for large/small/
+    the main duo/every --compare_configs entry. Skipped if empty/None.
 
     extra_series (this run's own duo accuracy, plus one per --compare_configs
     entry -- see _run) is only ever forwarded to the per-corruption plot,
@@ -419,6 +443,9 @@ def _write_plots(
                                              ema_window=ema_window)
 
     write_accuracy_latex_table(batch_records, out_dir / "accuracy_table.tex", duo_label=duo_label)
+    if ece_records:
+        write_accuracy_latex_table(batch_records, out_dir / "ece_table.tex", duo_label=duo_label,
+                                   ece_records=ece_records)
 
     per_corruption_dir = out_dir / "per_corruption"
     per_corruption_dir.mkdir(parents=True, exist_ok=True)
@@ -548,7 +575,7 @@ def _replot_from_csv_dir(args: argparse.Namespace, csv_dir: Path, ema_window: in
     has_batch_plot, has_proxy_plot = _write_plots(
         batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series,
         show_gate_weight=args.show_gate_weight, compare_proxy_logs=compare_proxy_logs,
-        hide_duo_line=args.hide_duo_line,
+        hide_duo_line=args.hide_duo_line, ece_records=_load_ece_csv(csv_dir),
     )
 
     wandb_run = _make_replot_wandb_run(args, csv_dir)
@@ -653,6 +680,17 @@ def _replay_compare_configs_from_cache(
         for r in batch_records:
             r[f"cmp_{name}_acc"] = float("nan")
 
+    # ECE: the main duo's own per-corruption ECE can't be recomputed here (its
+    # calibrator/adaptation state isn't rebuilt on replay), so those rows are
+    # kept from the original run's ece_per_corruption.csv; large/small/cmp rows
+    # are recomputed from the cached logits, dropping stale cmp rows.
+    ece_records = [r for r in _load_ece_csv(csv_dir) if r["key"] == "duo"]
+
+    def _add_ece(label: str, key: str, z: torch.Tensor, labels: torch.Tensor) -> None:
+        conf, pred = z.softmax(1).max(1)
+        ece_records.append({"corruption": label, "key": key,
+                            "ece": top_label_ece(conf, pred == labels.to(pred.device))})
+
     boundaries = _boundaries_from_batch_records(batch_records)
     for i, b in enumerate(boundaries):
         start = b["idx"]
@@ -674,9 +712,13 @@ def _replay_compare_configs_from_cache(
                   f"with --cache_logits to refresh it).")
             continue
 
+        _add_ece(label, "large", z_l_all, labels_all)
+        _add_ece(label, "small", z_s_all, labels_all)
+
         for name, calibrator in new_calibrators:
             if hasattr(calibrator, "set_corruption"):
                 calibrator.set_corruption(label)
+            z_cmp_chunks = []
             pos = 0
             for r in rows:
                 n = int(r["n"])
@@ -686,13 +728,16 @@ def _replay_compare_configs_from_cache(
                 with torch.no_grad():
                     z_cmp = calibrator.calibrate(z_l, z_s)
                 r[f"cmp_{name}_acc"] = float((z_cmp.argmax(1) == labels.to(z_cmp.device)).float().mean())
+                z_cmp_chunks.append(z_cmp)
                 pos += n
+            _add_ece(label, f"cmp_{name}", torch.cat(z_cmp_chunks), labels_all)
 
     with batch_csv.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(batch_records[0].keys()))
         writer.writeheader()
         writer.writerows(batch_records)
     print(f"Merged {len(new_calibrators)} new calibrator column(s) into {batch_csv}")
+    _save_ece_csv(csv_dir, ece_records)
 
     proxy_rows = _load_proxy_log_csv(csv_dir)
     # calib_mode_by_name: from the --compare_configs file just loaded above,
@@ -712,7 +757,7 @@ def _replay_compare_configs_from_cache(
     has_batch_plot, has_proxy_plot = _write_plots(
         batch_records, boundaries, proxy_rows, csv_dir, ema_window, extra_series,
         show_gate_weight=args.show_gate_weight, compare_proxy_logs=compare_proxy_logs,
-        hide_duo_line=args.hide_duo_line,
+        hide_duo_line=args.hide_duo_line, ece_records=ece_records,
     )
 
     wandb_run = _make_replot_wandb_run(args, csv_dir, extra_tags=["compare_replay"])
@@ -916,7 +961,7 @@ def _run(
 
     # This run's own duo (shown by default -- see the module docstring --
     # unless --hide_duo_line) plus one line per --compare_configs entry, in
-    # the file's own order, from EXTRA_SERIES_PALETTE (cycled past 5 entries)
+    # the file's own order, from extra_series_color (never repeats)
     # -- fed to every per-corruption plot via _write_plots below. Each tuple's
     # 4th element (calibration_mode) is what plot_per_corruption_proxy_vs_
     # accuracy uses to draw a proxy_weighted line bold/opaque and everything
@@ -926,7 +971,7 @@ def _run(
     )
     for i, (name, _) in enumerate(compare_calibrators):
         cmp_cfg = next(c for c in cmp_run_cfgs if c["name"] == name)
-        extra_series.append((f"cmp_{name}_acc", EXTRA_SERIES_PALETTE[i % len(EXTRA_SERIES_PALETTE)], name,
+        extra_series.append((f"cmp_{name}_acc", extra_series_color(i), name,
                               cmp_cfg["calibration_mode"]))
 
     batch_records: list[dict] = []
@@ -939,6 +984,12 @@ def _run(
     # SLURM walltime kill mid-corruption leaves no truncated/misleading cache
     # file for it -- same convention as batch_diagnostics.csv itself).
     cache_buf = {"z_l": [], "z_s": [], "labels": []}
+    # Per-corruption ECE bookkeeping: large/small/duo come from
+    # evaluate_dynamic_duo's own full-stream metrics (metrics_by_model);
+    # each --compare_configs calibrator's per-sample (max-confidence,
+    # correct) is buffered here since it never goes through that path.
+    ece_records: list[dict] = []
+    cmp_conf_buf: dict[str, list[tuple[torch.Tensor, torch.Tensor]]] = {}
 
     def _on_corruption_start(corruption, severity):
         corruption_boundaries.append({"idx": len(batch_records), "label": f"{corruption}/s{severity}"})
@@ -946,6 +997,7 @@ def _run(
             if hasattr(cmp_calibrator, "set_corruption"):
                 cmp_calibrator.set_corruption(f"{corruption}/s{severity}")
         cache_buf["z_l"].clear(); cache_buf["z_s"].clear(); cache_buf["labels"].clear()
+        cmp_conf_buf.clear()
 
     def _on_batch(batch_idx, prefix, duo, outputs, z_large, z_small, labels):
         row = {"global_idx": len(batch_records), "corruption": prefix.rstrip("/"), "n": labels.shape[0]}
@@ -972,6 +1024,8 @@ def _run(
                 z_cmp = cmp_calibrator.calibrate(z_large, z_small)
             labels_dev = labels.to(z_cmp.device)
             row[f"cmp_{name}_acc"] = float((z_cmp.argmax(1) == labels_dev).float().mean())
+            conf, pred = z_cmp.softmax(1).max(1)
+            cmp_conf_buf.setdefault(name, []).append((conf.detach().cpu(), (pred == labels_dev).cpu()))
 
         if logits_cache_dir is not None:
             cache_buf["z_l"].append(z_large.detach().cpu())
@@ -1005,6 +1059,15 @@ def _run(
         # otherwise leaves nothing behind but the calibrator's own
         # incrementally-written proxy_log CSV).
         nonlocal proxy_rows, has_batch_plot, has_proxy_plot
+        label = f"{corruption}/s{severity}"
+        for key, metrics in metrics_by_model.items():
+            ece_records.append({"corruption": label, "key": key, "ece": float(metrics["ece"])})
+        for name, chunks in cmp_conf_buf.items():
+            ece_records.append({
+                "corruption": label, "key": f"cmp_{name}",
+                "ece": top_label_ece(torch.cat([c for c, _ in chunks]), torch.cat([k for _, k in chunks])),
+            })
+        _save_ece_csv(out_dir, ece_records)
         if batch_records:
             with (out_dir / "batch_diagnostics.csv").open("w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=list(batch_records[0].keys()))
@@ -1039,6 +1102,7 @@ def _run(
                 batch_records, corruption_boundaries, proxy_rows, out_dir, args.ema_window,
                 extra_series, show_gate_weight=args.show_gate_weight, duo_label=run_cfg["name"],
                 compare_proxy_logs=compare_proxy_logs, hide_duo_line=args.hide_duo_line,
+                ece_records=ece_records,
             )
 
     results_rows = evaluate_dynamic_duo(
@@ -1047,6 +1111,13 @@ def _run(
         on_corruption_start=_on_corruption_start, on_batch=_on_batch,
         on_corruption_end=_on_corruption_end,
     )
+
+    if wandb_run is not None and ece_records:
+        by_key: dict[str, list[float]] = {}
+        for r in ece_records:
+            by_key.setdefault(r["key"], []).append(r["ece"])
+        for key, vals in by_key.items():
+            wandb_run.summary[f"ece_avg/{key}"] = sum(vals) / len(vals)
 
     if batch_records:
         print(f"Wrote {len(batch_records)} rows to {out_dir / 'batch_diagnostics.csv'}")
