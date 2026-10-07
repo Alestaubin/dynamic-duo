@@ -22,8 +22,9 @@ env/
 *.out
 # *slurm/
 
-# sh files
+# sh files (slurm launchers are the exception: they are part of the repo)
 *.sh
+!slurm/*.sh
 
 checkpoints
 evaluation/
@@ -43,6 +44,12 @@ wandb/
 # Experiment outputs: regenerable, so untracked -- except the final paper tables/figures
 out/*
 !out/paper/
+
+# Upstream checkouts (pinned in third_party/repos.yaml, re-created by third_party/fetch.py)
+/third_party/*/
+
+# Caches: member logits, CCC shard indexes, train-slice file lists (regenerable)
+/cache/
 
 # Local pre-cleanup backups (git-ignored files the tag cannot restore)
 /archive/
