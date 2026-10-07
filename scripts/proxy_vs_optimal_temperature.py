@@ -72,7 +72,7 @@ from scripts.compare_calibrators import _build_calibrator
 from scripts.plot_run_diagnostics import _load_calib_config, _resolve_fixed_ts_config, _default_calib_map
 from scripts._cli import (
     add_duo_config_arg, add_num_samples_arg, add_seed_arg,
-    add_proto_metric_arg, add_out_dir_run_name_args,
+    add_proto_metric_arg, add_out_dir_run_name_args, add_tta_args,
 )
 
 import matplotlib
@@ -209,6 +209,7 @@ def main() -> None:
                          "small_duo/*_indep). Shapes the logits the per-batch optimal-T fit "
                          "and the proxy are both measured on.")
     p.add_argument("--steps", type=int, default=1)
+    add_tta_args(p)
     add_num_samples_arg(p)
     add_seed_arg(p)
     p.add_argument("--batch_size", type=int, default=None, help="Overrides cfg['BS'].")
@@ -301,6 +302,7 @@ def main() -> None:
         small=small_model, small_preprocess=small_preprocess,
         mode=args.mode, joint_calibrator=calibrator, calibration_mode=run_cfg["calibration_mode"],
         cfg=cfg, steps=args.steps,
+        tta_method=args.tta_method, tta_kwargs=args.tta_kwargs,
     )
 
     batch_rows: list[dict] = []

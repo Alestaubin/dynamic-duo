@@ -1,0 +1,223 @@
+[
+    {
+        "name": "fixed_ts",
+        "calibration_mode": "fixed_ts",
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.01_b0.5_pbs128",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.01
+        },
+        "beta": 0.5,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 128,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.05_b0.5_pbs128",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.05
+        },
+        "beta": 0.5,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 128,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.9_b0.5_pbs128",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.9
+        },
+        "beta": 0.5,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 128,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.9999_b0.5_pbs128",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.9999
+        },
+        "beta": 0.5,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 128,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.01_b0.5_pbs16",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.01
+        },
+        "beta": 0.5,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 16,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.05_b0.5_pbs16",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.05
+        },
+        "beta": 0.5,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 16,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.9_b0.5_pbs16",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.9
+        },
+        "beta": 0.5,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 16,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.9999_b0.5_pbs16",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.9999
+        },
+        "beta": 0.5,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 16,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.01_b4.0_pbs128",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.01
+        },
+        "beta": 4.0,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 128,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.05_b4.0_pbs128",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.05
+        },
+        "beta": 4.0,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 128,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.9_b4.0_pbs128",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.9
+        },
+        "beta": 4.0,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 128,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    },
+    {
+        "name": "ema0.9999_b4.0_pbs128",
+        "calibration_mode": "proxy_weighted",
+        "proxy_kind": "nuclear_norm",
+        "calib_method": "identity",
+        "calib_map": null,
+        "filter_kind": "ema",
+        "filter_kwargs": {
+            "alpha": 0.9999
+        },
+        "beta": 4.0,
+        "pool": "log",
+        "prior_l": 0.5,
+        "prior_s": 0.5,
+        "proxy_batch_size": 128,
+        "fit_beta": false,
+        "fixed_ts_config": "checkpoints/fixed_ts/default"
+    }
+]

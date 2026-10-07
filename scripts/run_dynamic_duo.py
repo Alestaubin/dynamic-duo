@@ -10,7 +10,7 @@ from src.utils.diagnostics_plots import (
 )
 from scripts._cli import (
     add_duo_config_arg, add_num_samples_arg, add_seed_arg,
-    add_proto_metric_arg, add_out_dir_run_name_args,
+    add_proto_metric_arg, add_out_dir_run_name_args, add_tta_args, tta_tag,
 )
 
 import argparse
@@ -60,6 +60,7 @@ if __name__ == "__main__":
     add_duo_config_arg(parser, required=True)
     parser.add_argument("--mode", type=str, default="both_duo")
     parser.add_argument("--steps", type=int, default=1)
+    add_tta_args(parser)
     add_num_samples_arg(parser, default=None)
     add_seed_arg(parser, default=None)
 
@@ -177,7 +178,7 @@ if __name__ == "__main__":
     run_name = args.run_name or (
         f"{args.duo_calibration_mode}"
         f"{'_' + args.proxy_kind if args.duo_calibration_mode == 'proxy_weighted' else ''}"
-        f"__{args.mode}__{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"__{args.mode}{tta_tag(config, args.tta_method)}__{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
     out_dir = Path(args.out_dir) / run_name
     if not args.no_plots:
@@ -256,6 +257,7 @@ if __name__ == "__main__":
         cfg=config,
         steps=args.steps,
         norm_logits=args.norm_logits,
+        tta_method=args.tta_method, tta_kwargs=args.tta_kwargs,
     )
 
     # Built here (rather than left for evaluate_dynamic_duo to create+finish

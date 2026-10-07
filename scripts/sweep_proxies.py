@@ -167,7 +167,7 @@ from src.tta.dynamic_duo import setup_duo
 from src.calibrators.joint_fixed_TS import JointFixedTS
 from scripts._cli import (
     add_duo_config_arg, add_seed_arg, add_cache_toggle_args,
-    add_proto_metric_arg, add_wandb_project_group_args,
+    add_proto_metric_arg, add_wandb_project_group_args, add_tta_args, tta_tag,
 )
 
 _ALL_PROXY_KINDS = ["nuclear_norm", "atc", "prototype", "ac_mc", "cot"]
@@ -379,6 +379,7 @@ def main():
     parser.add_argument("--steps", type=int, default=1,
                         help="Gradient steps per batch, passed straight to setup_duo "
                              "(DynamicDuo.steps). No effect when --mode no_adapt.")
+    add_tta_args(parser)
     parser.add_argument("--fixed_ts_reference", type=str, default="checkpoints/fixed_ts/default",
                         help="JointFixedTS checkpoint used as the joint_calibrator that drives "
                              "TENT adaptation for *_duo modes (frozen — its own temperatures "
@@ -532,6 +533,7 @@ def main():
         small=small_model, small_preprocess=small_preprocess,
         joint_calibrator=ref_calibrator, calibration_mode="fixed_ts",
         mode=args.mode, cfg=config, steps=args.steps,
+        tta_method=args.tta_method, tta_kwargs=args.tta_kwargs,
     )
 
     ext_l = FeatureExtractor(large_model, cfg_l.name)
@@ -541,7 +543,8 @@ def main():
     # --mode/--steps folded into every stream's cache tag below: a frozen
     # no_adapt stream and a both_duo-adapted stream for the same corruption
     # are entirely different logits and must never collide in the cache.
-    mode_tag = f"mode{args.mode}_steps{args.steps}"
+    # tta_tag is empty for tent, so existing (tent) cache entries keep their keys.
+    mode_tag = f"mode{args.mode}_steps{args.steps}{tta_tag(config, args.tta_method)}"
 
     try:
         # --- Phase B: one pass over calibration (dev-shift) data, fit every

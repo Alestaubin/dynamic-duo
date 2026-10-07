@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, softmax_entropy, collect_params, configure_model_frozen
+from src.tta.tent import softmax_entropy
+from src.tta.methods import TTAMethod, build_tta_method, resolve_tta_spec
 from src.utils.data import load_imagenetC
 from src.utils.metrics import get_metrics_dict
 from src.utils.model import _preprocess_batch
@@ -36,9 +36,11 @@ _CALIB_MODES = {"fixed_ts", "oracle_ts", "proxy_weighted", "coca", "optimal_w_or
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
 
-    Wraps a large model and a small model (each already configured for TENT:
-    BN affine params require grad, batch stats forced) and drives adaptation
-    according to the selected mode.
+    Wraps a large model and a small model (each already configured by its
+    TTAMethod -- see src/tta/methods/ -- via setup_duo) and drives adaptation
+    according to the selected mode. WHICH models adapt and on WHICH logits is
+    this class's `mode`; HOW they adapt (trainable params, optimizer, loss,
+    update, reset) is entirely the TTAMethod's (`tta`).
 
     Calibrators
     -----------
@@ -73,10 +75,9 @@ class DynamicDuo(nn.Module):
         self,
         large: nn.Module,
         large_preprocess,
-        large_optimizer: optim.Optimizer | None,
         small: nn.Module,
         small_preprocess,
-        small_optimizer: optim.Optimizer | None,
+        tta: TTAMethod,
         joint_calibrator: nn.Module,
         mode: str = "both_duo",
         steps: int = 1,
@@ -92,8 +93,7 @@ class DynamicDuo(nn.Module):
         self.small = small
         self.small_preprocess = small_preprocess
         self.joint_calibrator = joint_calibrator
-        self.large_optimizer = large_optimizer
-        self.small_optimizer = small_optimizer
+        self.tta = tta
         self.mode = mode
         self.steps = steps
         self.calibration_mode = calibration_mode
@@ -103,22 +103,18 @@ class DynamicDuo(nn.Module):
         logger.info(
             f"Initialized DynamicDuo | mode={mode} steps={steps} "
             f"adapt_large={self.adapt_large} adapt_small={self.adapt_small} "
-            f"calibration_mode={calibration_mode}"
+            f"calibration_mode={calibration_mode} tta_method={tta.name}"
         )
         self._reset_diagnostics()
 
         device = next(self.large.parameters()).device
         self.joint_calibrator.to(device)
 
-        if self.adapt_large:
-            assert large_optimizer is not None, f"{mode} needs a large optimizer"
-            self.large_model_state, self.large_optimizer_state = \
-                copy_model_and_optimizer(self.large, self.large_optimizer)
-
-        if self.adapt_small:
-            assert small_optimizer is not None, f"{mode} needs a small optimizer"
-            self.small_model_state, self.small_optimizer_state = \
-                copy_model_and_optimizer(self.small, self.small_optimizer)
+        expected = {s for s, do in (("large", self.adapt_large), ("small", self.adapt_small)) if do}
+        assert tta.adapting == expected, (
+            f"{mode} needs TTA method '{tta.name}' set up for sides {sorted(expected)}, "
+            f"but it was set up for {sorted(tta.adapting)} (build it via setup_duo)"
+        )
 
         if calibration_mode == "fixed_ts":
             n_frozen = 0
@@ -161,9 +157,9 @@ class DynamicDuo(nn.Module):
         for _ in range(self.steps):
             outputs, z_large, z_small = forward_and_adapt(
                 x,
-                self.large, self.large_preprocess, self.large_optimizer,
-                self.small, self.small_preprocess, self.small_optimizer,
-                self.joint_calibrator,
+                self.large, self.large_preprocess,
+                self.small, self.small_preprocess,
+                self.joint_calibrator, self.tta,
                 self.mode,
                 norm_logits=self.norm_logits
             )
@@ -200,27 +196,14 @@ class DynamicDuo(nn.Module):
     def reset(self):
         """Reset the model and optimizer states to before adaptation."""
         self._reset_diagnostics()
-        if self.adapt_large:
-            logger.info("Resetting large model to pre-adaptation state")
-            load_model_and_optimizer(
-                self.large, self.large_optimizer,
-                self.large_model_state, self.large_optimizer_state
-            )
-
-        if self.adapt_small:
-            logger.info("Resetting small model to pre-adaptation state")
-            load_model_and_optimizer(
-                self.small, self.small_optimizer,
-                self.small_model_state, self.small_optimizer_state
-            )
+        self.tta.reset()
         # Calibrator: fixed_ts is frozen (nothing to reset); coca self-adapts
         # fresh each batch (reset_each_batch), so there is nothing to restore.
 
 
 @torch.enable_grad()
-def forward_and_adapt(x, large, large_preprocess, large_optimizer,
-                      small, small_preprocess, small_optimizer,
-                      joint_calibrator, mode, norm_logits=False):
+def forward_and_adapt(x, large, large_preprocess, small, small_preprocess,
+                      joint_calibrator, tta, mode, norm_logits=False):
     adapt_large, adapt_small, signal = _MODE_SPEC[mode]
     device = next(large.parameters()).device
     x_large = _preprocess_batch(x, large_preprocess, device)
@@ -241,31 +224,19 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
         # detached logits (separate optimizer/loss), returns aggregated logits
         # that are differentiable w.r.t. the model logits.
         z_bar = joint_calibrator.calibrate_with_grad(logits_l=zl, logits_s=zs)
-        loss = softmax_entropy(z_bar).mean(0)
-        logger.debug(f"duo loss={loss.item():.4f}")
-
-        loss.backward()
-        for opt, do in ((large_optimizer, adapt_large),
-                        (small_optimizer, adapt_small)):
-            if do and opt is not None:
-                opt.step()
-        for opt, do in ((large_optimizer, adapt_large),
-                        (small_optimizer, adapt_small)):
-            if do and opt is not None:
-                opt.zero_grad(set_to_none=True)
+        loss = tta.loss(z_bar, "duo")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"duo loss={loss.item():.4f}")
+        tta.update(loss, [s for s, do in (("large", adapt_large), ("small", adapt_small)) if do])
         # No calibrator grad to clear: fixed_ts is frozen, coca manages its own.
 
     elif signal == "indep":  # indep
-        if adapt_large:
-            large_loss = softmax_entropy(z_large).mean(0)
-            logger.debug(f"large indep loss={large_loss.item():.4f}")
-            large_loss.backward()
-            large_optimizer.step(); large_optimizer.zero_grad()
-        if adapt_small:
-            small_loss = softmax_entropy(z_small).mean(0)
-            logger.debug(f"small indep loss={small_loss.item():.4f}")
-            small_loss.backward()
-            small_optimizer.step(); small_optimizer.zero_grad()
+        for side, do, z in (("large", adapt_large, z_large), ("small", adapt_small, z_small)):
+            if do:
+                loss = tta.loss(z, side)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"{side} indep loss={loss.item():.4f}")
+                tta.update(loss, [side])
     elif signal is None:
         pass  # no adaptation, just forward
     else:
@@ -276,49 +247,23 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
         # the tau already fit on this batch by calibrate_with_grad (same logits).
         return joint_calibrator.calibrate(logits_l=z_large, logits_s=z_small), z_large, z_small
 
-def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, calibration_mode, mode, cfg, steps, norm_logits=False):
+def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, calibration_mode, mode, cfg, steps,
+              norm_logits=False, tta_method=None, tta_kwargs=None):
     """
-    Configure a DynamicDuo for TENT adaptation.
+    Configure a DynamicDuo for test-time adaptation.
+
+    tta_method/tta_kwargs pick the TTA method (src/tta/methods/); see
+    resolve_tta_spec for how they combine with the duo YAML's `TTA:` block
+    and the "tent" default.
     """
     assert mode in _MODES, f"Invalid mode {mode}. Must be one of {_MODES}."
     adapt_large, adapt_small, signal = _MODE_SPEC[mode]
-    logger.info(f"Setting up DynamicDuo | mode={mode} steps={steps} adapt_large={adapt_large} adapt_small={adapt_small}")
+    tta_name, tta_kw = resolve_tta_spec(cfg, tta_method, tta_kwargs)
+    logger.info(f"Setting up DynamicDuo | mode={mode} steps={steps} adapt_large={adapt_large} "
+                f"adapt_small={adapt_small} tta_method={tta_name} tta_kwargs={tta_kw}")
 
-    large_optimizer, small_optimizer = None, None
-
-    if adapt_large:
-        logger.info(f"Configuring large model with norm={cfg['LARGE']['NORM']}")
-        large_model = configure_model(large, cfg["LARGE"]["NORM"])
-        params, param_names = collect_params(large_model, cfg["LARGE"]["NORM"])
-
-        if not params:
-            raise ValueError("No parameters found for adaptation. Check if model has Norm layers.")
-
-        large_optimizer = setup_optimizer(params, cfg["LARGE"]["OPTIM"])
-
-        logger.info(f"model for adaptation: %s", large_model)
-        logger.info(f"params for adaptation: %s", param_names)
-        logger.info(f"optimizer for adaptation: %s", large_optimizer)
-    else: 
-        logger.info(f"Configuring large model (frozen, batch stats) with norm={cfg['LARGE']['NORM']}")
-        configure_model_frozen(large, cfg["LARGE"]["NORM"])
-
-    if adapt_small:
-        logger.info(f"Configuring small model with norm={cfg['SMALL']['NORM']}")
-        small_model = configure_model(small, cfg["SMALL"]["NORM"])
-        params, param_names = collect_params(small_model, cfg["SMALL"]["NORM"])
-
-        if not params:
-            raise ValueError("No parameters found for adaptation. Check if model has Norm layers.")
-
-        small_optimizer = setup_optimizer(params, cfg["SMALL"]["OPTIM"])
-        logger.info(f"model for adaptation: %s", small_model)
-        logger.info(f"params for adaptation: %s", param_names)
-        logger.info(f"optimizer for adaptation: %s", small_optimizer)
-    else: 
-        logger.info(f"Configuring small model (frozen, batch stats) with norm={cfg['SMALL']['NORM']}")
-        configure_model_frozen(small, cfg["SMALL"]["NORM"])
-
+    tta = build_tta_method(tta_name, **tta_kw)
+    tta.setup(large, small, cfg, adapt_large, adapt_small)
 
     # Register prototype feature hooks for proxy-based calibrators.
     if (calibration_mode == "proxy_weighted"
@@ -329,10 +274,9 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
     dynamic_duo = DynamicDuo(
         large=large,
         large_preprocess=large_preprocess,
-        large_optimizer=large_optimizer,
         small=small,
         small_preprocess=small_preprocess,
-        small_optimizer=small_optimizer,
+        tta=tta,
         joint_calibrator=joint_calibrator,
         calibration_mode=calibration_mode,
         mode=mode,
@@ -447,13 +391,10 @@ def build_wandb_run(duo, cfg, wandb_project="dynamic-duos", group=None, run_name
             "adaptation_batch_size": adaptation_batch_size,
             "proxy_batch_size": proxy_batch_size,
             "large/name": cfg["LARGE"]["NAME"],
-            "large/norm": cfg["LARGE"]["NORM"],
-            "large/lr": cfg["LARGE"]["OPTIM"]["LR"],
-            "large/optim": cfg["LARGE"]["OPTIM"]["METHOD"],
             "small/name": cfg["SMALL"]["NAME"],
-            "small/norm": cfg["SMALL"]["NORM"],
-            "small/lr": cfg["SMALL"]["OPTIM"]["LR"],
-            "small/optim": cfg["SMALL"]["OPTIM"]["METHOD"],
+            # tta/method, large|small/{norm,lr,optim}, ... -- whatever the TTA
+            # method itself says describes its setup (see TTAMethod.describe).
+            **duo.tta.describe(),
             **({
                 "calibrator/Tl": duo.joint_calibrator.Tl.item(),
                 "calibrator/Ts": duo.joint_calibrator.Ts.item(),
@@ -515,11 +456,10 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             logger.info(f"Evaluating corruption {corruption_type} severity {severity}")
             if on_corruption_start is not None:
                 on_corruption_start(corruption_type, severity)
-            try:
-                duo.reset()
-                logger.info("resetting model")
-            except:
-                logger.warning("not resetting model")
+            # No try/except: a TTA method whose reset() fails must stop the run,
+            # not silently leak one corruption's adapted state into the next.
+            duo.reset()
+            logger.info("resetting model")
 
             prefix = f"{corruption_type}/s{severity}/"
             device = next(duo.parameters()).device

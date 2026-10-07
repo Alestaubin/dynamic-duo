@@ -71,6 +71,7 @@ EVAL:
     - 'pixelate'
     - 'shot_noise'
     - 'snow'
+    - 'zoom_blur'
   SEVERITIES:
     # - 1
     # - 2

@@ -23,6 +23,9 @@ arguments that are actually the same thing everywhere.
 from __future__ import annotations
 
 import argparse
+import json
+
+from src.tta.methods import TTA_METHODS, resolve_tta_spec
 
 
 def add_duo_config_arg(
@@ -96,3 +99,38 @@ def add_out_dir_run_name_args(
         "--run_name", type=str, default=None,
         help=run_name_help or "Subdirectory name under --out_dir. Default: auto-generated.",
     )
+
+
+def _json_object(text: str) -> dict:
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise argparse.ArgumentTypeError(f"not valid JSON: {e}")
+    if not isinstance(obj, dict):
+        raise argparse.ArgumentTypeError("must be a JSON object, e.g. '{\"key\": 1}'")
+    return obj
+
+
+def add_tta_args(parser: argparse.ArgumentParser) -> None:
+    """--tta_method/--tta_kwargs. Both default to None = "use the duo YAML's
+    `TTA:` block, else tent" (see src.tta.methods.resolve_tta_spec) -- so an
+    omitted flag never overrides what the config says."""
+    parser.add_argument(
+        "--tta_method", type=str, default=None, choices=sorted(TTA_METHODS),
+        help="Test-time-adaptation method for the models that adapt (see src/tta/methods/). "
+             "Default: the duo config's TTA.METHOD, else 'tent'.",
+    )
+    parser.add_argument(
+        "--tta_kwargs", type=_json_object, default=None, metavar="JSON",
+        help="Method hyperparameters as a JSON object, e.g. '{\"e_margin\": 2.0}'; merged over "
+             "the duo config's TTA.KWARGS (only applied when that block's METHOD is the one "
+             "in use). Not needed for tent (no hyperparameters beyond the LARGE/SMALL OPTIM blocks).",
+    )
+
+
+def tta_tag(cfg: dict, tta_method: str | None = None) -> str:
+    """Run-name/cache-tag suffix naming the RESOLVED TTA method (explicit
+    argument > cfg's TTA.METHOD > default), empty for tent so every
+    pre-existing name, directory and cache key stays exactly as it was."""
+    name, _ = resolve_tta_spec(cfg, tta_method)
+    return f"__{name}" if name != "tent" else ""

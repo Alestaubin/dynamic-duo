@@ -1,0 +1,136 @@
+{
+  "verdict": {
+    "none_acc": 0.5055189874862989,
+    "best_ema_variant": "ema_alpha=0.9",
+    "best_ema_acc": 0.5055503859152357,
+    "ema_with_reset_acc": 0.5054376370113263,
+    "ema_no_reset_acc": 0.5053905393679211,
+    "none_vs_ema_gap": 8.135047497259684e-05,
+    "fraction_of_none_vs_ema_gap_closed_by_removing_reset": NaN
+  },
+  "cold_start": {
+    "none": {
+      "warmup_mean_duo_acc": 0.43526785714285715,
+      "warmup_mean_regret": -0.014397321428571428,
+      "late_mean_duo_acc": 0.5064289762213176,
+      "late_mean_regret": -0.012957704940784603,
+      "n_warmup": 140,
+      "n_late": 10808
+    },
+    "ema_alpha=0.01": {
+      "warmup_mean_duo_acc": 0.4635044642857143,
+      "warmup_mean_regret": -0.04263392857142857,
+      "late_mean_duo_acc": 0.5005291219467062,
+      "late_mean_regret": -0.007057850666173205,
+      "n_warmup": 140,
+      "n_late": 10808
+    },
+    "ema_alpha=0.05": {
+      "warmup_mean_duo_acc": 0.4588169642857143,
+      "warmup_mean_regret": -0.03794642857142857,
+      "late_mean_duo_acc": 0.5054762675795706,
+      "late_mean_regret": -0.01200499629903775,
+      "n_warmup": 140,
+      "n_late": 10808
+    },
+    "ema_alpha=0.1": {
+      "warmup_mean_duo_acc": 0.45401785714285714,
+      "warmup_mean_regret": -0.03314732142857143,
+      "late_mean_duo_acc": 0.505857929311621,
+      "late_mean_regret": -0.012386658031088084,
+      "n_warmup": 140,
+      "n_late": 10808
+    },
+    "ema_alpha=0.3": {
+      "warmup_mean_duo_acc": 0.4439732142857143,
+      "warmup_mean_regret": -0.023102678571428573,
+      "late_mean_duo_acc": 0.5062338082901554,
+      "late_mean_regret": -0.012762537009622502,
+      "n_warmup": 140,
+      "n_late": 10808
+    },
+    "ema_alpha=0.5": {
+      "warmup_mean_duo_acc": 0.43850446428571427,
+      "warmup_mean_regret": -0.01763392857142857,
+      "late_mean_duo_acc": 0.5063075383974833,
+      "late_mean_regret": -0.012836267116950408,
+      "n_warmup": 140,
+      "n_late": 10808
+    },
+    "ema_alpha=0.9": {
+      "warmup_mean_duo_acc": 0.43582589285714285,
+      "warmup_mean_regret": -0.014955357142857144,
+      "late_mean_duo_acc": 0.5064535529237602,
+      "late_mean_regret": -0.012982281643227239,
+      "n_warmup": 140,
+      "n_late": 10808
+    },
+    "ema_alpha=0.9999": {
+      "warmup_mean_duo_acc": 0.43526785714285715,
+      "warmup_mean_regret": -0.014397321428571428,
+      "late_mean_duo_acc": 0.5064289762213176,
+      "late_mean_regret": -0.012957704940784603,
+      "n_warmup": 140,
+      "n_late": 10808
+    },
+    "ema_alpha=0.3_noreset": {
+      "warmup_mean_duo_acc": 0.43895089285714284,
+      "warmup_mean_regret": -0.018080357142857145,
+      "late_mean_duo_acc": 0.5062511565507032,
+      "late_mean_regret": -0.012779885270170245,
+      "n_warmup": 140,
+      "n_late": 10808
+    }
+  },
+  "lag": {
+    "none": {
+      "mean_best_lag": 2.857142857142857,
+      "mean_corr_at_lag0": 0.39482337932361306,
+      "n_corruptions": 14
+    },
+    "ema_alpha=0.01": {
+      "mean_best_lag": 1.9285714285714286,
+      "mean_corr_at_lag0": 0.38071589955177665,
+      "n_corruptions": 14
+    },
+    "ema_alpha=0.05": {
+      "mean_best_lag": 2.642857142857143,
+      "mean_corr_at_lag0": 0.39464038117731703,
+      "n_corruptions": 14
+    },
+    "ema_alpha=0.1": {
+      "mean_best_lag": 2.2142857142857144,
+      "mean_corr_at_lag0": 0.38908548191832437,
+      "n_corruptions": 14
+    },
+    "ema_alpha=0.3": {
+      "mean_best_lag": 3.357142857142857,
+      "mean_corr_at_lag0": 0.38639702881201093,
+      "n_corruptions": 14
+    },
+    "ema_alpha=0.5": {
+      "mean_best_lag": 4.357142857142857,
+      "mean_corr_at_lag0": 0.388227907553428,
+      "n_corruptions": 14
+    },
+    "ema_alpha=0.9": {
+      "mean_best_lag": 2.857142857142857,
+      "mean_corr_at_lag0": 0.39355707072529994,
+      "n_corruptions": 14
+    },
+    "ema_alpha=0.9999": {
+      "mean_best_lag": 2.857142857142857,
+      "mean_corr_at_lag0": 0.39482217237736644,
+      "n_corruptions": 14
+    },
+    "ema_alpha=0.3_noreset": {
+      "mean_best_lag": 4.214285714285714,
+      "mean_corr_at_lag0": 0.3916192897953593,
+      "n_corruptions": 14
+    }
+  },
+  "drift": {
+    "mean_total_drift": 0.21722947831056458,
+    "mean_batch_noise_std": 0.0886018953609401
+  }
+}

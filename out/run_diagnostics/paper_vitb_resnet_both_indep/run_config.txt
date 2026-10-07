@@ -1,0 +1,154 @@
+==============================================================================
+RUN CONFIGURATION
+==============================================================================
+out_dir: out/run_diagnostics/paper_vitb_resnet_both_indep
+duo: LARGE=vit_b_16 (norm=LN)  SMALL=resnet50 (norm=BN)
+mode=both_indep  steps=1
+tta_method=('tent', {})
+adaptation_batch_size (cfg.BS)=64  workers=8
+num_samples=50000  fit_num_samples=5000  seed=0
+eval/corruptions=['brightness', 'contrast', 'defocus_blur', 'elastic_transform', 'fog', 'frost', 'gaussian_noise', 'glass_blur', 'impulse_noise', 'jpeg_compression', 'motion_blur', 'pixelate', 'shot_noise', 'snow', 'zoom_blur']
+eval/severities=[5]
+calibrator_dev/corruptions=['gaussian_blur', 'saturate', 'spatter', 'speckle_noise']
+calibrator_dev/severities=[5]
+large/optim={'METHOD': 'Adam', 'STEPS': 1, 'LR': 0.0001, 'BETA': 0.9, 'WD': 0.0}
+small/optim={'METHOD': 'Adam', 'STEPS': 1, 'LR': 0.00025, 'BETA': 0.9, 'WD': 0.0}
+
+------------------------------------------------------------------------------
+PRIMARY calib_config: 'Proxy-weighted NN - β=0.5, pbs=128'
+------------------------------------------------------------------------------
+  name: Proxy-weighted NN - β=0.5, pbs=128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+------------------------------------------------------------------------------
+COMPARE configs (8):
+------------------------------------------------------------------------------
+[fixed_ts]
+  name: fixed_ts
+  calibration_mode: fixed_ts
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+[log_b0.01_pbs128]
+  name: log_b0.01_pbs128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.01
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+[log_b0.1_pbs128]
+  name: log_b0.1_pbs128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.1
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+[log_b0.25_pbs128]
+  name: log_b0.25_pbs128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.25
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+[log_b0.5_pbs128]
+  name: log_b0.5_pbs128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 0.5
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+[log_b1_pbs128]
+  name: log_b1_pbs128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 1
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+[log_b2_pbs128]
+  name: log_b2_pbs128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 2
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+[log_b4_pbs128]
+  name: log_b4_pbs128
+  calibration_mode: proxy_weighted
+  proxy_kind: nuclear_norm
+  calib_method: identity
+  calib_map: None
+  filter_kind: ema
+  filter_kwargs: {'alpha': 0.9999}
+  beta: 4
+  pool: log
+  prior_l: 0.5
+  prior_s: 0.5
+  proxy_batch_size: 128
+  fit_beta: False
+  fixed_ts_config: checkpoints/fixed_ts/default
+
+==============================================================================

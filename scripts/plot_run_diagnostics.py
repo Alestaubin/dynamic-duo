@@ -118,6 +118,7 @@ import torch
 import wandb
 
 from src.tta.dynamic_duo import setup_duo, evaluate_dynamic_duo, _MODES, _CALIB_MODES
+from src.tta.methods import resolve_tta_spec
 from src.utils.data import load_config
 from src.utils.metrics import top_label_ece
 from src.utils.model import get_model
@@ -130,7 +131,7 @@ from src.utils.diagnostics_plots import (
 )
 from scripts._cli import (
     add_duo_config_arg, add_num_samples_arg, add_seed_arg,
-    add_wandb_project_group_args, add_out_dir_run_name_args,
+    add_wandb_project_group_args, add_out_dir_run_name_args, add_tta_args, tta_tag,
 )
 from scripts.compare_calibrators import _build_calibrator, _load_run_configs
 
@@ -810,6 +811,7 @@ def _format_run_manifest(
         f"duo: LARGE={cfg['LARGE']['NAME']} (norm={cfg['LARGE']['NORM']})  "
         f"SMALL={cfg['SMALL']['NAME']} (norm={cfg['SMALL']['NORM']})",
         f"mode={args.mode}  steps={args.steps}",
+        f"tta_method={resolve_tta_spec(cfg, args.tta_method, args.tta_kwargs)}",
         f"adaptation_batch_size (cfg.BS)={cfg['BS']}  workers={cfg['WORKERS']}",
         f"num_samples={args.num_samples}  fit_num_samples={args.fit_num_samples}  seed={args.seed}",
         f"eval/corruptions={cfg['EVAL']['CORRUPTIONS']}",
@@ -838,6 +840,8 @@ def _wandb_config(args: argparse.Namespace, run_cfg: dict, cfg: dict) -> dict:
     config = {
         "mode": args.mode,
         "steps": args.steps,
+        "tta/method": resolve_tta_spec(cfg, args.tta_method, args.tta_kwargs)[0],
+        "tta/kwargs": resolve_tta_spec(cfg, args.tta_method, args.tta_kwargs)[1],
         "num_samples": args.num_samples,
         "fit_num_samples": args.fit_num_samples,
         "seed": args.seed,
@@ -957,6 +961,7 @@ def _run(
         small=small_model, small_preprocess=small_preprocess,
         mode=args.mode, joint_calibrator=calibrator, calibration_mode=run_cfg["calibration_mode"],
         cfg=cfg, steps=args.steps,
+        tta_method=args.tta_method, tta_kwargs=args.tta_kwargs,
     )
 
     # This run's own duo (shown by default -- see the module docstring --
@@ -1226,6 +1231,7 @@ def main() -> None:
                          "THIS run's launch time -- those are already computed live regardless.")
     p.add_argument("--mode", type=str, default="no_adapt", choices=sorted(_MODES))
     p.add_argument("--steps", type=int, default=1)
+    add_tta_args(p)
     add_num_samples_arg(p)
     p.add_argument("--fit_num_samples", type=int, default=5000,
                     help="Samples per CALIBRATOR.CORRUPTIONS dev stream used ONLY for "
@@ -1322,7 +1328,8 @@ def main() -> None:
 
     duo_tag = f"{cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']}"
     run_name = args.run_name or (
-        f"{duo_tag}__{run_cfg['name']}__{args.mode}__{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"{duo_tag}__{run_cfg['name']}__{args.mode}{tta_tag(cfg, args.tta_method)}"
+        f"__{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     )
     out_dir = Path(args.out_dir) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -91,7 +91,9 @@ from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.calibrators.joint_coca import JointCoca
 from src.calibrators.joint_optimal_w_oracle import JointOptimalWOracle
 from src.reliability.setup import build_proxy_weighted_calibrator, fit_beta
-from scripts._cli import add_duo_config_arg, add_num_samples_arg, add_seed_arg, add_cache_toggle_args
+from scripts._cli import (
+    add_duo_config_arg, add_num_samples_arg, add_seed_arg, add_cache_toggle_args, add_tta_args, tta_tag,
+)
 
 DEFAULT_CONFIGS_FILE = "cfgs/compare_runs/default.json"
 
@@ -206,6 +208,7 @@ def main():
     add_duo_config_arg(parser, required=True)
     parser.add_argument("--mode", type=str, default="both_duo")
     parser.add_argument("--steps", type=int, default=1)
+    add_tta_args(parser)
     add_num_samples_arg(parser)
     add_seed_arg(parser)
     parser.add_argument("--wandb_project", type=str, default="proxy-weighted-duo-calibration",
@@ -319,6 +322,13 @@ def main():
             )
             large_model, small_model = stream_cache_ctrl.large, stream_cache_ctrl.small
 
+        # A run_cfg entry may pick its own TTA method ("tta_method"/"tta_kwargs"
+        # keys, same shape as the CLI flags), overriding --tta_method/--tta_kwargs
+        # -- so one --configs_file can compare TTA methods side by side.
+        tta_method = run_cfg.get("tta_method", args.tta_method)
+        # kwargs belong to a method: when the entry names its own method, the CLI's don't apply.
+        tta_kwargs = run_cfg.get("tta_kwargs") if "tta_method" in run_cfg else args.tta_kwargs
+
         csv_path = str(Path(args.out_dir) / run_cfg["name"])
         calibrator = _build_calibrator(
             run_cfg, config, large_model, large_preprocess, small_model, small_preprocess,
@@ -331,6 +341,7 @@ def main():
             mode=args.mode, joint_calibrator=calibrator,
             calibration_mode=run_cfg["calibration_mode"],
             cfg=config, steps=args.steps,
+            tta_method=tta_method, tta_kwargs=tta_kwargs,
         )
 
         if stream_cache_ctrl is not None:
@@ -447,7 +458,7 @@ def main():
         results_rows = evaluate_dynamic_duo(
             duo, config, wandb_project=args.wandb_project,
             num_samples=args.num_samples, seed=args.seed,
-            use_wandb=True, group=group, run_name=f"{run_cfg['name']}__{args.mode}{_pbs_str}",
+            use_wandb=True, group=group, run_name=f"{run_cfg['name']}__{args.mode}{tta_tag(config, tta_method)}{_pbs_str}",
             on_corruption_start=_on_corruption_start,
             # Always on now (not just --verbose): _on_batch needs to run every
             # batch to accumulate the per-corruption fixed_ts running total
