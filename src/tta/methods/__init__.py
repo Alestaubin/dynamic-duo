@@ -8,10 +8,11 @@ from src.tta.methods.base import (
     DEFAULT_TTA_METHOD, TTAMethod, build_tta_method, register, registered_names, resolve_tta_spec,
 )
 from src.tta.methods.tent import TentMethod
+from src.tta.methods.eata import EataMethod
 
 TTA_METHODS = frozenset(registered_names())
 
 __all__ = [
-    "DEFAULT_TTA_METHOD", "TTA_METHODS", "TTAMethod", "TentMethod",
+    "DEFAULT_TTA_METHOD", "TTA_METHODS", "TTAMethod", "TentMethod", "EataMethod",
     "build_tta_method", "register", "registered_names", "resolve_tta_spec",
 ]

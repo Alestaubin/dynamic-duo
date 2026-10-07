@@ -27,7 +27,8 @@ env/
 
 checkpoints
 evaluation/
-datasets
+# anchored: an unanchored `datasets` also hides src/utils/datasets/ (the dataset classes)
+/datasets
 data
 evaluation
 
@@ -38,3 +39,10 @@ CLAUDE.md
 *ray_tune/
 
 wandb/
+
+# Experiment outputs: regenerable, so untracked -- except the final paper tables/figures
+out/*
+!out/paper/
+
+# Local pre-cleanup backups (git-ignored files the tag cannot restore)
+/archive/
