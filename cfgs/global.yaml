@@ -1,0 +1,88 @@
+# Shared configuration: everything that is the same for every script in this repo.
+# Per-duo model choices live in cfgs/duos/*.yaml; values written by the tuning scripts live in
+# cfgs/tuned/; facts copied from upstream repos live in cfgs/protocols.yaml (generated).
+#
+# Relative paths are relative to the repository root. Override the whole file for one shell with
+#   export DUO_GLOBAL_CONFIG=/path/to/other_global.yaml
+#
+# A dataset whose path is `null` is "not imported yet": scripts that need it stop with a message
+# naming the key to set here. Expected on-disk layouts are documented next to each key and are
+# verified by `python scripts/setup_check.py`.
+
+paths:
+  # --- ImageNet itself (one sub-folder per wnid, e.g. <root>/n01440764/*.JPEG) -----------------
+  imagenet_train: data/imagenet/train        # source of the held-out clean slice (temperatures, ATC thresholds)
+  imagenet_val: data/imagenet/val            # ImageNet-C and CCC are rendered from these 50,000 images
+  # --- ImageNet-C: <root>/<corruption>/<severity>/<wnid>/*.JPEG ; 15 test + 4 tuning corruptions
+  imagenet_c: data/ImageNet-C
+  # --- natural shifts (episodic only). Archives on the lab's shared folder are NEVER extracted there
+  #     (file-count quota): they are extracted to node-local $SLURM_TMPDIR/data on first use
+  #     (src/utils/datasets/staging.py). A list = candidates, first that exists wins.
+  imagenet_a: /project/6104790/shared/datasets/imagenet-a.tar            # imagenet-a/<wnid>/*.jpg    7,500 images, 200 classes
+  imagenet_r:                                                            # imagenet-r/<wnid>/*.jpg   30,000 images, 200 classes
+    - /project/6104790/shared/datasets/imagenet-r.tar                    #   preferred: `cd <shared> && tar -cf imagenet-r.tar imagenet-r`
+    - /project/6104790/shared/datasets/imagenet-r                        #   fallback: the extracted directory, read in place
+  imagenet_v2:                                                           # <top>/<0..999>/*          10,000 images, 10 per class
+    - /project/6104790/shared/datasets/imagenetv2-matched-frequency.tar  #   (folder names are class INDICES, not wnids)
+    - /project/6104790/shared/datasets/imagenetv2-matched-frequency.tar.gz   # present today; an uncompressed tar despite the name
+  imagenet_sketch: /project/6104790/shared/datasets/ImageNet-Sketch.zip  # sketch/<wnid>/*            50,889 images, 1000 classes
+  # --- CCC: locally generated shards (third_party/CCC/generate.py, see scripts/ccc_generate.py)
+  #     <root>/baseline_<0|20|40>_transition+speed_<speed>_seed_<seed>/serial_00000.tar ...
+  ccc: null
+  # --- outputs ---------------------------------------------------------------------------------
+  out: out                      # git-ignored scratch/results (CSV caches etc.)
+  paper: out/paper              # final tables and figures (tracked)
+  cache: cache                  # member-logit caches, train-slice file lists
+  checkpoints: checkpoints      # fitted temperatures, proxy source statistics
+  tuned: cfgs/tuned             # tuning-script outputs read by every experiment script
+
+runtime:
+  workers: 8
+  device: cuda
+  torch_home: null              # e.g. /scratch/alxstaub/torch_cache on the cluster
+  wandb:
+    enabled: false
+    project: dynamic-duos-paper
+
+# Constants of the paper's protocols (Section "Experimental setup").
+protocol:
+  severity: 5
+  adaptation_batch_size: 64
+  seeds: [0, 1, 2]              # seeds of the stream order; tables report mean +- std over these
+  samples_per_stream: null      # null = the full 50,000 images of each ImageNet-C corruption
+  ece_bins: 15
+  # ImageNet-A/R only (200 of the 1000 classes): does the TTA objective see the 200-way ("masked") or the
+  # full 1000-way ("full") logits? Accuracy/ECE always use the masked logits. "masked" matches the reference
+  # benchmark (test-time-adaptation wraps the model in a masking layer). Same setting for every method.
+  objective_logits_200class: masked
+
+# Default gate (what "ours" means unless a script sweeps it).
+gate:
+  proxy: nuclear_norm
+  calib_method: identity
+  beta: 0.5
+  proxy_batch_size: 128
+  pool: log
+  filter: none
+
+# Held-out clean slice used to fit temperatures T_L, T_S and any source-fitted proxy (ATC threshold).
+# It comes from ImageNet *train* because ImageNet-C and CCC are both rendered from *val*.
+source_slice:
+  dataset: imagenet_train
+  images_per_class: 10
+  seed: 0
+
+corruptions:
+  # The 15 test corruptions, grouped as in the ImageNet-C paper (the table column groups).
+  test:
+    noise: [gaussian_noise, shot_noise, impulse_noise]
+    blur: [defocus_blur, glass_blur, motion_blur, zoom_blur]
+    weather: [snow, frost, fog, brightness]
+    digital: [contrast, elastic_transform, pixelate, jpeg_compression]
+  # Extra ImageNet-C corruptions that appear in no test stream and no CCC level: every
+  # hyperparameter (Tent/ETA/SAR, beta, b_t, reset thresholds) is tuned on these.
+  tuning: [speckle_noise, gaussian_blur, spatter, saturate]
+  # "Collapse" subset used by the proxy table (average over these four).
+  collapse: [fog, snow, glass_blur, elastic_transform]
+
+protocols_file: cfgs/protocols.yaml

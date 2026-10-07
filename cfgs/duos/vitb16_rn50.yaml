@@ -1,0 +1,14 @@
+# Primary duo: ViT-B/16 (large) + ResNet-50 (small). Dataset paths, batch size, corruptions and
+# severities come from cfgs/global.yaml; this file only holds the model choices.
+# OPTIM values are the pre-tuning defaults; scripts/tune_tta.py writes the tuned ones to cfgs/tuned/.
+NAME: vitb16_rn50
+
+LARGE:
+  NAME: vit_b_16
+  NORM: LN
+  OPTIM: {METHOD: Adam, STEPS: 1, LR: 0.0001, BETA: 0.9, WD: 0.0}
+
+SMALL:
+  NAME: resnet50
+  NORM: BN
+  OPTIM: {METHOD: Adam, STEPS: 1, LR: 0.00025, BETA: 0.9, WD: 0.0}

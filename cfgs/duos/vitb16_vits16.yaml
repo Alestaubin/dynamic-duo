@@ -1,0 +1,15 @@
+# Single-family duo: ViT-B/16 (large) + ViT-S/16 (small). Both members adapt LayerNorm, which is what
+# makes this the test for synchronized collapse.
+# TODO(phase 3): add the `vit_s_16` loader (timm vit_small_patch16_224; torchvision has no ViT-S).
+# TODO(phase 5): SMALL.OPTIM is a placeholder until scripts/tune_tta.py tunes it.
+NAME: vitb16_vits16
+
+LARGE:
+  NAME: vit_b_16
+  NORM: LN
+  OPTIM: {METHOD: Adam, STEPS: 1, LR: 0.0001, BETA: 0.9, WD: 0.0}
+
+SMALL:
+  NAME: vit_s_16
+  NORM: LN
+  OPTIM: {METHOD: Adam, STEPS: 1, LR: 0.0001, BETA: 0.9, WD: 0.0}
