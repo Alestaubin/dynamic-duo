@@ -225,6 +225,9 @@ class JointProxyWeighted(BaseJointCalibrator):
         self._labels: torch.Tensor | None = None
         self._current_corruption: str = ""
         self.n_refreshes: int = 0  # how many times the proxy bucket has been solved
+        # If a list, every proxy batch appends one dict (the _CSV_FIELDS columns) to it -- the in-memory
+        # twin of csv_path, used by src/experiments. None (default) records nothing.
+        self.records: list[dict] | None = None
 
         # Proxy-batch accumulation buffer (Section 1's b_t): filled sample
         # by sample as calls come in, flushed (see _flush_bucket) every
@@ -316,6 +319,12 @@ class JointProxyWeighted(BaseJointCalibrator):
         self._stream_samples_seen = 0
         self._cached_x_l, self._cached_x_s = self.prior_l, self.prior_s
         self._cached_w_l = float(torch.sigmoid(torch.tensor(self.beta * (self.prior_l - self.prior_s))))
+
+    def mark_segment(self, label: str) -> None:
+        """Only tag subsequent records with `label`. Unlike set_corruption this keeps the filters, the
+        partly-filled proxy batch and the gate as they are, for streams (continual, CCC) whose shift
+        boundaries the method must not be told about."""
+        self._current_corruption = label
 
     def set_labels(self, labels: torch.Tensor) -> None:
         self._labels = labels
@@ -419,6 +428,13 @@ class JointProxyWeighted(BaseJointCalibrator):
                         "x_l": x_l, "x_s": x_s, "w_l": w_l, "w_s": 1.0 - w_l,
                         "acc_l": acc_l, "acc_s": acc_s, "duo_acc": duo_acc, "n": n,
                     })
+
+        if self.records is not None:
+            self.records.append({
+                "corruption": self._current_corruption, "n_refreshes": self.n_refreshes,
+                "r_l": r_l, "r_s": r_s, "a_l": a_l, "a_s": a_s, "x_l": x_l, "x_s": x_s,
+                "w_l": w_l, "w_s": 1.0 - w_l, "acc_l": acc_l, "acc_s": acc_s, "duo_acc": duo_acc, "n": n,
+            })
 
         if self.verbose:
             parts = [

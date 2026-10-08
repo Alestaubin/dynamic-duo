@@ -4,6 +4,26 @@ Goal: every result in the paper's Experiments section has its own short script i
 
 Status key: `[x]` done, `[ ]` open, `[?]` needs the author's decision.
 
+## Status (2026-10-07)
+
+| Phase | State |
+|---|---|
+| 0 Safety net and inventory | done |
+| 1 Global config, dataset classes, staging | done (CCC streams still to be generated, Phase 8) |
+| 2 Engine (`src/experiments/`) | done, parity with the old engine verified on real models |
+| 3 New components (proxies, oracle gate, SAR/EATA/CoTTA/ROID/RDumb, ViT-L/ViT-S loaders, single-model runner) | **on hold at the author's request** |
+| Preliminary experiments (inserted before Phase 3) | in progress: `tab_temperatures.py`, `tab_oracles.py` (see below) |
+| 4-9 | not started |
+
+Everything above is committed and pushed on `filtered-proxy-soft-weighting` up to the end of Phase 2.
+
+### Preliminary experiments (inserted before Phase 3)
+
+Two analysis scripts that decide which temperatures "Fixed TS" uses and bound what any temperature-based duo method can reach. Both read the same cached member logits (one adaptation run per seed, 20 streams: clean validation, the 4 held-out corruptions, the 15 test corruptions) and write LaTeX tables.
+
+1. `scripts/tab_temperatures.py`: optimal (T_L, T_S) fitted on each stream, next to the single-model accuracies and the accuracy of clean-fitted TS, held-out-corruption-fitted TS and per-stream optimal TS.
+2. `scripts/tab_oracles.py`: Fixed TS against four oracles of increasing granularity (corruption-wise TS, batch-wise TS, batch-wise oracle weight, per-sample oracle), all of which use labels.
+
 ## What the repo shows (drives the design)
 
 - **Adaptation is decoupled from the gate.** The paper adapts both members independently (`both_indep`), so the calibrator never feeds back into adaptation. One live run per (TTA method, duo, stream, seed) can cache both members' logits, and every gate variant (beta, b_t, proxy, pooling, filter, oracle) is a cheap replay. `slurm/run_paper_tables.sh` already works this way.
@@ -102,15 +122,27 @@ Library code that looks dead from the paper's point of view, to be removed only 
 - [ ] You, later: generate the CCC streams (Phase 8 below) and set `paths.ccc`.
 - Left for later phases: the `vit_l_16` and `vit_s_16` model loaders (Phase 3; `setup_check` reports those two duos as pending), removal of `TEST_DIR`/`VAL_DIR` from the legacy code paths, and deleting `src/utils/data.py` (Phase 9).
 
-## Phase 2: Engine (src/, no experiments yet)
+## Phase 2: Engine (`src/experiments/`, no paper experiments yet)  (status: done)
 
-- [ ] Protocol layer: `episodic`, `continual(order)`, `ccc`, `natural`. Reset at boundaries only for episodic.
-- [ ] Streaming accumulators (accuracy, ECE from confidence and correctness only) and a compact per-proxy-batch log: member and duo accuracy, r_l, r_s, confidence, dispersity, w_l, reset events.
-- [ ] Member-stream cache (fp16 logits) keyed by duo, TTA method plus hparam hash, protocol, stream and seed.
-- [ ] `replay_calibrators(...)` extracted from `plot_run_diagnostics.py`. Same code runs online for CCC, with several calibrators fed the same batch.
-- [ ] `tables.py` extracted from `write_accuracy_latex_table`. It keys columns by corruption name, never by position (the likely cause of the Frozen-row column-order issue), and supports mean+-std and percent formatting.
-- [ ] Every script writes a CSV first and renders tables and figures only from that CSV.
-- [ ] `src/experiments/cli.py` with the common script contract: `--duo --tta --seeds --report_only --only/--shard i/N`.
+The old loop (`run_duo`, `evaluate_dynamic_duo`, `plot_run_diagnostics`) stays untouched until Phase 9; the new engine sits beside it and is checked against it.
+
+- [x] `specs.py`: `RunSpec` (duo, TTA method + kwargs, mode, protocol, seed, sample cap) with a fingerprint over everything that changes the members' logits (model blocks incl. learning rates, TTA, protocol, seed, batch size, objective-logits mode), and `GateSpec` (fixed TS or the proxy-weighted gate: proxy, beta, b_t, pool, filter, T_L/T_S checkpoint).
+- [x] `protocols.py`: episodic, tuning, natural, continual (one of CoTTA's 10 orders), ccc, as lists of `Segment(label, dataset, reset_before)`. Continual is the episodic loop minus the resets, with one loader per corruption.
+- [x] `members.py`: `MemberRunner`, a lean independent-adaptation loop (no calibrator, diagnostics or wandb) that reuses the existing `TTAMethod` classes. Duo modes are rejected. It plumbs `objective_logits_200class` (masked/full) into the TTA loss. Tested **bit for bit** against the old `forward_and_adapt` on tiny CPU models.
+- [x] `cache.py`: per-segment member-logit cache plus a manifest (spec, batch size, timings, git commit), atomic writes, resume per segment (episodic) or restart (continual).
+- [x] `gates.py`: `GateSpec` -> calibrator without needing models. Not supported yet, and raising `NotImplementedError`: source-fitted proxies (ATC etc.) and non-identity calibration maps (Phase 3).
+- [x] `evaluate.py`: `StreamMetrics` (accuracy, ECE, NLL, entropy from 5 bytes/sample, equal to the old `get_metrics_dict`), `OnlineEval` (members + any number of gates on the same logits; class mask applied first; gates reset only where the members do).
+- [x] `runner.py`: `ensure_members` (compute-or-load), `replay` (touches no model and no dataset), `evaluate_live` (no cache, for CCC), `evaluate`. `--report_only` fails with the list of what is missing.
+- [x] `results.py` (tidy rows, per-seed average, mean +- std over seeds, fraction of oracle gap), `cli.py` (`--duo --tta --seeds --num_samples --report_only --shard i/N|auto --only --out`, thread pinning), `src/utils/tables.py` (name-keyed corruption table with mean +- std and a generic table; the generated LaTeX compiles with pdflatex).
+- [x] Every module has a `__main__` self-test (`python -m src.experiments.<module>`; `runner` is the end-to-end one: parity with the old engine, resets, resume, replay vs live, report-only, masked objective, 200-class gating).
+- [x] **Real-model parity** (`scripts/parity_old_vs_new.py`, temporary; jobs 6019846 and 6020069): old engine vs new engine on ViT-B/16 + ResNet-50, brightness / fog / contrast, 2,000 samples each, two seeds, the gate configured as the existing paper tables were produced (EMA 0.9999, beta 0.5, b_t 128, log pool, the existing T_L/T_S). **Accuracy identical to 0.00 points in all 18 (corruption x series) cells**, covering the large member, the small member and the proxy-weighted duo; ECE within 0.05 points (the fp16 cache). Timing for the same 6,000 images: new members pass 39 s (69 s before the preprocessing moved into the workers); the old engine's whole run took 94-101 s, but that also includes loading the models and building the gate, so it is not a like-for-like speed comparison. The same script at `--num_samples 50000` over all 15 corruptions is the Phase 5 gate.
+- [ ] `figures.py` is deliberately not written yet: its first consumers are Phase 6's `fig_gate_weights.py` and Phase 8's stream/reset figures, and the plotting code should be shaped by them.
+- Resume for CCC (hours per stream) needs model/optimizer/gate checkpoints every K batches and a start offset in the CCC reader (cheap: the reader is index-addressable). Phase 8.
+
+Findings that changed the design:
+- **The gate is not invariant to how the stream is cut into batches.** `JointProxyWeighted` combines the slice that completes a proxy batch with the weight computed from that batch (itself included) and earlier slices with the previous weight. With b_t = 128 and adaptation batch 64, every second adaptation batch is gated with a weight that was computed from its own samples. So a replay must use the original adaptation batch size, which the cache manifest records and `replay` uses. This is existing behaviour (it is what the current 51.3% was computed with), preserved on purpose. Worth a sentence in the paper's method section, and it means the headline numbers depend on BS = 64 relative to b_t.
+- **Cache format: centered fp16** (logits minus their row maximum). Everything downstream is invariant to a per-row constant, and centering keeps the decisive logits near zero where fp16 is finest. 3 GB per full IN-C run of both members; argmax and softmax survive to < 2e-3 (tested).
+- **Preprocessing moved into the DataLoader workers** (`PairCollate`): both models' resize/crop/normalize ran in the main process and cost as much as the GPU step. Bitwise-identical logits (tested with 0 and 2 workers), about 1.5-1.8x faster end to end. The GPU step is now the limit (see Compute).\n- **CPU thread oversubscription:** a 128x1000 nuclear norm took 38 s on a busy login node (24 threads) and 6 ms with 1-4 threads. `cli.pin_threads()` sets torch's threads from `SLURM_CPUS_PER_TASK`. The Gram-matrix trick is no faster on CPU, so the proxy is unchanged.
 
 ## Phase 3: New components
 
@@ -193,19 +225,32 @@ Every script takes `--duo --tta --seeds --report_only --only/--shard i/N`. Each 
 
 ## Compute and storage
 
-Rough numbers assuming about 800 img/s for a two-model adaptation step. They are unmeasured, and the Phase 5 benchmark replaces them.
+**Measured** (job 6020117/6020140/6020141; ViT-B/16 + ResNet-50, batch 64, independent Tent, steady state):
+
+| | L40S | H100 |
+|---|---|---|
+| fp32 (current default) | 202 img/s | 372 img/s |
+| TF32 matmuls | 278 img/s | 673 img/s |
+| frozen members (forward only) | 471 img/s | 799 img/s |
+
+Data loading (JPEG decode + both models' preprocessing in 8 workers) delivers 1,500 img/s, so the GPU step is the limit. My earlier "800 img/s" was wrong. Moving the preprocessing into the DataLoader workers (done) took the end-to-end loop from about 130 to about 200 img/s on the L40S. TF32 changes the first-step logits by <= 0.005 with identical argmax, but it breaks bitwise reproducibility of the existing numbers (decision 11).
+
+**Estimates from those rates** (H100, fp32; ViT-L/16 + ResNet-50 costs about 3x per image, SAR about 2x, CoTTA about 3-4x):
 
 | Item | Estimate |
 |---|---|
-| Episodic IN-C, 27 runs (3 TTA x 3 pairs x 3 seeds) | about 7 GPU-hours |
-| Natural shifts | about 1 GPU-hour |
-| CoTTA-orders protocol, about 13 live rows x 10 orders | about 35 GPU-hours (CoTTA 3-4x slower) |
-| **CCC, full grid** (27 streams x about 14 rows x 7.5M) | **about 10^3 GPU-hours** |
-| CCC reset ablations (about 12 runs on one stream) | about 30 GPU-hours |
+| One episodic IN-C run (15 x 50,000 images), ViT-B + RN-50 | 34 min on H100, 62 min on L40S |
+| Generality grid, 3 TTA x 3 pairs x 3 seeds | about 35 H100-hours |
+| Natural shifts, same grid (about 98k images per run) | about 2 H100-hours |
+| CoTTA-orders protocol, 7 duo policies + 6 single-model rows, 10 orders | about 80 H100-hours |
+| **CCC, one stream x one row** (7.5M images) | **5.6 H100-hours** (3.1 with TF32) |
+| CCC, reduced grid (3 difficulties x 3 seeds, one speed) x ~14 rows | about 700 H100-hours (390 with TF32) |
+| CCC, full grid (27 streams) x ~14 rows | about 2,100 H100-hours (1,150 with TF32) |
+| CCC reset ablations (~12 runs on one stream) | about 70 H100-hours |
 | IN-C logit caches | about 3 GB per run, about 80 GB total |
 | CCC shards on disk (27 streams) | about 3-6 TB (a guess, see Phase 8) |
 
-CCC is about 25 times everything else combined, and CPU corruption generation may be the real bottleneck. Option: run all policies of one stream in one process on a shared batch to amortise data generation.
+CCC dominates everything else by more than 10x, so decision 1 (develop and report on a reduced CCC grid) matters. Frozen-member rows (no adaptation) run at the forward-only rate.
 
 ## Decisions (defaults apply unless changed)
 
@@ -219,3 +264,4 @@ CCC is about 25 times everything else combined, and CPU corruption generation ma
 8. **Source slice caveat (new).** The temperatures and ATC thresholds are fitted on ImageNet *train* as the paper says, but the pretrained members were trained on those images, so they are a bit more confident there and the fitted temperatures may come out low. Default: implement as written and have `fit_temperatures.py` also report the val-fitted values (sensitivity only, never used).
 9. **Reset-threshold tuning stream (new).** Default: cycles of the 4 tuning corruptions (speckle, gaussian blur, spatter, saturate) in random order, about 1M images, seeds disjoint from the test streams.
 10. **Logits seen by the proxy, gate and temperatures on ImageNet-A/R (new).** Your note covers the TTA objective only. Default: everything downstream of the members' logits (proxy score, gate, pooling, fixed temperatures) uses the masked 200-way logits, because that is what predictions are scored on and it is what the reference benchmark does. The temperatures T_L, T_S are fitted once on 1000-way clean data and applied unchanged to the masked logits. Say if you want the gate to see all 1000 logits instead.
+11. **TF32 and GPU type (new).** Enabling TF32 matmuls gives +38% (L40S) / +81% (H100) throughput with logit changes <= 0.005, but the new runs would no longer reproduce the existing fp32 numbers bit for bit, and the parity gate (Phase 5) is easiest to read in fp32. Default: stay fp32 through the Phase 5 parity gate, then decide; request H100 nodes (`--gres=gpu:h100:1`) for long runs, they queued in under a minute.

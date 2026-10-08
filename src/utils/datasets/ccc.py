@@ -31,7 +31,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 
 from src.utils.config import GlobalConfig, REPO_ROOT
-from src.utils.datasets.base import DatasetLayoutError, ShiftDataset
+from src.utils.datasets.base import DatasetLayoutError, ShiftDataset, worker_init
 
 BASELINE = {"easy": 40, "medium": 20, "hard": 0}   # --baseline passed to generate.py
 
@@ -171,12 +171,14 @@ class CCC(ShiftDataset):
         return {"images": None, "classes": 1000, "shards": len(shards), "note": done}
 
     def loader(self, batch_size: int, num_samples: int | None = None, seed: int | None = None,
-               workers: int = 4, pin_memory: bool = False, shuffle: bool = False) -> DataLoader:
+               workers: int = 4, pin_memory: bool = False, shuffle: bool = False, collate_fn=None) -> DataLoader:
         if shuffle:
             raise ValueError("CCC streams are ordered; shuffle=True would destroy the benchmark")
         stream, limit = self._limited(num_samples)
+        # Items are already whole batches (list of PIL, labels); a custom collate_fn receives that pair.
         return DataLoader(_Batches(stream, batch_size, limit), batch_size=None, shuffle=False,
-                          num_workers=workers, pin_memory=pin_memory, collate_fn=_identity)
+                          num_workers=workers, pin_memory=pin_memory, collate_fn=collate_fn or _identity,
+                          worker_init_fn=worker_init if workers > 0 else None)
 
     def describe(self) -> str:
         return f"ccc/{self.difficulty}/speed{self.speed}/seed{self.seed}"

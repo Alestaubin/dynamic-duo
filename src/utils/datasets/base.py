@@ -47,6 +47,11 @@ def pil_collate(batch):
     return list(images), torch.tensor(labels)
 
 
+def worker_init(_worker_id: int) -> None:
+    """One CPU thread per DataLoader worker: with torch's default every worker spawns a thread per core."""
+    torch.set_num_threads(1)
+
+
 def make_loader(
     ds: Dataset, *, batch_size: int, shuffle: bool = True, workers: int = 4, pin_memory: bool = False,
     num_samples: int | None = None, seed: int | None = None, collate_fn=pil_collate,
@@ -64,7 +69,7 @@ def make_loader(
     gen = torch.Generator().manual_seed(seed) if seed is not None else None
     return DataLoader(
         ds, batch_size=batch_size, shuffle=shuffle, num_workers=workers, pin_memory=pin_memory,
-        collate_fn=collate_fn, generator=gen,
+        collate_fn=collate_fn, generator=gen, worker_init_fn=worker_init if workers > 0 else None,
     )
 
 
@@ -173,10 +178,12 @@ class ShiftDataset(ABC):
         return self.apply_class_mask(logits) if mode == "masked" else logits
 
     def loader(self, batch_size: int, num_samples: int | None = None, seed: int | None = None,
-               workers: int = 4, pin_memory: bool = False, shuffle: bool = True) -> DataLoader:
+               workers: int = 4, pin_memory: bool = False, shuffle: bool = True, collate_fn=pil_collate) -> DataLoader:
+        """`collate_fn` turns a list of (PIL image, label) into a batch; the default keeps PIL images, a custom one
+        (e.g. src.experiments.members.PairCollate) can run the models' preprocessing inside the workers."""
         return make_loader(
             self.torch_dataset(), batch_size=batch_size, shuffle=shuffle, workers=workers,
-            pin_memory=pin_memory, num_samples=num_samples, seed=seed,
+            pin_memory=pin_memory, num_samples=num_samples, seed=seed, collate_fn=collate_fn,
         )
 
     def apply_class_mask(self, logits: torch.Tensor) -> torch.Tensor:
