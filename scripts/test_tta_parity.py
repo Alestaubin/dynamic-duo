@@ -33,6 +33,7 @@ import argparse
 import sys
 
 import torch
+from src.utils.device import get_device
 
 # (mode, steps) cases -- every _MODES entry once, plus a multi-step duo case
 # (DynamicDuo.forward loops forward_and_adapt `steps` times).
@@ -64,7 +65,7 @@ def record(args) -> None:
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_math_sdp(True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     print(f"device={device}  config={args.config}  corruptions={args.corruptions}")
     cfg = load_config(args.config)
 

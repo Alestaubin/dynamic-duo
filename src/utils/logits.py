@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 from tqdm import tqdm
 
+from src.utils.device import get_device
 from src.utils.data import _pil_collate_fn, load_imagenetC
 from src.utils.model import get_model, _preprocess_batch
 from src.tta.tent import configure_model_frozen
@@ -41,7 +42,7 @@ def get_model_logits(
         raise ValueError("norm_type must be specified when tent_mode is True")
 
     if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        device = get_device()
 
     split_key = "val" if corruption is None else f"{corruption}_{severity}"
     if tent_mode:

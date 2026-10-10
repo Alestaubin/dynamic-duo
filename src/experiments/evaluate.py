@@ -21,6 +21,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from src.utils.device import get_device
 from src.utils.datasets.base import ShiftDataset
 from src.utils.metrics import top_label_ece
 
@@ -72,7 +73,7 @@ class OnlineEval:
             raise ValueError("'large' and 'small' are reserved series names")
         self.gates = gates
         self.num_bins = num_bins
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.device = get_device(device)
         self.rows: list[dict] = []                         # one per (segment, series)
         self.records: dict[str, list[dict]] = {}           # per-proxy-batch records of gates that keep them
         self.curves: dict[str, dict] = {}                  # series -> {"batch_n": [...], "batch_correct": [...]}

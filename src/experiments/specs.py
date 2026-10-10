@@ -19,6 +19,11 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+# Protocols whose segments each start from source weights: a segment's logits do not depend on which other
+# segments the run visits, so runs that differ only in the segment list share one cache directory.
+INDEPENDENT_PROTOCOLS = ("episodic", "tuning", "natural")
+
+
 @dataclass(frozen=True)
 class RunSpec:
     duo: str                                        # cfgs/duos/<duo>.yaml
@@ -26,7 +31,7 @@ class RunSpec:
     tta_kwargs: dict = field(default_factory=dict)
     mode: str = "both_indep"                        # which members adapt (independently); see MemberRunner
     protocol: str = "episodic"                      # episodic | tuning | natural | continual | ccc
-    protocol_args: dict = field(default_factory=dict)   # natural: {dataset}; continual: {order}; ccc: {difficulty, speed, seed}
+    protocol_args: dict = field(default_factory=dict)   # episodic/tuning: {corruptions, clean}; natural: {dataset}; continual: {order}; ccc: {difficulty, speed, ccc_seed}
     seed: int = 0                                   # stream order (subset + shuffle) seed
     num_samples: int | None = None                  # cap per segment; None = the whole stream
 
@@ -45,13 +50,22 @@ class RunSpec:
             return f"ccc-{a['difficulty']}-{a['speed']}-{a['ccc_seed']}"
         raise ValueError(f"unknown protocol {self.protocol!r}")
 
+    @property
+    def independent(self) -> bool:
+        return self.protocol in INDEPENDENT_PROTOCOLS
+
+    @property
+    def cache_tag(self) -> str:
+        """Cache directory name: shared by every independent-segment protocol, per stream otherwise."""
+        return "independent" if self.independent else self.protocol_tag
+
     def fingerprint(self, duo_cfg: dict, batch_size: int, objective_logits: str) -> str:
         """12 hex chars identifying every input that affects the members' logits."""
         payload: dict[str, Any] = {
             "models": {side: duo_cfg[side] for side in ("LARGE", "SMALL")},
             "tta": [self.tta, self.tta_kwargs],
             "mode": self.mode,
-            "protocol": [self.protocol, self.protocol_args],
+            "protocol": ["independent"] if self.independent else [self.protocol, self.protocol_args],
             "seed": self.seed,
             "num_samples": self.num_samples,
             "batch_size": batch_size,

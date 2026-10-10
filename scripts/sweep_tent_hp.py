@@ -57,6 +57,7 @@ import torch.nn.functional as F
 import wandb
 from tqdm import tqdm
 
+from src.utils.device import get_device
 from src.utils.model import get_model, _preprocess_batch
 from src.utils.data import load_config, load_imagenetC
 from src.utils.metrics import get_metrics_dict
@@ -183,7 +184,7 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     print(f"Using device: {device}  |  model: {args.model}")
 
     cfg = load_config(args.config)

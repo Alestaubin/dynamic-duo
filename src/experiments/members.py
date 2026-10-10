@@ -24,6 +24,7 @@ from typing import Iterator
 
 import torch
 
+from src.utils.device import get_device
 from src.tta.methods import build_tta_method, resolve_tta_spec
 from src.utils.datasets.base import ShiftDataset
 from src.utils.model import _preprocess_batch, get_model
@@ -78,7 +79,7 @@ class MemberRunner:
             )
         if objective_logits not in ("masked", "full"):
             raise ValueError(f"objective_logits must be 'masked' or 'full', got {objective_logits!r}")
-        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.device = get_device(device)
         self.mode = mode
         self.objective_logits = objective_logits
         self.adapt_large, self.adapt_small = INDEP_MODES[mode]

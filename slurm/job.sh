@@ -12,9 +12,9 @@
 
 # The one generic launcher: runs any repo script inside a SLURM job. Submit from the repo root.
 #
-#   sbatch slurm/job.sh scripts/tab_accuracy.py --duo vitb16_rn50 --seeds 0 1 2
+#   sbatch slurm/job.sh scripts/08_tab_accuracy.py --duo vitb16_rn50 --seeds 0 1 2
 #   STAGE="imagenet_a imagenet_r imagenet_v2 imagenet_sketch" sbatch slurm/job.sh scripts/setup_check.py --probe 200
-#   sbatch --array=0-8 -J ccc slurm/job.sh scripts/tab_continual_duo.py ...   # scripts read $SLURM_ARRAY_TASK_ID
+#   sbatch --array=0-8 -J ccc slurm/job.sh scripts/16_tab_continual_duo.py ...   # scripts read $SLURM_ARRAY_TASK_ID
 #   sbatch --gres=gpu:0 -t 00:30:00 -J check slurm/job.sh scripts/setup_check.py   # sbatch options override the #SBATCH lines
 #
 # STAGE = space-separated dataset keys of `paths:` in cfgs/global.yaml (imagenet_a, imagenet_r, ...). Archives
@@ -40,6 +40,9 @@ if [ "$#" -lt 1 ]; then
 fi
 
 echo "job $SLURM_JOB_ID on $(hostname), SLURM_TMPDIR=${SLURM_TMPDIR:-<unset>}"
+# Pre-flight: exit 1 right away if Slurm allocated a GPU this process cannot use (scripts would otherwise
+# silently run on the CPU at ~1 img/s, as job 6012203 did on kn092). A no-GPU job just prints "cpu".
+python -m src.utils.device
 if [ -n "${STAGE:-}" ]; then
     python -c 'from src.utils.datasets.staging import main; main()' $STAGE
 fi

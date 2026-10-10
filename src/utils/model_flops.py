@@ -18,6 +18,7 @@ import torch
 from torch.utils.flop_counter import FlopCounterMode
 from torchvision import datasets
 
+from src.utils.device import get_device
 from src.utils.data import load_config
 from src.utils.model import get_model
 
@@ -55,7 +56,7 @@ def main():
     args = parser.parse_args()
 
     cfg = load_config(args.config)
-    device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device(args.device)
 
     val_ds = datasets.ImageFolder(cfg["VAL_DIR"])
     image, _ = val_ds[0]

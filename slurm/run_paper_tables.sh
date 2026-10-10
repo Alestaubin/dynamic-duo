@@ -30,6 +30,11 @@ export PYTHONUNBUFFERED=1
 
 set -e
 
+# Fail fast if the allocated GPU is unusable (exit 1; see src/utils/device.py). The scripts below would
+# otherwise silently run on the CPU at ~1 img/s: job 6012203 burned its whole 10 h walltime that way on
+# kn092 (Slurm gave it GPU 2, but the process never saw a CUDA device).
+python -m src.utils.device
+
 CFG=cfgs/dynamic_duo_config_vitb_resnet.yaml
 RUN_NAME=paper_vitb_resnet_both_indep
 RUN=out/run_diagnostics/$RUN_NAME
@@ -38,13 +43,20 @@ mkdir -p $T
 
 # 1) Adapting run: main duo row (beta=0.5, pbs=128, log pool) + Table 1 sharpness block live.
 #    Also gives the Adapting members and Adapting duo rows.
-python scripts/plot_run_diagnostics.p
-    --calib_config cfgs/calib_configs/nuclear_norm_identity_pbs128.json \
-    --mode both_indep --num_samples 50000 --seed 0 --cache_logits \
-    --run_name $RUN_NAME \
-    --compare_configs cfgs/compare_runs/paper_beta_log_pbs128.json
-cp $RUN/accuracy_table.tex $T/t1_beta_log_acc.tex
-cp $RUN/ece_table.tex      $T/t1_beta_log_ece.tex
+#    Skipped when a previous submission already finished the stream (all 15 logits caches present), e.g. after a
+#    later step died on a quota or walltime error. Its t1_beta_log_{acc,ece}.tex are then already in $T: do NOT
+#    re-copy from $RUN, a replay may have overwritten accuracy_table.tex there since.
+if [ "$(ls $RUN/logits_cache/*.pt 2>/dev/null | wc -l)" -lt 15 ]; then
+    python scripts/plot_run_diagnostics.py --config $CFG \
+        --calib_config cfgs/calib_configs/nuclear_norm_identity_pbs128.json \
+        --mode both_indep --num_samples 50000 --seed 0 --cache_logits \
+        --run_name $RUN_NAME \
+        --compare_configs cfgs/compare_runs/paper_beta_log_pbs128.json
+    cp $RUN/accuracy_table.tex $T/t1_beta_log_acc.tex
+    cp $RUN/ece_table.tex      $T/t1_beta_log_ece.tex
+else
+    echo "Step 1 skipped: $RUN/logits_cache already holds all 15 corruptions."
+fi
 
 # 3) Replays from cached logits. Each replay REPLACES the compare set and overwrites
 #    accuracy_table.tex / ece_table.tex, so the tables are copied out after each one.

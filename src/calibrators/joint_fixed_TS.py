@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from src.utils.device import get_device
 from src.calibrators.base import BaseJointCalibrator, _NoOpModule
 from src.utils.logit_transforms import combine_logits
 
@@ -17,7 +18,7 @@ class JointFixedTS(BaseJointCalibrator):
         super().__init__()
         self.Tl = nn.Parameter(torch.ones(1)) if Tl is None else nn.Parameter(torch.tensor([Tl]))
         self.Ts = nn.Parameter(torch.ones(1)) if Ts is None else nn.Parameter(torch.tensor([Ts]))
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = get_device()
         self.verbose = verbose
 
     def tune(self, logits_l, logits_s, labels, grid_n: int = 50_000,

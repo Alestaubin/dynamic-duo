@@ -15,6 +15,7 @@ import argparse
 import os
 import torch
 
+from src.utils.device import get_device
 from src.utils.data import load_config
 from src.utils.logits import get_model_logits
 from src.calibrators.joint_fixed_TS import JointFixedTS
@@ -56,7 +57,7 @@ def main():
     test_dir    = cfg["TEST_DIR"]
     batch_size  = cfg["BS"]
     num_workers = cfg["WORKERS"]
-    device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device      = get_device()
 
     def get_logits(model_name, corruption=None, severity=None):
         return get_model_logits(

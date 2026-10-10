@@ -33,6 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run from anywhere, no PYTHONPATH needed
 
+from src.utils.device import get_device
 from src.utils import model as model_lib
 from src.utils.config import DatasetPathNotSet, list_duos, load_duo, load_global
 from src.utils.datasets import (CCC, DATASETS, NATURAL_SHIFTS, DatasetLayoutError, ImageNetC, StagingUnavailable,
@@ -168,7 +169,7 @@ def main() -> int:
         run(f"duo {name}", check_duo, results)
 
     if args.probe:
-        probe(g, args.probe, "cuda" if __import__("torch").cuda.is_available() else "cpu")
+        probe(g, args.probe, str(get_device()))
 
     bad = [label for label, st in results if st == BAD or (args.strict and st == PENDING)]
     pending = [label for label, st in results if st == PENDING]

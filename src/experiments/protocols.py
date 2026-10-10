@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from src.experiments.specs import RunSpec
 from src.utils.config import GlobalConfig
-from src.utils.datasets import CCC, ImageNetC, ShiftDataset, get_dataset
+from src.utils.datasets import CCC, ImageNetC, ImageNetTrainSlice, ImageNetVal, ShiftDataset, get_dataset
 
 
 @dataclass
@@ -44,7 +44,17 @@ def build_segments(spec: RunSpec, g: GlobalConfig) -> list[Segment]:
     if spec.protocol in ("episodic", "tuning"):
         default = g.test_corruptions if spec.protocol == "episodic" else g.tuning_corruptions
         corruptions = a.get("corruptions") or default
-        return [Segment(f"{c}/s{severity}", ImageNetC.from_config(g, c, severity), True) for c in corruptions]
+        segments = [Segment(f"{c}/s{severity}", ImageNetC.from_config(g, c, severity), True) for c in corruptions]
+        # `clean`: also visit the clean images first ("val": the 50,000 validation images; "train_slice": the
+        # held-out clean slice of the training set). Used by the temperature studies.
+        clean = a.get("clean")
+        if clean == "val":
+            segments.insert(0, Segment("clean", ImageNetVal.from_config(g), True))
+        elif clean == "train_slice":
+            segments.insert(0, Segment("clean_train_slice", ImageNetTrainSlice.from_config(g), True))
+        elif clean:
+            raise ValueError(f"protocol_args['clean'] must be 'val' or 'train_slice', got {clean!r}")
+        return segments
 
     if spec.protocol == "natural":
         return [Segment(a["dataset"], get_dataset(a["dataset"], g), True)]
@@ -89,10 +99,28 @@ if __name__ == "__main__":
     assert RunSpec("x", protocol="ccc", protocol_args={"difficulty": "medium", "speed": 1000, "ccc_seed": 43}).protocol_tag \
         == "ccc-medium-1000-43"
 
+    # `clean` adds a leading clean-validation segment; a held-out corruption list is just another episodic list
+    cl = build_segments(RunSpec("vitb16_rn50", protocol_args={"corruptions": ["fog"], "clean": "val"}), g)
+    assert [s.label for s in cl] == ["clean", "fog/s5"] and cl[0].dataset.num_classes == 1000
+    assert [s.label for s in build_segments(RunSpec("x", protocol_args={"corruptions": ["spatter"]}), g)] == ["spatter/s5"]
+    try:
+        build_segments(RunSpec("x", protocol_args={"clean": "nope"}), g)
+        raise AssertionError("bad clean source must raise")
+    except ValueError:
+        pass
+
     # the fingerprint changes with anything that changes the members' logits, and with nothing else
     duo = {"LARGE": {"NAME": "a", "OPTIM": {"LR": 1e-4}}, "SMALL": {"NAME": "b", "OPTIM": {"LR": 1e-3}}}
     base = RunSpec("d").fingerprint(duo, 64, "masked")
     assert base == RunSpec("d").fingerprint(duo, 64, "masked")
+    # independent segments share a cache whatever segment list a run asks for ...
+    assert base == RunSpec("d", protocol_args={"corruptions": ["fog"], "clean": "val"}).fingerprint(duo, 64, "masked")
+    assert base == RunSpec("d", protocol="natural", protocol_args={"dataset": "imagenet_r"}).fingerprint(duo, 64, "masked")
+    assert RunSpec("d").cache_tag == RunSpec("d", protocol="tuning").cache_tag == "independent"
+    # ... but a continual stream is a different run per order, and never shares with independent ones
+    c0 = RunSpec("d", protocol="continual", protocol_args={"order": 0})
+    assert c0.fingerprint(duo, 64, "masked") != RunSpec("d", protocol="continual", protocol_args={"order": 1}).fingerprint(duo, 64, "masked")
+    assert c0.fingerprint(duo, 64, "masked") != base and c0.cache_tag == "continual-order0"
     assert base != RunSpec("d", seed=1).fingerprint(duo, 64, "masked")
     assert base != RunSpec("d", tta="eata").fingerprint(duo, 64, "masked")
     assert base != RunSpec("d").fingerprint(duo, 64, "full")

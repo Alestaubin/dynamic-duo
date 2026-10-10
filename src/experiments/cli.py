@@ -93,12 +93,13 @@ def pin_threads() -> None:
     torch.set_num_threads(int(n) if n else min(8, os.cpu_count() or 1))
 
 
-def setup(args: argparse.Namespace, script: str) -> tuple[Context, list[int], Path]:
-    """(context, seeds, output dir) for a script."""
+def setup(args: argparse.Namespace, script: str, default_seeds: Sequence[int] | None = None
+          ) -> tuple[Context, list[int], Path]:
+    """(context, seeds, output dir) for a script. Seeds: --seeds, else `default_seeds`, else protocol.seeds."""
     pin_threads()
     g = load_global(args.global_path)
     ctx = Context.create(args.duo, g, args.device)
-    seeds = list(args.seeds) if getattr(args, "seeds", None) else g.seeds
+    seeds = list(args.seeds) if getattr(args, "seeds", None) else list(default_seeds or g.seeds)
     out = Path(args.out) if args.out else g.path("out") / "results" / script
     out.mkdir(parents=True, exist_ok=True)
     return ctx, seeds, out

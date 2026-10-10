@@ -12,17 +12,31 @@ Status key: `[x]` done, `[ ]` open, `[?]` needs the author's decision.
 | 1 Global config, dataset classes, staging | done (CCC streams still to be generated, Phase 8) |
 | 2 Engine (`src/experiments/`) | done, parity with the old engine verified on real models |
 | 3 New components (proxies, oracle gate, SAR/EATA/CoTTA/ROID/RDumb, ViT-L/ViT-S loaders, single-model runner) | **on hold at the author's request** |
-| Preliminary experiments (inserted before Phase 3) | in progress: `tab_temperatures.py`, `tab_oracles.py` (see below) |
+| Preliminary experiments (inserted before Phase 3) | in progress: `01_tab_temperatures.py` (see below) |
 | 4-9 | not started |
 
 Everything above is committed and pushed on `filtered-proxy-soft-weighting` up to the end of Phase 2.
 
 ### Preliminary experiments (inserted before Phase 3)
 
-Two analysis scripts that decide which temperatures "Fixed TS" uses and bound what any temperature-based duo method can reach. Both read the same cached member logits (one adaptation run per seed, 20 streams: clean validation, the 4 held-out corruptions, the 15 test corruptions) and write LaTeX tables.
+One analysis script that settles which temperatures "Fixed TS" uses and bounds what any temperature-based duo method can reach. It reads the cached member logits (one adaptation run per seed over 20 streams: clean validation, the 4 held-out corruptions, the 15 test corruptions; the cache is shared with every later episodic script) and writes one LaTeX table. It replaces the earlier pair `01_tab_temperatures.py` + `02_tab_oracles.py`.
 
-1. `scripts/tab_temperatures.py`: optimal (T_L, T_S) fitted on each stream, next to the single-model accuracies and the accuracy of clean-fitted TS, held-out-corruption-fitted TS and per-stream optimal TS.
-2. `scripts/tab_oracles.py`: Fixed TS against four oracles of increasing granularity (corruption-wise TS, batch-wise TS, batch-wise oracle weight, per-sample oracle), all of which use labels.
+`scripts/01_tab_temperatures.py` -> `tab_temperatures__<tag>.tex` (labels `tab:temperatures:<tag>` and `tab:oracles:<tag>`). Rows: Clean (val), the 4 held-out corruptions, the 15 test corruptions, Average. Columns: T_L*, T_S* (NLL-optimal on that stream), Large, Small, Clean TS, Held-out TS, then the oracles (labels used, in-sample): Corr.-wise (accuracy at T_L*, T_S*), Batch-wise TS (one column per `--batch_sizes`, default 16 128), Per-sample. Every column is filled on every row. The CSV also holds each column's NLL.
+
+Code: `src/experiments/oracles.py` (the fitting maths), `src/experiments/temperature_study.py` (rows, rendering, script plumbing). `<tag>` is the TTA method, `frozen`, and `_trainslice` if clean is taken from the train slice. Run: `sbatch slurm/job.sh scripts/01_tab_temperatures.py` (adds `--mode no_adapt` for frozen members; `--report_only` renders from the cache; `--num_samples N` is a smoke test and writes its table to `out/results/` instead of `out/paper/`).
+
+How the maths works, and why it can be trusted:
+- The NLL of `(z_l/T_l + z_s/T_s)/2` is convex in `(1/(2 T_l), 1/(2 T_s))`, so temperatures are fitted by a damped box-constrained Newton method with the exact 2x2 Hessian (global optimum, vectorised over thousands of batches); `JointFixedTS.tune`'s grid + LBFGS is replaced by it. The box is [0.05, 50], the one `tune` already uses: when a model is unhelpful its optimal temperature is infinite, and the box makes that a reproducible boundary value (the old `checkpoints/fixed_ts/clean` has T_S = 1,301,082).
+- The per-sample oracle is Adam in log-temperature space, independent per sample, never worse than its start.
+- Self-tested (`python -m src.experiments.oracles`, `... .temperature_study`): the Newton fit never loses to a 70x70 grid or to `JointFixedTS.tune`; per-batch fits equal one-by-one fits; the NLL hierarchy Held-out TS >= corruption-wise >= batch-wise TS (B=128) >= batch-wise TS (B=16) holds, and per-sample <= Held-out TS; no cell of the rendered table is blank; the table has the right shape and compiles with pdflatex.
+
+Interpretation choices (change any with a flag or by telling me):
+- **Average row** = mean over the 15 test corruptions only (clean and held-out rows are shown but not averaged in).
+- **Batches** for the batch-wise TS oracle: 16 and 128 (`--batch_sizes`, any number of sizes, one column each). 128 is the gate's proxy batch, so that column acts at the gate's granularity.
+- **The batch-wise oracle weight (w_L per batch) was dropped** from the study and from `oracles.py` (`optimal_weights`, `batchwise_weights`, the `w` argument).
+- **Clean = the 50,000 validation images** (as written). ImageNet-C is rendered from those same images, so Clean TS is in-sample with respect to the images (not the corruptions); `--clean_source train_slice` uses the held-out train slice instead.
+- **Regime**: members adapt independently with Tent by default (the paper's setting); `--mode no_adapt` gives the frozen-weights version.
+- **Seed**: 0 only by default (the fits use whole streams, so the order barely matters); `--seeds 0 1 2` adds mean +- std.
 
 ## What the repo shows (drives the design)
 
@@ -85,15 +99,15 @@ All of `scripts/` and `cfgs/` is tracked and unmodified, so the tag restores it.
 
 | File | Fate |
 |---|---|
-| `scripts/plot_run_diagnostics.py` | Extract the replay engine (`_replay_compare_configs_from_cache`) and the run orchestration, then delete. `write_accuracy_latex_table` and `plot_per_corruption_gate_weight` live in `src/utils/diagnostics_plots.py` and move to `tables.py` / `figures.py` in Phase 2 |
-| `scripts/compare_calibrators.py` | Extract the run_cfg to calibrator construction, then delete |
-| `scripts/sweep_proxies.py` | Extract `bal_sel_acc`, `gap_bias`, `gap_corr`, then delete |
-| `scripts/sweep_tent_hp.py` | Becomes `tune_tta.py` |
-| `scripts/fit_fixed_ts.py` | Becomes `fit_temperatures.py` |
-| `scripts/_cli.py` | Fold into `src/experiments/cli.py` (keep `tta_tag`), then delete |
-| `scripts/run_dynamic_duo.py`, `scripts/run_tent.py` | Delete once the protocol layer and single-model runner exist (Phases 2 and 3) |
-| `scripts/test_tta_parity.py` | Delete after the Phase 5 parity gate replaces it |
-| `scripts/calibrate_gate_oracle.py`, `diagnose_ema_filter.py`, `eval_per_corruption_ts.py`, `plot_optimal_w_sanity.py`, `proxy_vs_optimal_temperature.py`, `screen_duo_candidates.py`, `test_proxies.py`, `test.py` | Delete (past experiments) |
+| `scripts/plot_run_diagnostics.py` | **Deleted (2026-10-08).** Replay engine and run orchestration live in `src/experiments/{runner,evaluate}.py`, the table writer in `src/utils/tables.py`. `plot_per_corruption_gate_weight` is in `src/utils/diagnostics_plots.py` (library, kept until Phase 6's `fig_gate_weights`) |
+| `scripts/compare_calibrators.py` | **Deleted (2026-10-08).** Calibrator construction is `src/experiments/gates.py` |
+| `scripts/sweep_proxies.py` | **Kept** until Phase 3 extracts `bal_sel_acc`, `gap_bias`, `gap_corr`, then delete |
+| `scripts/sweep_tent_hp.py` | **Kept**; becomes `tune_tta.py` (Phase 5) |
+| `scripts/fit_fixed_ts.py` | **Kept**; becomes `fit_temperatures.py` (Phase 5), now fitting on the held-out corruptions (decision 12) with `oracles.fit_temperatures` |
+| `scripts/_cli.py` | **Kept** while `fit_fixed_ts`, `run_tent`, `sweep_proxies` and `sweep_tent_hp` import it; each new script uses `src/experiments/cli.py` instead. Delete with the last of them |
+| `scripts/run_dynamic_duo.py` | **Deleted (2026-10-08)**: the protocol layer exists. `scripts/run_tent.py` is **kept** until Phase 3's single-model runner exists |
+| `scripts/test_tta_parity.py` | **Kept** until the Phase 5 parity gate (`parity_old_vs_new.py` at `--num_samples 50000`) has run; delete both with `slurm/test_tta_refactor.sh` |
+| `scripts/calibrate_gate_oracle.py`, `diagnose_ema_filter.py`, `eval_per_corruption_ts.py`, `plot_optimal_w_sanity.py`, `proxy_vs_optimal_temperature.py`, `screen_duo_candidates.py`, `test_proxies.py`, `test.py` | **Deleted (2026-10-08)** (past experiments) |
 | `cfgs/dynamic_duo_config_vitb_resnet.yaml` | Becomes `cfgs/duos/vitb16_rn50.yaml` |
 | other `cfgs/dynamic_duo_config*.yaml`, `cfgs/test.yaml` | Delete (pairs not in the paper), after the two new pairs are written |
 | `cfgs/compare_runs/paper_*.json` | Port each sweep into a spec builder in Phase 6, then delete the directory |
@@ -101,6 +115,11 @@ All of `scripts/` and `cfgs/` is tracked and unmodified, so the tag restores it.
 | `slurm/*.sh` | 28 deleted (backed up). `run_paper_tables.sh` and `test_tta_refactor.sh` stay until Phase 5 / Phase 9. `slurm/README.md` keeps the `salloc` recipes |
 | `optimal_w_sanity.png`, `results/*.csv` (tracked) | Delete (past experiments) |
 | `report/experiments.tex` | Keep |
+
+**Scripts cleanup (2026-10-08).** `scripts/` went from 21 to 10 files: 11 deleted (listed above), all tracked, so recoverable from the `pre-paper-cleanup` tag. What remains: the four new ones (`setup_check`, `tab_temperatures`, `tab_oracles`, `parity_old_vs_new`) and six that a later phase still consumes (`_cli`, `fit_fixed_ts`, `run_tent`, `sweep_proxies`, `sweep_tent_hp`, `test_tta_parity`). Things this leaves stale, to be fixed with the phase that retires them:
+- `slurm/run_paper_tables.sh` (calls the deleted `plot_run_diagnostics.py`) and `slurm/test_tta_refactor.sh` (calls the deleted `run_dynamic_duo.py`, `compare_calibrators.py`, `plot_run_diagnostics.py`, `proxy_vs_optimal_temperature.py`): both are one-off checks that cannot run any more.
+- `README.md` documents four `scripts/run_dynamic_duo.py` invocations; `CLAUDE.md` (git-ignored) documents most of the deleted scripts under "Commands". Both are rewritten in Phase 9.
+- Docstrings in `src/` still point at the deleted scripts (`diagnostics_plots.py`, `stream_cache.py`, `joint_optimal_w_oracle.py`, ...); they go with the library cleanup in Phase 9.
 
 Library code that looks dead from the paper's point of view, to be removed only after Phase 8 and only with the author's OK: `joint_coca.py`, `calibrators/temp/`, `joint_optimal_w_oracle.py`, the `oracle_ts` / `coca` / `optimal_w_oracle` modes in `dynamic_duo.py`, proxies `prototype` / `ac_mc` / `cot` / `agreement`, calibration maps `linear` / `platt` / `beta` / `isotonic`, filters `kalman` / `running_mean`, `csv_to_latex.py`.
 
@@ -164,7 +183,7 @@ Findings that changed the design:
 
 ## Phase 5: Setup scripts, then tuning
 
-- [ ] `setup_check`, `tab_models`, then `fit_temperatures`, `tune_tta`, `tune_gate`, `tune_reset`. Everything else reads `cfgs/tuned/`.
+- [ ] `setup_check`, then in dependency order `03_tune_tta`, `04_fit_temperatures`, `05_tune_gate`, `06_tune_reset`, and `07_tab_models`. Everything else reads `cfgs/tuned/`.
 - [ ] Throughput benchmark on a CCC stream. It decides the Phase 8 grid.
 - [ ] Parity gate: rerun the old `paper_vitb_resnet_both_indep` configuration through the new pipeline and compare to the existing CSVs. Do not overwrite the old `checkpoints/fixed_ts/default` until this passes (a copy is in the archive).
 
@@ -194,34 +213,50 @@ CCC prerequisites (from `third_party/CCC`):
 
 ## Script map (one script per result, in `scripts/`)
 
+Every script used in the Experiments section carries a two-digit prefix giving its **order of appearance in the paper**: `scripts/08_tab_accuracy.py`. 01 is the preliminary experiment that fix the Fixed-TS temperatures and bound the temperature-based methods, 03-07 are the setup the section's tuning and models paragraphs rely on (numbered in dependency order: the temperatures are fitted before the gate is tuned, since the gate uses them), 08 onward follow sections 5.2-5.8. Result files keep their unnumbered names (`out/paper/tab_accuracy.tex`) so the `\input{}` names never change. The phase lists elsewhere in this file use the short names.
+
 Every script takes `--duo --tta --seeds --report_only --only/--shard i/N`. Each builds its specs, runs or loads cached results, writes a CSV, and renders `out/paper/<label>.tex` or `.pdf`. Logic stays in `src/`.
 
-| Script | Result |
-|---|---|
-| `setup_check.py` | Dataset paths, disjoint tuning, test and CCC corruptions, temperature data not from val |
-| `tab_models.py` | Params, FLOPs, small-to-large FLOPs ratio and clean accuracy per pair |
-| `tune_tta.py` | Tent/ETA/SAR hparams per model on the 4 held-out corruptions |
-| `fit_temperatures.py` | T_L, T_S per duo on the train slice |
-| `tune_gate.py` | beta and b_t per proxy |
-| `tune_reset.py` | Reset thresholds, tau_min, collapse-signature thresholds |
-| `tab_accuracy.py` | Main table: members, fixed TS, ours, oracle row, ECE column, std, % of oracle gap captured |
-| `tab_beta.py` + `fig_gate_weights.py` | beta sweep per corruption in %; w_l figure for brightness and fog |
-| `tab_proxies.py` | `tab:proxies` with Avg, Collapse (fog, snow, glass blur, elastic), Order, rho_S |
-| `tab_generality.py` | `tab:generality`: 3 TTA x 3 pairs x {IN-C, R, A, Sketch, V2}, fixed TS / ours |
-| `fig_divergence.py` | Gain vs member divergence, one point per corruption x TTA x pair |
-| `tab_overhead.py` | Proxy and gate wall-clock overhead, forward and backward pass counts relative to the large model |
-| `tab_continual_refs.py` | Frozen and single-model rows (CoTTA-orders and CCC columns) |
-| `tab_continual_duo.py` | Gated-duo reset-policy rows plus diagnostics |
-| `tab_continual.py` | Assembles `tab:continual` from the two CSVs above |
-| `fig_ccc_stream.py` | One CCC-M stream: no-reset duo vs RDumb duo vs ours, with member accuracies and reset ticks |
-| `tab_stress.py` | Joint collapse (same-family pair) and label-correlated streams |
-| `fig_reset_cost.py` | Event-aligned reset dip, plus the table splitting the gain into warm partner, proxy timing and frequency |
-| `tab_abl_pbs.py` | b_t sweep 16-2048 on IN-C and CCC, per-corruption deltas |
-| `tab_abl_pooling.py` | Linear vs log pooling, per-corruption accuracy and ECE, rho_P and rho_S |
-| `tab_abl_filter.py` | None vs EMA alpha=0.05 and 0.01 on IN-C and CCC-M |
-| `tab_abl_reset_stat.py`, `tab_abl_detector.py`, `tab_abl_refractory.py`, `tab_abl_target.py` | Reset ablations on one CCC-M stream |
-| `tab_ablations.py` | Assembles `tab:ablations` |
-| `check_consistency.py` | Cross-table agreement |
+| # | File | Where in the paper | Result | State |
+|---|---|---|---|---|
+| 01 | `01_tab_temperatures.py` | preliminary; backs "Tuning and calibration data"; `fig:oracle_comparison` | Optimal T_L, T_S per stream; Large, Small, Clean TS, Held-out TS accuracy; oracles: corruption-wise, batch-wise (B = 16, 128), per-sample | written, smoke-tested |
+| 03 | `03_tune_tta.py` | 5.1 Tuning and calibration data | Tent/ETA/SAR hparams per model on the 4 held-out corruptions | planned (from `sweep_tent_hp.py`) |
+| 04 | `04_fit_temperatures.py` | 5.1 Tuning and calibration data | T_L, T_S on the held-out corruptions (decision 12) | planned (from `fit_fixed_ts.py`) |
+| 05 | `05_tune_gate.py` | 5.1 Tuning and calibration data | beta and b_t per proxy | planned |
+| 06 | `06_tune_reset.py` | 5.1 Tuning and calibration data | Reset thresholds, tau_min, collapse-signature thresholds | planned |
+| 07 | `07_tab_models.py` | 5.1 Models | Params, FLOPs, small-to-large FLOPs ratio, clean accuracy per pair | planned |
+| 08 | `08_tab_accuracy.py` | 5.2 `tab:accuracy` | Main table: members, fixed TS, ours, oracle row, ECE column, std, % of oracle gap captured | planned |
+| 09 | `09_fig_divergence.py` | 5.2 `fig:divergence` | Gain vs member divergence, one point per corruption x TTA x pair | planned |
+| 10 | `10_tab_beta.py` | 5.3 | beta sweep per corruption, in % | planned |
+| 11 | `11_fig_gate_weights.py` | 5.3 `fig:gate-weights` | w_l, member accuracies for brightness and fog | planned |
+| 12 | `12_tab_proxies.py` | 5.4 `tab:proxies` | Avg, Collapse (fog, snow, glass blur, elastic), Order, rho_S per proxy | planned |
+| 13 | `13_tab_generality.py` | 5.5 `tab:generality` | 3 TTA x 3 pairs x {IN-C, R, A, Sketch, V2}, fixed TS / ours | planned |
+| 14 | `14_tab_overhead.py` | 5.5 Overhead | Proxy and gate wall-clock overhead, pass counts relative to the large model | planned |
+| 15 | `15_tab_continual_refs.py` | 5.6 `tab:continual` | Frozen and single-model rows (CoTTA-orders and CCC columns) | planned |
+| 16 | `16_tab_continual_duo.py` | 5.6 `tab:continual` | Gated-duo reset-policy rows plus reset diagnostics | planned |
+| 17 | `17_tab_continual.py` | 5.6 `tab:continual` | Assembles the table from 15 and 16 | planned |
+| 18 | `18_fig_ccc_stream.py` | 5.6 `fig:ccc-stream` | One CCC-M stream: no-reset vs RDumb vs ours, member accuracies, reset ticks | planned |
+| 19 | `19_tab_stress.py` | 5.6 Stress tests | Joint collapse (same-family pair), label-correlated streams | planned |
+| 20 | `20_fig_reset_cost.py` | 5.7 `fig:reset-cost` | Event-aligned reset dip, plus the table splitting the gain into warm partner, proxy timing and frequency | planned |
+| 21 | `21_tab_abl_pbs.py` | 5.8.1 Proxy batch size | b_t sweep 16-2048 on IN-C and CCC, per-corruption deltas | planned |
+| 22 | `22_tab_abl_pooling.py` | 5.8.2 Pooling rule | Linear vs log pooling, per-corruption accuracy and ECE, rho_P and rho_S | planned |
+| 23 | `23_tab_abl_filter.py` | 5.8.3 Temporal filter | None vs EMA alpha = 0.05 and 0.01 on IN-C and CCC-M | planned |
+| 24 | `24_tab_abl_reset_stat.py` | 5.8.4 Reset rule | Statistic: per-member NNN, gap, collapse signature, gap + signature | planned |
+| 25 | `25_tab_abl_detector.py` | 5.8.4 Reset rule | Detector: threshold, derivative, CUSUM | planned |
+| 26 | `26_tab_abl_refractory.py` | 5.8.4 Reset rule | Refractory period tau_min | planned |
+| 27 | `27_tab_abl_target.py` | 5.8.4 Reset rule | Reset target: source, last healthy snapshot, shrink toward source | planned |
+| 28 | `28_tab_ablations.py` | 5.8 `tab:ablations` | Assembles the ablation table from 21-27 | planned |
+
+Not numbered (support the experiments, produce no result of their own):
+
+| File | Purpose | State |
+|---|---|---|
+| `setup_check.py` | Dataset paths and counts, disjoint tuning/test/CCC corruptions, duo configs, label probe | written |
+| `parity_old_vs_new.py` | Old engine vs new engine on real models (the Phase 5 gate at `--num_samples 50000`) | written, temporary (Phase 9) |
+| `ccc_generate.py` | SLURM-array wrapper around the CCC generator | planned (Phase 8) |
+| `check_consistency.py` | Cross-table agreement of shared cells | planned (Phase 9) |
+| `fit_fixed_ts.py`, `sweep_tent_hp.py` | Become 04 and 03 | kept until then |
+| `sweep_proxies.py`, `run_tent.py`, `test_tta_parity.py`, `_cli.py` | Retired per the inventory above | kept until then |
 
 ## Compute and storage
 
@@ -265,3 +300,5 @@ CCC dominates everything else by more than 10x, so decision 1 (develop and repor
 9. **Reset-threshold tuning stream (new).** Default: cycles of the 4 tuning corruptions (speckle, gaussian blur, spatter, saturate) in random order, about 1M images, seeds disjoint from the test streams.
 10. **Logits seen by the proxy, gate and temperatures on ImageNet-A/R (new).** Your note covers the TTA objective only. Default: everything downstream of the members' logits (proxy score, gate, pooling, fixed temperatures) uses the masked 200-way logits, because that is what predictions are scored on and it is what the reference benchmark does. The temperatures T_L, T_S are fitted once on 1000-way clean data and applied unchanged to the masked logits. Say if you want the gate to see all 1000 logits instead.
 11. **TF32 and GPU type (new).** Enabling TF32 matmuls gives +38% (L40S) / +81% (H100) throughput with logit changes <= 0.005, but the new runs would no longer reproduce the existing fp32 numbers bit for bit, and the parity gate (Phase 5) is easiest to read in fp32. Default: stay fp32 through the Phase 5 parity gate, then decide; request H100 nodes (`--gres=gpu:h100:1`) for long runs, they queued in under a minute.
+12. **Fixed TS = temperatures fitted on the held-out corruptions (new, from the preliminary experiments).** The brief says the first experiment established that they are better for the shifts than clean-fitted ones. This supersedes decision 8 for the temperatures: Phase 5's `fit_temperatures.py` should fit T_L, T_S on the 4 held-out corruptions pooled (reusing `oracles.fit_temperatures`, on the members' logits in the same regime as the experiment: adapted logits for the adapting duo), and the paper text ("fit on held-out clean training images") changes accordingly. ATC thresholds and other source-fitted proxy statistics stay on the clean train slice. Confirm against the numbers in `tab_temperatures` before relying on it.
+13. **Reproducibility note on the old checkpoints.** `checkpoints/fixed_ts/default` was fitted on clean validation + the held-out corruptions on frozen-model logits; `clean` and `tent` are other variants. None of them equal the new Fixed TS (held-out only, fitted on the logits of the regime in use), so the Phase 5 parity gate uses `default` explicitly and the new numbers will differ slightly.

@@ -27,6 +27,7 @@ from typing import Callable, Sequence
 import torch
 from tqdm import tqdm
 
+from src.utils.device import describe_device, get_device
 from src.experiments.cache import MemberCache
 from src.experiments.evaluate import OnlineEval
 from src.experiments.gates import MemberOnly, build_calibrator  # noqa: F401 (MemberOnly re-exported for scripts)
@@ -49,7 +50,9 @@ class Context:
     @classmethod
     def create(cls, duo_name: str, g: GlobalConfig | None = None, device: str | None = None) -> "Context":
         g = g or load_global()
-        return cls(g, load_duo(duo_name, g), torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu")))
+        device = get_device(device)
+        print(f"device: {describe_device(device)}")
+        return cls(g, load_duo(duo_name, g), device)
 
     @property
     def batch_size(self) -> int:
@@ -72,7 +75,7 @@ def run_dir(spec: RunSpec, ctx: Context) -> Path:
     if spec.duo != ctx.duo["NAME"]:
         raise ValueError(f"spec.duo={spec.duo!r} but the context holds duo {ctx.duo['NAME']!r}")
     fp = spec.fingerprint(ctx.duo, ctx.batch_size, ctx.objective_logits)
-    return ctx.g.path("cache") / "members" / spec.duo / spec.tta / f"{spec.protocol_tag}_seed{spec.seed}_{fp}"
+    return ctx.g.path("cache") / "members" / spec.duo / spec.tta / f"{spec.cache_tag}_seed{spec.seed}_{fp}"
 
 
 def _member_names(ctx: Context) -> tuple[str, str]:

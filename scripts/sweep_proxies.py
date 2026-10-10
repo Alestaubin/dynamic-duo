@@ -158,6 +158,7 @@ import torch
 from scipy.stats import pearsonr, spearmanr
 from tqdm import tqdm
 
+from src.utils.device import get_device
 from src.utils.data import load_config, load_imagenetC
 from src.utils.model import get_model
 from src.utils.stream_cache import duo_cache_dir, stream_key, load_or_collect_stream
@@ -445,7 +446,7 @@ def main():
                         help="torch device for model loading, source-fitting, AND the Sweep")
     args = parser.parse_args()
 
-    device = torch.device(args.device) if args.device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device(args.device)
     print(f"Using device: {device}")
 
     config = load_config(args.config)
