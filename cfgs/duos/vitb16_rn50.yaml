@@ -1,6 +1,6 @@
 # Primary duo: ViT-B/16 (large) + ResNet-50 (small). Dataset paths, batch size, corruptions and
 # severities come from cfgs/global.yaml; this file only holds the model choices.
-# OPTIM values are the pre-tuning defaults: a cfgs/tuned/<tta>__<model>.yaml written by scripts/03_tune_tta.py overrides them (load_duo).
+# OPTIM values are the pre-tuning defaults: a cfgs/tuned/<tta>__<model>.yaml written by scripts/02_tune_tta.py overrides them (load_duo).
 NAME: vitb16_rn50
 
 LARGE:

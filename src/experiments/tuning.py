@@ -1,7 +1,7 @@
 """
 tuning.py
 =========
-The logic behind scripts/03_tune_tta.py: tune a TTA method's optimizer settings for ONE model on the held-out
+The logic behind scripts/02_tune_tta.py: tune a TTA method's optimizer settings for ONE model on the held-out
 corruptions (corruptions.tuning in cfgs/global.yaml: speckle noise, Gaussian blur, spatter, saturate; none of them is
 a test corruption), then hand the winner to every experiment through cfgs/tuned/<tta>__<model>.yaml
 (src/utils/config.py::load_duo overlays it on the duo YAML's OPTIM).
@@ -208,12 +208,12 @@ def tuned_record(best: dict, frozen: dict, *, model: str, tta: str, norm: str, b
     return {"model": model, "tta": tta, "NORM": norm, "batch_size": batch_size, "OPTIM": dict(best["optim"]),
             "tuned_on": {"streams": list(stream_labels), "seed": seed},
             "macro_accuracy": round(best["macro_accuracy"], 5), "frozen_macro_accuracy": round(frozen["macro_accuracy"], 5),
-            "written_by": "scripts/03_tune_tta.py"}
+            "written_by": "scripts/02_tune_tta.py"}
 
 
 def write_tuned(path: Path, record: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# Written by scripts/03_tune_tta.py on the held-out corruptions; read by src/utils/config.py::load_duo.\n"
+    path.write_text("# Written by scripts/02_tune_tta.py on the held-out corruptions; read by src/utils/config.py::load_duo.\n"
                     "# Do not edit by hand: rerun the tuner.\n" + yaml.safe_dump(record, sort_keys=False))
     return path
 
@@ -224,7 +224,7 @@ if __name__ == "__main__":
 
     from src.experiments._testing import DUO, FakeStream, tiny_models
     from src.experiments.members import MemberRunner
-    from src.utils.config import GlobalConfig, load_duo, load_global
+    from src.utils.config import DUO_DIR, GlobalConfig, load_duo, load_global
 
     torch.set_num_threads(2)
     cpu = torch.device("cpu")
@@ -317,5 +317,6 @@ if __name__ == "__main__":
         out = write_tuned(Path(tmp) / "tent__resnet50.yaml", rec)
         assert yaml.safe_load(out.read_text()) == rec and out.read_text().startswith("# Written by")
         duo = load_duo("vitb16_rn50", g2)
-        assert duo["SMALL"]["OPTIM"] == ranked[0]["optim"] and duo["LARGE"]["OPTIM"] == load_duo("vitb16_rn50")["LARGE"]["OPTIM"]
+        yaml_large = yaml.safe_load((DUO_DIR / "vitb16_rn50.yaml").read_text())["LARGE"]["OPTIM"]
+        assert duo["SMALL"]["OPTIM"] == ranked[0]["optim"] and duo["LARGE"]["OPTIM"] == yaml_large
     print("tuning self-test passed")

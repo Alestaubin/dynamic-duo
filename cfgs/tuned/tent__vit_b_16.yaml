@@ -1,0 +1,24 @@
+# Written by scripts/03_tune_tta.py on the held-out corruptions; read by src/utils/config.py::load_duo.
+# Do not edit by hand: rerun the tuner.
+model: vit_b_16
+tta: tent
+NORM: LN
+batch_size: 64
+OPTIM:
+  METHOD: SGD
+  STEPS: 1
+  LR: 0.001
+  MOMENTUM: 0.0
+  DAMPENING: 0.0
+  WD: 0.0
+  NESTEROV: false
+tuned_on:
+  streams:
+  - speckle_noise/s5
+  - gaussian_blur/s5
+  - spatter/s5
+  - saturate/s5
+  seed: 0
+macro_accuracy: 0.50958
+frozen_macro_accuracy: 0.47037
+written_by: scripts/03_tune_tta.py
