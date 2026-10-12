@@ -1,6 +1,6 @@
 # Wider capacity gap: ViT-L/16 (large) + ResNet-50 (small).
 # TODO(phase 3): add the `vit_l_16` loader to src/utils/model.py (torchvision weights).
-# TODO(phase 5): LARGE.OPTIM is copied from ViT-B/16 until scripts/03_tune_tta.py tunes it.
+# TODO(phase 5): LARGE.OPTIM is copied from ViT-B/16 until scripts/02_tune_tta.py tunes it.
 NAME: vitl16_rn50
 
 LARGE:

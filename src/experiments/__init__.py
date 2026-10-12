@@ -10,8 +10,8 @@
   runner     ensure_members / evaluate: compute-or-load, then replay
   results    tidy CSV rows and mean +- std over seeds
   cli        the flags every script takes
-  adaptation_modes  scripts/02: the six ways of adapting a duo, the shared temperatures, the two tables
-  tuning     scripts/03: one-model Tent tuning on the held-out corruptions, written to cfgs/tuned/
+  adaptation_modes  scripts/03: the six ways of adapting a duo, the shared temperatures, the two tables
+  tuning     scripts/02: one-model Tent tuning on the held-out corruptions, written to cfgs/tuned/
 
 Why this shape: the paper adapts the two members independently, so the gate never feeds back into
 adaptation. One live run per (TTA method, duo, stream, seed) therefore yields both members' logits, and

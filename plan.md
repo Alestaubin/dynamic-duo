@@ -12,14 +12,14 @@ Status key: `[x]` done, `[ ]` open, `[?]` needs the author's decision.
 | 1 Global config, dataset classes, staging | done (CCC streams still to be generated, Phase 8) |
 | 2 Engine (`src/experiments/`) | done, parity with the old engine verified on real models |
 | 3 New components (proxies, oracle gate, SAR/EATA/CoTTA/ROID/RDumb, ViT-L/ViT-S loaders, single-model runner) | **on hold at the author's request** |
-| Preliminary experiments (inserted before Phase 3) | `01_tab_temperatures.py`, `02_tab_adaptation_modes.py` and `03_tune_tta.py` written (see below); runs on real data pending |
+| Preliminary experiments (inserted before Phase 3) | `01_tab_temperatures.py`, `02_tune_tta.py` (Tent tuner) and `03_tab_adaptation_modes.py` written (see below); `02` has run for ViT-B/16, the rest of the runs on real data are pending |
 | 4-9 | not started |
 
 Everything above is committed and pushed on `filtered-proxy-soft-weighting` up to the end of Phase 2.
 
 ### Preliminary experiments (inserted before Phase 3)
 
-One analysis script that settles which temperatures "Fixed TS" uses and bounds what any temperature-based duo method can reach. It reads the cached member logits (one adaptation run per seed over 20 streams: clean validation, the 4 held-out corruptions, the 15 test corruptions; the cache is shared with every later episodic script) and writes one LaTeX table. It replaces the earlier pair `01_tab_temperatures.py` + `02_tab_oracles.py`.
+One analysis script that settles which temperatures "Fixed TS" uses and bounds what any temperature-based duo method can reach. It reads the cached member logits (one adaptation run per seed over 20 streams: clean validation, the 4 held-out corruptions, the 15 test corruptions; the cache is shared with every later episodic script) and writes one LaTeX table. It replaces an earlier pair of scripts (temperatures and oracles in separate tables).
 
 `scripts/01_tab_temperatures.py` -> `tab_temperatures__<tag>.tex` (labels `tab:temperatures:<tag>` and `tab:oracles:<tag>`). Rows: Clean (val), the 4 held-out corruptions, the 15 test corruptions, Average. Columns: T_L*, T_S* (NLL-optimal on that stream), Large, Small, Clean TS, Held-out TS, then the oracles (labels used, in-sample): Corr.-wise (accuracy at T_L*, T_S*), Batch-wise TS (one column per `--batch_sizes`, default 16 128), Per-sample. Every column is filled on every row. The CSV also holds each column's NLL.
 
@@ -38,9 +38,20 @@ Interpretation choices (change any with a flag or by telling me):
 - **Regime**: members adapt independently with Tent by default (the paper's setting); `--mode no_adapt` gives the frozen-weights version.
 - **Seed**: 0 only by default (the fits use whole streams, so the order barely matters); `--seeds 0 1 2` adds mean +- std.
 
-### Second experiment: how the duo is adapted (`02_tab_adaptation_modes.py`) and the Tent tuner (`03_tune_tta.py`)
+### Tent tuner (`02_tune_tta.py`) and the adaptation-modes experiment (`03_tab_adaptation_modes.py`)
 
-`scripts/02_tab_adaptation_modes.py` -> `tab_adaptation_modes__<tag>.tex` (accuracy per corruption, one row per mode, ImageNet-C layout) and `tab_adaptation_modes_summary__<tag>.tex` (each member's accuracy under the mode, then the duo's accuracy, ECE, NLL, averaged over the 15 corruptions). Every row is scored by the same static duo `(z_L/T_L + z_S/T_S)/2`, so the rows differ only in how the weights were adapted. Modes (the model named is the one that adapts; engine mode in brackets): Joint (`both_duo`), Large anchor (`large_duo`), Small anchor (`small_duo`), Independent large / small / duo (`large_indep` / `small_indep` / `both_indep`), plus a frozen reference row (`no_adapt`). Code: `src/experiments/adaptation_modes.py`. Run: `--temps_only` once, then `sbatch --array=0-20 slurm/job.sh scripts/02_tab_adaptation_modes.py --shard auto` (one job per mode and seed), then `--report_only`.
+02 is a setup step that comes first: everything else reads its output (`cfgs/tuned/`). 03 is the second experiment of the preliminary block (01 is the temperature study).
+
+`scripts/02_tune_tta.py --model NAME` tunes one model (any name `get_model` knows) on the 4 held-out corruptions at severity 5 and writes `cfgs/tuned/tent__<model>.yaml`. `src/utils/config.py::load_duo` overlays that file on the duo YAML's OPTIM for the model and TTA method (`Context.create(..., tta=)`, `--tta` in every script), and refuses a file tuned for another norm type. Code: `src/experiments/tuning.py`.
+- The model is adapted by the real `TentMethod` set up as the "large" side of a one-model duo, so it is the code the experiments run; tested identical to the engine's `large_indep` logits.
+- Grid: Adam lr 5e-5..1e-3 (beta 0.9) and SGD lr 1e-4..1e-2 with momentum 0 / 0.9 (the old `sweep_tent_hp.py` grids), batch size and full streams from the protocol. Score = macro accuracy over the 4 streams. A frozen-model reference is run; the winner must beat it. A warning says when the best learning rate is at the end of the range tried.
+- **Full streams by default**: the old sweep used 2,000 images per stream; a learning rate that wins over 30 updates is typically too large over the 780 updates of a 50,000-image stream (the old ResNet-50 sweep picked Adam 1e-3, the duo YAML has 2.5e-4). `--num_samples` is for smoke tests and never writes the tuned file.
+- Norm type is detected from the model (BN / LN / GN; torchvision's ConvNeXt is LayerNorm), `--norm` overrides it.
+- Resumable and shardable: one JSON per trial under `out/results/tune_tta/<model>__tent/trials/`, ranking in `ranking.csv`; `--shard auto` over a job array, `--report_only` ranks and writes the tuned file from the stored trials.
+- ETA/SAR: the script takes `--tta` for the day they have grids; today only Tent is accepted.
+- **Run it first.** The tuned settings change the learning rates every other script uses, and the learning rates are part of the cache fingerprint: run 02 for both members of a duo before 01 and 03. Logits cached earlier with the pre-tuning rates are not found any more (they stay on disk, unused).
+
+`scripts/03_tab_adaptation_modes.py` -> `tab_adaptation_modes__<tag>.tex` (accuracy per corruption, one row per mode, ImageNet-C layout) and `tab_adaptation_modes_summary__<tag>.tex` (each member's accuracy under the mode, then the duo's accuracy, ECE, NLL, averaged over the 15 corruptions). Every row is scored by the same static duo `(z_L/T_L + z_S/T_S)/2`, so the rows differ only in how the weights were adapted. Modes (the model named is the one that adapts; engine mode in brackets): Joint (`both_duo`), Large anchor (`large_duo`), Small anchor (`small_duo`), Independent large / small / duo (`large_indep` / `small_indep` / `both_indep`), plus a frozen reference row (`no_adapt`). Code: `src/experiments/adaptation_modes.py`. Run: `--temps_only` once, then `sbatch --array=0-20 slurm/job.sh scripts/03_tab_adaptation_modes.py --shard auto` (one job per mode and seed), then `--report_only`.
 
 Engine changes this needed:
 - `MemberRunner` runs the `*_duo` modes: the loss is the entropy of a static calibrator's combination (`loop_calibrator`), backpropagated into whichever members adapt (an anchor's logits enter detached). Checked bit for bit against the old `forward_and_adapt` for all three modes (`python -m src.experiments.runner`).
@@ -53,14 +64,6 @@ Interpretation choices (change any with a flag or by telling me):
 - **A "No adaptation" row is added** as the reference (`--modes` restricts the set).
 - **Seeds**: protocol.seeds (0, 1, 2), mean +- std; 01 uses one seed.
 - Cost (an estimate from the measured rates below): about 5 episodic-run equivalents per seed (two runs adapt both members, four adapt one, one is frozen), so about 9 H100-hours for 3 seeds, less where 01's cache already holds the independent-duo and frozen runs.
-
-`scripts/03_tune_tta.py --model NAME` tunes one model (any name `get_model` knows) on the 4 held-out corruptions at severity 5 and writes `cfgs/tuned/tent__<model>.yaml`. `src/utils/config.py::load_duo` overlays that file on the duo YAML's OPTIM for the model and TTA method (`Context.create(..., tta=)`, `--tta` in every script), and refuses a file tuned for another norm type. Code: `src/experiments/tuning.py`.
-- The model is adapted by the real `TentMethod` set up as the "large" side of a one-model duo, so it is the code the experiments run; tested identical to the engine's `large_indep` logits.
-- Grid: Adam lr 5e-5..1e-3 (beta 0.9) and SGD lr 1e-4..1e-2 with momentum 0 / 0.9 (the old `sweep_tent_hp.py` grids), batch size and full streams from the protocol. Score = macro accuracy over the 4 streams. A frozen-model reference is run; the winner must beat it. A warning says when the best learning rate is at the end of the range tried.
-- **Full streams by default**: the old sweep used 2,000 images per stream; a learning rate that wins over 30 updates is typically too large over the 780 updates of a 50,000-image stream (the old ResNet-50 sweep picked Adam 1e-3, the duo YAML has 2.5e-4). `--num_samples` is for smoke tests and never writes the tuned file.
-- Norm type is detected from the model (BN / LN / GN; torchvision's ConvNeXt is LayerNorm), `--norm` overrides it.
-- Resumable and shardable: one JSON per trial under `out/results/tune_tta/<model>__tent/trials/`, ranking in `ranking.csv`; `--shard auto` over a job array, `--report_only` ranks and writes the tuned file from the stored trials.
-- ETA/SAR: the script takes `--tta` for the day they have grids; today only Tent is accepted.
 
 ## What the repo shows (drives the design)
 
@@ -126,7 +129,7 @@ All of `scripts/` and `cfgs/` is tracked and unmodified, so the tag restores it.
 | `scripts/plot_run_diagnostics.py` | **Deleted (2026-10-08).** Replay engine and run orchestration live in `src/experiments/{runner,evaluate}.py`, the table writer in `src/utils/tables.py`. `plot_per_corruption_gate_weight` is in `src/utils/diagnostics_plots.py` (library, kept until Phase 6's `fig_gate_weights`) |
 | `scripts/compare_calibrators.py` | **Deleted (2026-10-08).** Calibrator construction is `src/experiments/gates.py` |
 | `scripts/sweep_proxies.py` | **Kept** until Phase 3 extracts `bal_sel_acc`, `gap_bias`, `gap_corr`, then delete |
-| `scripts/sweep_tent_hp.py` | **Superseded** by `03_tune_tta.py` (written); delete in Phase 9 |
+| `scripts/sweep_tent_hp.py` | **Superseded** by `02_tune_tta.py` (written); delete in Phase 9 |
 | `scripts/fit_fixed_ts.py` | **Kept**; becomes `fit_temperatures.py` (Phase 5), now fitting on the held-out corruptions (decision 12) with `oracles.fit_temperatures` |
 | `scripts/_cli.py` | **Kept** while `fit_fixed_ts`, `run_tent`, `sweep_proxies` and `sweep_tent_hp` import it; each new script uses `src/experiments/cli.py` instead. Delete with the last of them |
 | `scripts/run_dynamic_duo.py` | **Deleted (2026-10-08)**: the protocol layer exists. `scripts/run_tent.py` is **kept** until Phase 3's single-model runner exists |
@@ -207,7 +210,7 @@ Findings that changed the design:
 
 ## Phase 5: Setup scripts, then tuning
 
-- [ ] `setup_check`, then in dependency order `03_tune_tta` (written, see below), `04_fit_temperatures`, `05_tune_gate`, `06_tune_reset`, and `07_tab_models`. Everything else reads `cfgs/tuned/`.
+- [ ] `setup_check`, then in dependency order `02_tune_tta` (written, see below), `04_fit_temperatures`, `05_tune_gate`, `06_tune_reset`, and `07_tab_models`. Everything else reads `cfgs/tuned/`.
 - [ ] Throughput benchmark on a CCC stream. It decides the Phase 8 grid.
 - [ ] Parity gate: rerun the old `paper_vitb_resnet_both_indep` configuration through the new pipeline and compare to the existing CSVs. Do not overwrite the old `checkpoints/fixed_ts/default` until this passes (a copy is in the archive).
 
@@ -237,15 +240,15 @@ CCC prerequisites (from `third_party/CCC`):
 
 ## Script map (one script per result, in `scripts/`)
 
-Every script used in the Experiments section carries a two-digit prefix giving its **order of appearance in the paper**: `scripts/08_tab_accuracy.py`. 01 is the preliminary experiment that fix the Fixed-TS temperatures and bound the temperature-based methods, 03-07 are the setup the section's tuning and models paragraphs rely on (numbered in dependency order: the temperatures are fitted before the gate is tuned, since the gate uses them), 08 onward follow sections 5.2-5.8. Result files keep their unnumbered names (`out/paper/tab_accuracy.tex`) so the `\input{}` names never change. The phase lists elsewhere in this file use the short names.
+Every script used in the Experiments section carries a two-digit prefix giving its **order of appearance in the paper**: `scripts/08_tab_accuracy.py`. 01 is the preliminary experiment that fixes the Fixed-TS temperatures and bounds the temperature-based methods, 02 is the Tent tuner (setup: every later script reads `cfgs/tuned/`, so it runs first), 03 is the adaptation-modes experiment, 04-07 are the rest of the setup the section's tuning and models paragraphs rely on (numbered in dependency order: the temperatures are fitted before the gate is tuned, since the gate uses them), 08 onward follow sections 5.2-5.8. Result files keep their unnumbered names (`out/paper/tab_accuracy.tex`) so the `\input{}` names never change. The phase lists elsewhere in this file use the short names.
 
 Every script takes `--duo --tta --seeds --report_only --only/--shard i/N`. Each builds its specs, runs or loads cached results, writes a CSV, and renders `out/paper/<label>.tex` or `.pdf`. Logic stays in `src/`.
 
 | # | File | Where in the paper | Result | State |
 |---|---|---|---|---|
 | 01 | `01_tab_temperatures.py` | preliminary; backs "Tuning and calibration data"; `fig:oracle_comparison` | Optimal T_L, T_S per stream; Large, Small, Clean TS, Held-out TS accuracy; oracles: corruption-wise, batch-wise (B = 16, 128), per-sample | written, smoke-tested |
-| 02 | `02_tab_adaptation_modes.py` | preliminary; the adaptation-modes paragraph | Joint, Large / Small anchor, Independent large / small / duo (+ frozen), all scored by the same static duo; per corruption, plus members / duo accuracy, ECE, NLL | written, smoke-tested |
-| 03 | `03_tune_tta.py` | 5.1 Tuning and calibration data | Tent hparams for one model on the 4 held-out corruptions, written to `cfgs/tuned/` (ETA/SAR to follow with their own grids) | written, smoke-tested |
+| 02 | `02_tune_tta.py` | 5.1 Tuning and calibration data | Tent hparams for one model on the 4 held-out corruptions, written to `cfgs/tuned/` (ETA/SAR to follow with their own grids) | written, smoke-tested; run for ViT-B/16 |
+| 03 | `03_tab_adaptation_modes.py` | preliminary; the adaptation-modes paragraph | Joint, Large / Small anchor, Independent large / small / duo (+ frozen), all scored by the same static duo; per corruption, plus members / duo accuracy, ECE, NLL | written, smoke-tested |
 | 04 | `04_fit_temperatures.py` | 5.1 Tuning and calibration data | T_L, T_S on the held-out corruptions (decision 12) | planned (from `fit_fixed_ts.py`) |
 | 05 | `05_tune_gate.py` | 5.1 Tuning and calibration data | beta and b_t per proxy | planned |
 | 06 | `06_tune_reset.py` | 5.1 Tuning and calibration data | Reset thresholds, tau_min, collapse-signature thresholds | planned |
@@ -281,7 +284,7 @@ Not numbered (support the experiments, produce no result of their own):
 | `ccc_generate.py` | SLURM-array wrapper around the CCC generator | planned (Phase 8) |
 | `check_consistency.py` | Cross-table agreement of shared cells | planned (Phase 9) |
 | `fit_fixed_ts.py` | Becomes 04 | kept until then |
-| `sweep_tent_hp.py` | Superseded by 03 | kept until Phase 9 |
+| `sweep_tent_hp.py` | Superseded by 02 | kept until Phase 9 |
 | `sweep_proxies.py`, `run_tent.py`, `test_tta_parity.py`, `_cli.py` | Retired per the inventory above | kept until then |
 
 ## Compute and storage

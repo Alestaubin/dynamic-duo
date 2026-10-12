@@ -1,7 +1,7 @@
 """
 adaptation_modes.py
 ===================
-The logic behind scripts/02_tab_adaptation_modes.py: HOW the duo is adapted, with the prediction held fixed.
+The logic behind scripts/03_tab_adaptation_modes.py: HOW the duo is adapted, with the prediction held fixed.
 
 Every mode is scored by the same static duo, (z_L / T_L + z_S / T_S) / 2 with fixed temperatures, so the rows of
 the table differ only in how the members' weights were adapted. The modes (the model named is the one that adapts):
