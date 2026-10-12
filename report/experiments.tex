@@ -1,0 +1,205 @@
+% Experiments section -- filtered-proxy soft weighting for Asymmetric Duo TTA.
+% Meant to be \input{} into the main report; assumes booktabs is loaded in
+% the preamble (\usepackage{booktabs}). Replace the illustrative results in
+% Table~\ref{tab:duo-results} with the full per-corruption sweep once it is
+% run -- the numbers here come from single-seed exploratory runs on one duo
+% and are meant to motivate the design choice, not to stand in for it.
+
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{From frozen screening to adapting duos}
+\label{sec:experiments:shift}
+
+Our earlier experiments held both models frozen (\texttt{no\_adapt}) and used
+this static setting purely as a cheap screen: for a fixed Asymmetric Duo, we
+swept every combination of reliability proxy (\texttt{nuclear\_norm},
+\texttt{atc}, \texttt{prototype}, \texttt{ac\_mc}, \texttt{cot}), Section-3
+calibration map (\texttt{identity}, \texttt{linear}, \texttt{platt},
+\texttt{beta}, \texttt{isotonic}), and proxy batch size $b_t$, and ranked the
+resulting configurations by balanced selection accuracy
+(\texttt{bal\_sel\_acc}) against the true per-chunk winner. This told us
+\emph{which raw signal tracks reliability at all}, independent of whether
+either model was actually adapting.
+
+The project's focus has since shifted to the setting the method is actually
+built for: both models undergoing live test-time adaptation (TENT, entropy
+minimization) while the same filtered-proxy gate continuously re-weights
+their combination. This changes the problem in two ways a frozen sweep
+cannot capture. First, the input distribution to the proxy is no longer
+fixed within a corruption: as each model's BatchNorm/LayerNorm statistics
+adapt to the shift, the raw proxy score's own scale and dynamic range drift
+over the course of the stream, so a proxy or calibration choice that looked
+best on frozen logits is not guaranteed to remain best once the models it is
+scoring are themselves changing under it. Second, the gate weight now feeds
+back into what the models learn: whichever model the gate favors more
+strongly shapes the entropy-minimization signal driving adaptation, a
+coupling that has no analogue in the frozen, no-feedback setting. Every
+result reported below is therefore from a live-adapting run
+(\texttt{scripts/plot\_run\_diagnostics.py}, \texttt{mode=both\_indep} or
+\texttt{both\_duo}), not the earlier frozen sweep.
+
+\subsection{Current recipe: nuclear-norm proxy, identity calibration, EMA filtering}
+\label{sec:experiments:recipe}
+
+The configuration we have converged on for the adapting setting is:
+
+\begin{itemize}
+    \item \textbf{Proxy (Section~2):} \texttt{nuclear\_norm} -- the nuclear
+    norm of the batch's softmax matrix. It is stateless (no source-data
+    fitting pass is required, unlike \texttt{atc}/\texttt{prototype}/%
+    \texttt{cot}), which matters more under adaptation than it did in the
+    frozen sweep: there is no held-out clean pass to re-fit mid-stream, so a
+    proxy that needs one is implicitly assuming its source-fitted state
+    (e.g. \texttt{atc}'s threshold, \texttt{prototype}'s class means) stays
+    valid as the models drift -- an assumption \texttt{nuclear\_norm} simply
+    does not make.
+    \item \textbf{Calibration (Section~3):} \texttt{identity} -- i.e., no
+    fitted calibration map at all; the gate reads the raw proxy score
+    directly. Section-3 calibration was introduced specifically to correct a
+    proxy that is \emph{structurally} biased toward whichever model is
+    stronger on average (see the \texttt{sel\_acc} vs.\ \texttt{bal\_sel\_acc}
+    gotcha from the frozen-sweep phase). For \texttt{nuclear\_norm} on the
+    duos we have adapted so far, this bias did not reappear badly enough to
+    justify a fitted map: the identity baseline performed comparably to the
+    learned calibration methods while removing an entire fitting stage (and
+    its own held-out-corruption dependency) from the pipeline. We therefore
+    drop calibration-map selection as an active axis of experimentation for
+    now, rather than continuing to carry \texttt{linear}/\texttt{platt}/%
+    \texttt{beta}/\texttt{isotonic} as live alternatives.
+    \item \textbf{Temporal filter (Section~4):} exponential moving average
+    (\texttt{ema}), $\alpha = 0.5$. This is a comparatively fast-reacting
+    setting (half of the filter's state is replaced by each new
+    observation), chosen because under live adaptation the model's own
+    reliability can shift within a single corruption (e.g.\ as BN/LN
+    statistics settle), and an overly slow filter lags exactly the kind of
+    change the gate needs to react to.
+    \item \textbf{Gate sharpness:} $\beta = 4.0$, fixed rather than fit via
+    \texttt{fit\_beta} for the results below.
+    \item \textbf{Proxy batch size:} $b_t = 128$, decoupled from the
+    adaptation batch size (64 in our primary duo config) -- the gate
+    recomputes every 128 samples rather than every adaptation step.
+    \item \textbf{Base temperature prior:} a frozen \texttt{JointFixedTS}
+    fit on clean validation data (\texttt{checkpoints/fixed\_ts/default})
+    supplies $T_l, T_s$ for the Section-5 combination; the proxy sets only
+    the mixing weight between the two temperature-scaled models, not their
+    base scale.
+\end{itemize}
+
+\subsection{Illustrative results}
+\label{sec:experiments:results}
+
+Table~\ref{tab:duo-results} shows two representative corruptions from a
+single-seed, live-adapting run of the ViT-B/16 (large) + ResNet-50 (small)
+duo (\texttt{both\_indep}, i.e.\ each model adapts on its own logits while
+the same nuclear-norm/identity/EMA gate combines them for the reported duo
+accuracy), against two fixed baselines (\texttt{fixed\_ts}, \texttt{coca\_ts})
+and an alternate filtered-proxy configuration
+($b_t = 512$, $\beta$ fit via \texttt{fit\_beta} rather than fixed).
+
+\begin{table}[h]
+    \centering
+    \caption{Per-corruption average accuracy, ViT-B/16 + ResNet-50 duo,
+    severity 5, single seed. ``Ours'' is nuclear\_norm + identity + EMA,
+    $b_t=128$, $\beta=4.0$ (fixed). ``Ours ($b_t{=}512$, fit $\beta$)'' is
+    the same proxy/calibration/filter with a larger, less reactive proxy
+    batch and a dev-corruption-tuned $\beta$.}
+    \label{tab:duo-results}
+    \begin{tabular}{lcccccc}
+        \toprule
+        Corruption & Large & Small & Ours & Fixed-TS & COCA-TS & Ours ($b_t{=}512$, fit $\beta$) \\
+        \midrule
+        brightness/s5        & 0.726 & 0.715 & \textbf{0.739} & --    & --    & -- \\
+        elastic\_transform/s5 & 0.231 & 0.527 & \textbf{0.507} & 0.360 & 0.321 & 0.370 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Two things stand out even from this small sample. First, the benefit of the
+filtered-proxy gate is highly corruption-dependent: on
+\texttt{brightness/s5}, where the two adapting models end up close in
+accuracy (0.726 vs.\ 0.715), the gate's advantage over either input model is
+marginal (0.739). On \texttt{elastic\_transform/s5}, where the large model
+collapses under adaptation (0.231) while the small model does not
+(0.527), the gate tracks the small model's reliability and recovers most of
+its accuracy (0.507) -- exactly the regime the method is meant for, and
+consistent with \texttt{screen\_duo\_candidates.py}'s notion of ``oracle
+$\Delta$acc'': the achievable gain from a good per-chunk selector is largest
+precisely when the two models disagree about who is reliable. Second, on
+that same corruption, our fixed, small-$b_t$ configuration
+(0.507) clearly outperforms both fixed baselines (0.360, 0.321) \emph{and}
+the larger-$b_t$/fit-$\beta$ variant (0.370) -- i.e.\ reacting faster with a
+fixed $\beta$ beat reacting slower with a supposedly better-tuned one on
+this stream, which is itself a reason to treat $b_t$ and $\beta$ as tightly
+coupled rather than independently optimal choices (see
+Section~\ref{sec:experiments:future}).
+
+These numbers are from one duo, one seed, and two corruptions, and are
+reported to motivate the design choice in
+Section~\ref{sec:experiments:recipe}, not as a full evaluation -- the
+comprehensive per-corruption, multi-seed comparison across
+\texttt{EVAL.CORRUPTIONS} is future work (Section~\ref{sec:experiments:future}).
+
+\subsection{Future experiments}
+\label{sec:experiments:future}
+
+\begin{enumerate}
+    \item \textbf{Kalman vs.\ EMA filtering.} The Kalman filter
+    (\texttt{filter\_kind=kalman}) derives its gain from an explicit
+    process/observation noise model ($q$, $r$) rather than a fixed EMA
+    $\alpha$; in steady state it reduces to an EMA with a constant gain, but
+    its transient behavior (how it responds right after a corruption
+    boundary, before enough observations have accumulated) differs. Worth
+    comparing directly against EMA under live adaptation, where the
+    transient right after each corruption switch -- exactly when BN/LN
+    statistics are also most in flux -- is arguably the most important part
+    of the stream for the gate to get right.
+    \item \textbf{Re-sweep $b_t$ under live adaptation.} The original
+    proxy-batch-size sweep (\texttt{sweep\_proxies.py}) was run frozen. Given
+    the elastic\_transform/s5 result above, where a small, fast-reacting
+    $b_t$ outperformed a larger, fit-$\beta$ one, the reactivity/noise
+    trade-off should be re-characterized specifically in the adapting
+    regime, where the ``ground truth'' the gate is chasing (each model's
+    instantaneous reliability) is itself moving as the models adapt --
+    unlike the frozen setting, where it is static within a corruption.
+    \item \textbf{Cross-duo confirmation.} All results so far are on ViT-B/16
+    + ResNet-50. Prior sweeps found that the best proxy/calibration
+    combination does \emph{not} transfer across duos (e.g.\ opposite bias
+    directions for the same proxies between ResNet+ViT and
+    ResNet+EfficientNet); the nuclear\_norm+identity+EMA recipe should be
+    re-validated, not assumed, on the other five configured duos
+    (ResNet-50+EfficientNet-B0, ConvNeXt+EfficientNet-B4, ConvNeXt+DeiT,
+    ConvNeXt+Swin, ResNet-50+DeiT) before treating it as a general default.
+    \item \textbf{Joint $\beta$/$b_t$ tuning under adaptation.} Rather than
+    fixing $\beta=4.0$ and separately choosing $b_t$, grid-search both
+    jointly (\texttt{fit\_beta} extended to sweep $b_t$ too) against
+    held-out dev-corruption NLL computed \emph{with adaptation running}, not
+    on frozen dev logits as \texttt{fit\_beta} currently does.
+    \item \textbf{Headroom under adaptation.} Compare the current recipe
+    against the two available upper bounds --
+    \texttt{proxy\_kind=oracle} (best achievable through the sigmoid gate
+    form) and \texttt{calibration\_mode=optimal\_w\_oracle}
+    (best achievable $w_l$ with no functional-form constraint at all) -- now
+    live-adapting, to quantify how much of the achievable gain the
+    label-free recipe is actually capturing once adaptation feedback is in
+    the loop, rather than relying on the frozen-setting headroom estimates.
+    \item \textbf{Adaptation mode sensitivity.} Compare \texttt{both\_duo}
+    (both models adapt on the joint calibrated signal) against
+    \texttt{both\_indep} (each adapts independently, as used in
+    Section~\ref{sec:experiments:results}) under the same recipe: adapting
+    on the gate's own output couples the two models' training signals in a
+    way independent adaptation does not, and it is not yet established
+    which mode the current recipe is best tuned for.
+    \item \textbf{Held-out generalization check.} Re-run the recipe under the
+    \texttt{\_heldout} config variants (evaluating on the corruptions
+    normally reserved for calibrator/dev fitting) to confirm the choice of
+    nuclear\_norm+identity+EMA was not implicitly overfit to
+    \texttt{EVAL.CORRUPTIONS} during exploration.
+    \item \textbf{Data-quality fix before further EfficientNet runs.} An
+    audit of the duo configs found every EfficientNet-B0/B4 duo config sets
+    that side's TENT norm type to \texttt{LN}; torchvision's EfficientNet is
+    pure \texttt{BatchNorm2d}, so this may mean \texttt{collect\_params} has
+    been silently adapting zero parameters for EfficientNet in those runs.
+    This should be corrected and those duos re-run before drawing
+    cross-duo conclusions involving EfficientNet.
+\end{enumerate}

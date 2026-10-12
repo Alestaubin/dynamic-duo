@@ -1,11 +1,9 @@
-import math
-from src.calibrators.joint_proxy_anchor_coca import JointProxyAnchorCoca
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from src.tta.tent import configure_model, copy_model_and_optimizer, load_model_and_optimizer, setup_optimizer, softmax_entropy, collect_params, configure_model_frozen
+from src.tta.tent import softmax_entropy
+from src.tta.methods import TTAMethod, build_tta_method, resolve_tta_spec
 from src.utils.data import load_imagenetC
-from src.utils.metrics import get_metrics_dict, get_intersection_metrics
+from src.utils.metrics import get_metrics_dict
 from src.utils.model import _preprocess_batch
 from src.utils.logit_transforms import logit_pnorm, normalize
 import logging
@@ -33,14 +31,16 @@ _MODE_SPEC = {
     "no_adapt":     (False, False, None),
 }
 
-_CALIB_MODES = {"fixed_ts", "coca", "duo_entropy", "oracle_ts", "batch_oracle_ts", "sample_oracle_ts", "relative_entropy", "coca_entropy", "lambda_entropy", "soft_anchor", "proxy_anchor_coca"}
+_CALIB_MODES = {"fixed_ts", "oracle_ts", "proxy_weighted", "coca", "optimal_w_oracle"}
 
 class DynamicDuo(nn.Module):
     """Asymmetric Duo Test-Time Adaptation.
 
-    Wraps a large model and a small model (each already configured for TENT:
-    BN affine params require grad, batch stats forced) and drives adaptation
-    according to the selected mode.
+    Wraps a large model and a small model (each already configured by its
+    TTAMethod -- see src/tta/methods/ -- via setup_duo) and drives adaptation
+    according to the selected mode. WHICH models adapt and on WHICH logits is
+    this class's `mode`; HOW they adapt (trainable params, optimizer, loss,
+    update, reset) is entirely the TTAMethod's (`tta`).
 
     Calibrators
     -----------
@@ -50,29 +50,34 @@ class DynamicDuo(nn.Module):
     The first logits argument is the large (anchor) model.
 
     Calibration modes (`calibration_mode`):
-      * "fixed_ts"   -> JointFixedTS pre-tuned on held-out data. Frozen here;
-                        only BN params adapt. Never reset.
-      * "coca"       -> JointCoca: self-adapting per batch (owns its optimizer).
-      * "duo_entropy"-> JointDuoEntropy: like coca but minimises ensemble
-                        entropy with two temperatures.
+      * "fixed_ts"       -> JointFixedTS pre-tuned on held-out data. Frozen
+                            here; only BN/LN params adapt. Never reset.
       * "oracle_ts"      -> JointFixedTS fitted per-corruption on test data
-                           (uses test labels — cheating). evaluate_dynamic_duo
-                           handles the tuning loop.
-      * "batch_oracle_ts" -> JointBatchNLLOracle: two shared scalars per batch,
-                            minimises NLL against batch labels (cheating).
-      * "sample_oracle_ts"-> JointSampleNLLOracle: one (T_l, T_s) pair per
-                            sample per batch — the tightest per-instance oracle.
-                            Both oracle variants use set_labels() injected by
-                            DynamicDuo.forward().
+                           (uses test labels — cheating, an upper-bound
+                           reference). evaluate_dynamic_duo handles the
+                           tuning loop.
+      * "proxy_weighted" -> JointProxyWeighted: filtered-proxy soft gate +
+                            combination (paper Sections 2-5). Uses
+                            set_labels() injected by DynamicDuo.forward()
+                            for diagnostics only (never for adaptation).
+      * "coca"           -> JointCoca: self-adapting per-batch temperature-
+                            scaling baseline (COCA TS, Yi et al. 2025) —
+                            fits a single tau aligning the small model to the
+                            large one each batch; owns its own optimizer.
+      * "optimal_w_oracle" -> JointOptimalWOracle: cheating oracle ceiling —
+                            solves for the NLL-minimizing w_l directly per
+                            batch (no sigmoid gate, no beta). Uses
+                            set_labels() injected by DynamicDuo.forward()
+                            the same way "proxy_weighted" does, for
+                            diagnostics only (never for adaptation).
     """
     def __init__(
         self,
         large: nn.Module,
         large_preprocess,
-        large_optimizer: optim.Optimizer | None,
         small: nn.Module,
         small_preprocess,
-        small_optimizer: optim.Optimizer | None,
+        tta: TTAMethod,
         joint_calibrator: nn.Module,
         mode: str = "both_duo",
         steps: int = 1,
@@ -88,8 +93,7 @@ class DynamicDuo(nn.Module):
         self.small = small
         self.small_preprocess = small_preprocess
         self.joint_calibrator = joint_calibrator
-        self.large_optimizer = large_optimizer
-        self.small_optimizer = small_optimizer
+        self.tta = tta
         self.mode = mode
         self.steps = steps
         self.calibration_mode = calibration_mode
@@ -99,22 +103,18 @@ class DynamicDuo(nn.Module):
         logger.info(
             f"Initialized DynamicDuo | mode={mode} steps={steps} "
             f"adapt_large={self.adapt_large} adapt_small={self.adapt_small} "
-            f"calibration_mode={calibration_mode}"
+            f"calibration_mode={calibration_mode} tta_method={tta.name}"
         )
         self._reset_diagnostics()
 
         device = next(self.large.parameters()).device
         self.joint_calibrator.to(device)
 
-        if self.adapt_large:
-            assert large_optimizer is not None, f"{mode} needs a large optimizer"
-            self.large_model_state, self.large_optimizer_state = \
-                copy_model_and_optimizer(self.large, self.large_optimizer)
-
-        if self.adapt_small:
-            assert small_optimizer is not None, f"{mode} needs a small optimizer"
-            self.small_model_state, self.small_optimizer_state = \
-                copy_model_and_optimizer(self.small, self.small_optimizer)
+        expected = {s for s, do in (("large", self.adapt_large), ("small", self.adapt_small)) if do}
+        assert tta.adapting == expected, (
+            f"{mode} needs TTA method '{tta.name}' set up for sides {sorted(expected)}, "
+            f"but it was set up for {sorted(tta.adapting)} (build it via setup_duo)"
+        )
 
         if calibration_mode == "fixed_ts":
             n_frozen = 0
@@ -125,43 +125,41 @@ class DynamicDuo(nn.Module):
                 f"Calibrator FIXED (fixed_ts) | froze {n_frozen} param tensors "
                 f"(assumed pre-tuned on held-out data)"
             )
-        elif calibration_mode in {"coca", "duo_entropy"}:
-            # Self-adapting: owns its optimization internally, fits per batch.
-            logger.info(f"Calibrator SELF-ADAPTING ({calibration_mode}) | fits its temperature(s) per batch")
         elif calibration_mode == "oracle_ts":
             # Oracle: temperatures fitted per-corruption by evaluate_dynamic_duo.
             # Left unfrozen here; evaluate_dynamic_duo freezes after each fit.
             logger.info("Calibrator ORACLE (oracle_ts) | will be fitted per-corruption on test data")
-        elif calibration_mode == "batch_oracle_ts":
-            # Per-batch oracle: uses test labels injected via set_labels() each forward.
-            logger.info("Calibrator ORACLE (batch_oracle_ts) | fits T_l, T_s per batch using test labels")
-        elif calibration_mode == "sample_oracle_ts":
-            # Per-sample oracle: one (T_l, T_s) per sample, injected via set_labels().
-            logger.info("Calibrator ORACLE (sample_oracle_ts) | fits per-sample T_l, T_s using test labels")
-        elif calibration_mode == "soft_anchor":
+        elif calibration_mode == "proxy_weighted":
             proxy_kind = getattr(joint_calibrator, "proxy_kind", "unknown")
             logger.info(
-                "Calibrator SOFT-ANCHOR (soft_anchor) | proxy=%s | "
-                "self-adapting T_l, T_s per batch via KL to proxy-weighted anchor",
+                "Calibrator PROXY-WEIGHTED (proxy_weighted) | proxy=%s | "
+                "filtered-proxy soft gate + combination (Sections 2-5)",
                 proxy_kind,
             )
-        elif calibration_mode == "proxy_anchor_coca":
-            proxy_kind = getattr(joint_calibrator, "proxy_kind", "unknown")
+        elif calibration_mode == "coca":
+            # Self-adapting: owns its optimization internally, fits per batch.
+            logger.info("Calibrator SELF-ADAPTING (coca) | fits its temperature per batch")
+        elif calibration_mode == "optimal_w_oracle":
+            # Cheating oracle: solves for w_l fresh per batch via set_labels()
+            # (injected below), same as proxy_weighted's oracle proxy_kind.
             logger.info(
-                "Calibrator PROXY-ANCHOR-COCA (proxy_anchor_coca) | proxy=%s | "
-                "COCA TS with per-batch proxy-driven anchor selection",
-                proxy_kind,
+                "Calibrator OPTIMAL-W ORACLE (optimal_w_oracle) | solves the "
+                "NLL-minimizing w_l directly per batch — upper-bound diagnostic only"
             )
 
     def forward(self, x, labels=None):
-        if self.calibration_mode in {"batch_oracle_ts", "sample_oracle_ts", "soft_anchor", "proxy_anchor_coca"} and labels is not None:
+        # Generic (not hardcoded to one calibration_mode) so any calibrator
+        # that cheats via labels — proxy_weighted's oracle proxy_kind,
+        # optimal_w_oracle — gets them, without special-casing each by name
+        # here. Never used for adaptation, diagnostics/oracle solves only.
+        if labels is not None and hasattr(self.joint_calibrator, "set_labels"):
             self.joint_calibrator.set_labels(labels)
         for _ in range(self.steps):
             outputs, z_large, z_small = forward_and_adapt(
                 x,
-                self.large, self.large_preprocess, self.large_optimizer,
-                self.small, self.small_preprocess, self.small_optimizer,
-                self.joint_calibrator,
+                self.large, self.large_preprocess,
+                self.small, self.small_preprocess,
+                self.joint_calibrator, self.tta,
                 self.mode,
                 norm_logits=self.norm_logits
             )
@@ -198,27 +196,14 @@ class DynamicDuo(nn.Module):
     def reset(self):
         """Reset the model and optimizer states to before adaptation."""
         self._reset_diagnostics()
-        if self.adapt_large:
-            logger.info("Resetting large model to pre-adaptation state")
-            load_model_and_optimizer(
-                self.large, self.large_optimizer,
-                self.large_model_state, self.large_optimizer_state
-            )
-
-        if self.adapt_small:
-            logger.info("Resetting small model to pre-adaptation state")
-            load_model_and_optimizer(
-                self.small, self.small_optimizer,
-                self.small_model_state, self.small_optimizer_state
-            )
+        self.tta.reset()
         # Calibrator: fixed_ts is frozen (nothing to reset); coca self-adapts
         # fresh each batch (reset_each_batch), so there is nothing to restore.
 
 
 @torch.enable_grad()
-def forward_and_adapt(x, large, large_preprocess, large_optimizer,
-                      small, small_preprocess, small_optimizer,
-                      joint_calibrator, mode, norm_logits=False):
+def forward_and_adapt(x, large, large_preprocess, small, small_preprocess,
+                      joint_calibrator, tta, mode, norm_logits=False):
     adapt_large, adapt_small, signal = _MODE_SPEC[mode]
     device = next(large.parameters()).device
     x_large = _preprocess_batch(x, large_preprocess, device)
@@ -239,31 +224,19 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
         # detached logits (separate optimizer/loss), returns aggregated logits
         # that are differentiable w.r.t. the model logits.
         z_bar = joint_calibrator.calibrate_with_grad(logits_l=zl, logits_s=zs)
-        loss = softmax_entropy(z_bar).mean(0)
-        logger.debug(f"duo loss={loss.item():.4f}")
-
-        loss.backward()
-        for opt, do in ((large_optimizer, adapt_large),
-                        (small_optimizer, adapt_small)):
-            if do and opt is not None:
-                opt.step()
-        for opt, do in ((large_optimizer, adapt_large),
-                        (small_optimizer, adapt_small)):
-            if do and opt is not None:
-                opt.zero_grad(set_to_none=True)
+        loss = tta.loss(z_bar, "duo")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"duo loss={loss.item():.4f}")
+        tta.update(loss, [s for s, do in (("large", adapt_large), ("small", adapt_small)) if do])
         # No calibrator grad to clear: fixed_ts is frozen, coca manages its own.
 
     elif signal == "indep":  # indep
-        if adapt_large:
-            large_loss = softmax_entropy(z_large).mean(0)
-            logger.debug(f"large indep loss={large_loss.item():.4f}")
-            large_loss.backward()
-            large_optimizer.step(); large_optimizer.zero_grad()
-        if adapt_small:
-            small_loss = softmax_entropy(z_small).mean(0)
-            logger.debug(f"small indep loss={small_loss.item():.4f}")
-            small_loss.backward()
-            small_optimizer.step(); small_optimizer.zero_grad()
+        for side, do, z in (("large", adapt_large, z_large), ("small", adapt_small, z_small)):
+            if do:
+                loss = tta.loss(z, side)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"{side} indep loss={loss.item():.4f}")
+                tta.update(loss, [side])
     elif signal is None:
         pass  # no adaptation, just forward
     else:
@@ -274,52 +247,26 @@ def forward_and_adapt(x, large, large_preprocess, large_optimizer,
         # the tau already fit on this batch by calibrate_with_grad (same logits).
         return joint_calibrator.calibrate(logits_l=z_large, logits_s=z_small), z_large, z_small
 
-def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, calibration_mode, mode, cfg, steps, norm_logits=False):
+def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator, calibration_mode, mode, cfg, steps,
+              norm_logits=False, tta_method=None, tta_kwargs=None):
     """
-    Configure a DynamicDuo for TENT adaptation.
+    Configure a DynamicDuo for test-time adaptation.
+
+    tta_method/tta_kwargs pick the TTA method (src/tta/methods/); see
+    resolve_tta_spec for how they combine with the duo YAML's `TTA:` block
+    and the "tent" default.
     """
     assert mode in _MODES, f"Invalid mode {mode}. Must be one of {_MODES}."
     adapt_large, adapt_small, signal = _MODE_SPEC[mode]
-    logger.info(f"Setting up DynamicDuo | mode={mode} steps={steps} adapt_large={adapt_large} adapt_small={adapt_small}")
+    tta_name, tta_kw = resolve_tta_spec(cfg, tta_method, tta_kwargs)
+    logger.info(f"Setting up DynamicDuo | mode={mode} steps={steps} adapt_large={adapt_large} "
+                f"adapt_small={adapt_small} tta_method={tta_name} tta_kwargs={tta_kw}")
 
-    large_optimizer, small_optimizer = None, None
-
-    if adapt_large:
-        logger.info(f"Configuring large model with norm={cfg['LARGE']['NORM']}")
-        large_model = configure_model(large, cfg["LARGE"]["NORM"])
-        params, param_names = collect_params(large_model, cfg["LARGE"]["NORM"])
-
-        if not params:
-            raise ValueError("No parameters found for adaptation. Check if model has Norm layers.")
-
-        large_optimizer = setup_optimizer(params, cfg["LARGE"]["OPTIM"])
-
-        logger.info(f"model for adaptation: %s", large_model)
-        logger.info(f"params for adaptation: %s", param_names)
-        logger.info(f"optimizer for adaptation: %s", large_optimizer)
-    else: 
-        logger.info(f"Configuring large model (frozen, batch stats) with norm={cfg['LARGE']['NORM']}")
-        configure_model_frozen(large, cfg["LARGE"]["NORM"])
-
-    if adapt_small:
-        logger.info(f"Configuring small model with norm={cfg['SMALL']['NORM']}")
-        small_model = configure_model(small, cfg["SMALL"]["NORM"])
-        params, param_names = collect_params(small_model, cfg["SMALL"]["NORM"])
-
-        if not params:
-            raise ValueError("No parameters found for adaptation. Check if model has Norm layers.")
-
-        small_optimizer = setup_optimizer(params, cfg["SMALL"]["OPTIM"])
-        logger.info(f"model for adaptation: %s", small_model)
-        logger.info(f"params for adaptation: %s", param_names)
-        logger.info(f"optimizer for adaptation: %s", small_optimizer)
-    else: 
-        logger.info(f"Configuring small model (frozen, batch stats) with norm={cfg['SMALL']['NORM']}")
-        configure_model_frozen(small, cfg["SMALL"]["NORM"])
-
+    tta = build_tta_method(tta_name, **tta_kw)
+    tta.setup(large, small, cfg, adapt_large, adapt_small)
 
     # Register prototype feature hooks for proxy-based calibrators.
-    if (calibration_mode in {"soft_anchor", "proxy_anchor_coca"}
+    if (calibration_mode == "proxy_weighted"
             and getattr(joint_calibrator, "proxy_kind", None) == "prototype"):
         joint_calibrator.register_hooks(large, small)
         logger.info("setup_duo: registered prototype feature hooks on large and small models")
@@ -327,10 +274,9 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
     dynamic_duo = DynamicDuo(
         large=large,
         large_preprocess=large_preprocess,
-        large_optimizer=large_optimizer,
         small=small,
         small_preprocess=small_preprocess,
-        small_optimizer=small_optimizer,
+        tta=tta,
         joint_calibrator=joint_calibrator,
         calibration_mode=calibration_mode,
         mode=mode,
@@ -339,19 +285,29 @@ def setup_duo(large, large_preprocess, small, small_preprocess, joint_calibrator
     )
     return dynamic_duo
 
-def run_duo(duo, data_loader, wandb_run=None, wandb_prefix=""):
+def run_duo(duo, data_loader, wandb_run=None, wandb_prefix="", on_batch=None):
     """
     Run a forward pass through the DynamicDuo on the given data loader.
     Returns a dict of {model_name: probs} and labels.
+
+    on_batch(batch_idx, wandb_prefix, duo, outputs, z_large, z_small, labels),
+    if given, is called right after each batch's forward+adapt — an
+    extension point for callers that need per-batch access (e.g.
+    compare_calibrators.py's --verbose, which compares the current
+    calibrator against a fixed_ts reference batch by batch) without
+    duplicating this loop.
     """
     all_duo, all_large, all_small = [], [], []
     all_labels = []
-    for imgs, labels in tqdm(data_loader, desc="run"):
+    for batch_idx, (imgs, labels) in enumerate(tqdm(data_loader, desc="run")):
         outputs, z_large, z_small = duo(imgs, labels=labels)
         all_duo.append(outputs.detach().cpu())
         all_large.append(z_large.detach().cpu())
         all_small.append(z_small.detach().cpu())
         all_labels.append(labels.cpu())
+
+        if on_batch is not None:
+            on_batch(batch_idx, wandb_prefix, duo, outputs, z_large, z_small, labels)
 
         if wandb_run is not None:
             log_dict = {}
@@ -391,51 +347,119 @@ def collect_logits(large, large_preprocess, small, small_preprocess, data_loader
     return torch.cat(all_z_l), torch.cat(all_z_s), torch.cat(all_labels)
 
 
-def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None, use_wandb=False):
+def build_wandb_run(duo, cfg, wandb_project="dynamic-duos", group=None, run_name=None):
+    """Creates (but does not own/finish) a wandb run configured exactly the
+    way evaluate_dynamic_duo's own internal wandb.init call is -- pulled out
+    so a caller that wants to log additional artifacts (e.g. diagnostics
+    plots, only available after evaluate_dynamic_duo returns) into the SAME
+    run can create it first, pass it as evaluate_dynamic_duo's wandb_run=
+    argument (which then logs into it without finishing it), and finish it
+    itself once its own post-hoc logging is done. See run_dynamic_duo.py.
+    """
     adapt_large, adapt_small, signal = _MODE_SPEC[duo.mode]
     calibration_name = duo.calibration_mode if duo.calibration_mode != "fixed_ts" else "fixed_ts Tl=" + str(duo.joint_calibrator.Tl.item()) + ", Ts=" + str(duo.joint_calibrator.Ts.item())
-    run_name = (
-        f"{duo.mode} | {calibration_name}{' normalized' if duo.norm_logits else ' '}{'proxy_kind: ' + duo.joint_calibrator.proxy_kind if isinstance(duo.joint_calibrator, JointProxyAnchorCoca) else ''}{' calibrated_selection ' if isinstance(duo.joint_calibrator, JointProxyAnchorCoca) and duo.joint_calibrator.calibrated_selection else ' '}| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
+    proxy_kind = getattr(duo.joint_calibrator, "proxy_kind", None)
+    # adaptation_batch_size is simply cfg["BS"] -- however many samples the
+    # DataLoader hands to one calibrate()/calibrate_with_grad() call.
+    # proxy_batch_size only exists on calibrators with their own proxy-bucket
+    # buffering (JointProxyWeighted, JointOptimalWOracle) -- None elsewhere
+    # (fixed_ts/oracle_ts/coca have no such concept). Surfaced in BOTH the
+    # run name (visible in the Runs list with no clicking) and the run
+    # config (a filterable/addable column across many runs) since "easy to
+    # see" means different things depending on whether you're scanning a
+    # list or comparing a table.
+    adaptation_batch_size = cfg["BS"]
+    proxy_batch_size = getattr(duo.joint_calibrator, "proxy_batch_size", None)
+    run_name = run_name or (
+        f"{duo.mode} | {calibration_name}{' normalized' if duo.norm_logits else ' '}"
+        f"{' proxy_kind: ' + proxy_kind if proxy_kind else ' '}"
+        f"{f' | pbs={proxy_batch_size} abs={adaptation_batch_size}' if proxy_batch_size is not None else ''}"
+        f"| {cfg['LARGE']['NAME']}+{cfg['SMALL']['NAME']} | steps={duo.steps}"
     )
-    if use_wandb:
-        wandb_run = wandb.init(
-            project=wandb_project,
-            name=run_name,
-            config={
-                "mode": duo.mode,
-                "calibration_mode": duo.calibration_mode,
-                "adapt_large": adapt_large,
-                "adapt_small": adapt_small,
-                "signal": signal,
-                "steps": duo.steps,
-                "large/name": cfg["LARGE"]["NAME"],
-                "large/norm": cfg["LARGE"]["NORM"],
-                "large/lr": cfg["LARGE"]["OPTIM"]["LR"],
-                "large/optim": cfg["LARGE"]["OPTIM"]["METHOD"],
-                "small/name": cfg["SMALL"]["NAME"],
-                "small/norm": cfg["SMALL"]["NORM"],
-                "small/lr": cfg["SMALL"]["OPTIM"]["LR"],
-                "small/optim": cfg["SMALL"]["OPTIM"]["METHOD"],
-                **({
-                    "calibrator/Tl": duo.joint_calibrator.Tl.item(),
-                    "calibrator/Ts": duo.joint_calibrator.Ts.item(),
-                } if duo.calibration_mode == "fixed_ts" else {}),
-                "eval/corruptions": cfg["EVAL"]["CORRUPTIONS"],
-                "eval/severities": cfg["EVAL"]["SEVERITIES"],
-            },
-        )
-    else:
-        wandb_run = None
+    return wandb.init(
+        project=wandb_project,
+        name=run_name,
+        group=group,
+        tags=[cfg["LARGE"]["NAME"], cfg["SMALL"]["NAME"]],
+        config={
+            "mode": duo.mode,
+            "calibration_mode": duo.calibration_mode,
+            "adapt_large": adapt_large,
+            "adapt_small": adapt_small,
+            "signal": signal,
+            "steps": duo.steps,
+            "adaptation_batch_size": adaptation_batch_size,
+            "proxy_batch_size": proxy_batch_size,
+            "large/name": cfg["LARGE"]["NAME"],
+            "small/name": cfg["SMALL"]["NAME"],
+            # tta/method, large|small/{norm,lr,optim}, ... -- whatever the TTA
+            # method itself says describes its setup (see TTAMethod.describe).
+            **duo.tta.describe(),
+            **({
+                "calibrator/Tl": duo.joint_calibrator.Tl.item(),
+                "calibrator/Ts": duo.joint_calibrator.Ts.item(),
+            } if duo.calibration_mode == "fixed_ts" else {}),
+            "eval/corruptions": cfg["EVAL"]["CORRUPTIONS"],
+            "eval/severities": cfg["EVAL"]["SEVERITIES"],
+        },
+    )
+
+
+def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=None, seed=None,
+                          use_wandb=False, group=None, run_name=None, wandb_run=None,
+                          on_corruption_start=None, on_batch=None, on_corruption_end=None):
+    """Runs duo over cfg['EVAL']'s corruptions/severities; returns results_rows
+    (one dict per corruption/severity, plus a final "average" row).
+
+    group is passed straight to wandb.init(group=...) so multiple calls (e.g.
+    from a driver script comparing several calibrators) can be grouped
+    together in the W&B UI. run_name overrides the auto-generated wandb run
+    name — useful for the same reason (a short, consistent label per config
+    rather than the verbose default).
+
+    wandb_run, if given, is used INSTEAD of creating a new run here (group/
+    run_name/wandb_project/use_wandb are then ignored for init purposes,
+    though use_wandb still gates whether any logging happens at all) — and
+    is never .finish()ed by this function, only by whoever created it. This
+    lets a caller wandb.init() its own run (e.g. with extra config fields, or
+    to attach additional media/tables after this function returns) while
+    still getting evaluate_dynamic_duo's own per-batch/per-corruption logging
+    into that SAME run instead of a second, separate one.
+
+    on_corruption_start(corruption_type, severity), if given, is called once
+    per stream right before duo.reset() — an extension point for callers
+    that need to know corruption boundaries without re-implementing this
+    loop (e.g. a logits cache keyed per corruption/severity).
+
+    on_batch, if given, is passed straight through to run_duo (see its
+    docstring) — an extension point for per-batch diagnostics (e.g.
+    compare_calibrators.py's --verbose).
+
+    on_corruption_end(corruption_type, severity, metrics_by_model), if given,
+    is called once per stream right after this corruption's metrics are
+    computed (metrics_by_model is the same dict this function's own
+    "duo=... large=... small=..." console line prints from) — an extension
+    point for callers that want to fold in their own per-corruption summary
+    (e.g. compare_calibrators.py comparing against a fixed_ts reference)
+    without recomputing accuracy themselves.
+    """
+    owns_wandb_run = False
+    if wandb_run is not None:
+        use_wandb = True  # a passed-in run always means "log into it"
+    elif use_wandb:
+        wandb_run = build_wandb_run(duo, cfg, wandb_project, group, run_name)
+        owns_wandb_run = True
 
     results_rows = []
     for severity in cfg["EVAL"]["SEVERITIES"]:
         for corruption_type in cfg["EVAL"]["CORRUPTIONS"]:
             logger.info(f"Evaluating corruption {corruption_type} severity {severity}")
-            try:
-                duo.reset()
-                logger.info("resetting model")
-            except:
-                logger.warning("not resetting model")
+            if on_corruption_start is not None:
+                on_corruption_start(corruption_type, severity)
+            # No try/except: a TTA method whose reset() fails must stop the run,
+            # not silently leak one corruption's adapted state into the next.
+            duo.reset()
+            logger.info("resetting model")
 
             prefix = f"{corruption_type}/s{severity}/"
             device = next(duo.parameters()).device
@@ -452,6 +476,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                     batch_size=cfg["BS"], num_workers=cfg["WORKERS"],
                     corruption=corruption_type, severity=severity, device=device,
                     tent_mode=True, norm_type=cfg["LARGE"]["NORM"],
+                    seed=seed, num_samples=num_samples,
                 )
                 z_s, labels_s = get_model_logits(
                     model_name=cfg["SMALL"]["NAME"], val_dir=cfg["VAL_DIR"],
@@ -459,6 +484,7 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                     batch_size=cfg["BS"], num_workers=cfg["WORKERS"],
                     corruption=corruption_type, severity=severity, device=device,
                     tent_mode=True, norm_type=cfg["SMALL"]["NORM"],
+                    seed=seed, num_samples=num_samples,
                 )
                 assert torch.equal(labels_l, labels_s), "Logit collection mismatch: large and small labels differ"
                 cal = duo.joint_calibrator
@@ -471,25 +497,32 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                     f"Oracle TS fitted | Tl={cal.Tl.item():.4f}  Ts={cal.Ts.item():.4f}"
                 )
 
-            if hasattr(duo.joint_calibrator, "set_corruption"):
-                duo.joint_calibrator.set_corruption(f"{corruption_type}/s{severity}")
-
             loader = load_imagenetC(cfg["TEST_DIR"], **loader_kwargs)
-            probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix)
+            if hasattr(duo.joint_calibrator, "set_corruption"):
+                # total_samples=len(loader.dataset) lets the calibrator flush
+                # a trailing proxy-batch remainder instead of leaving it
+                # stale (see JointProxyWeighted._maybe_update_gate).
+                duo.joint_calibrator.set_corruption(
+                    f"{corruption_type}/s{severity}", total_samples=len(loader.dataset)
+                )
+
+            probs_dict, labels = run_duo(duo, loader, wandb_run=wandb_run, wandb_prefix=prefix, on_batch=on_batch)
             metrics_by_model = {name: get_metrics_dict(p, labels) for name, p in probs_dict.items()}
-            intersection_metrics = get_intersection_metrics(probs_dict, labels)
+            # Average entropy per model for this corruption: run_duo already
+            # accumulates it batch-by-batch in duo._diag (softmax_entropy),
+            # so no extra forward pass is needed to report it alongside
+            # accuracy/ece/nll.
+            entropy_by_model = {
+                name: (duo._diag[name]["ent_sum"] / duo._diag[name]["n"] if duo._diag[name]["n"] > 0 else float("nan"))
+                for name in ("large", "small", "duo")
+            }
 
-            r2_stats = {}
-            if hasattr(duo.joint_calibrator, "report_and_reset_corruption_r2"):
-                r2_stats = duo.joint_calibrator.report_and_reset_corruption_r2(
-                    f"{corruption_type}/s{severity}"
-                )
-
-            corr_stats = {}
+            # Still call report_and_reset_corruption_stats for its console
+            # print + accumulator-clearing side effect (needed every
+            # corruption regardless of what gets logged to wandb) — just
+            # don't propagate its correlation-diagnostic numbers to wandb.
             if hasattr(duo.joint_calibrator, "report_and_reset_corruption_stats"):
-                corr_stats = duo.joint_calibrator.report_and_reset_corruption_stats(
-                    f"{corruption_type}/s{severity}"
-                )
+                duo.joint_calibrator.report_and_reset_corruption_stats(f"{corruption_type}/s{severity}")
 
             duo_acc = metrics_by_model["duo"]["accuracy"]
             large_acc = metrics_by_model["large"]["accuracy"]
@@ -497,33 +530,29 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
             print(f"{corruption_type}/s{severity}: "
                   f"duo={duo_acc:.4f}  large={large_acc:.4f}  small={small_acc:.4f}")
 
+            if on_corruption_end is not None:
+                on_corruption_end(corruption_type, severity, metrics_by_model)
+
+            # Only the 4 metrics we actually plot: accuracy, ece, nll, entropy —
+            # per model (duo/large/small). Everything else get_metrics_dict/
+            # get_intersection_metrics/report_and_reset_corruption_stats can
+            # compute is still available in the console output, just not logged.
             if wandb_run is not None:
                 wandb_log = {}
                 for model_name, metrics in metrics_by_model.items():
-                    wandb_log.update({f"{prefix}{model_name}/{k}": v for k, v in metrics.items()})
-                wandb_log.update({f"{prefix}intersection/{k}": v for k, v in intersection_metrics.items()})
-                if duo.calibration_mode == "oracle_ts":
-                    wandb_log[f"{prefix}oracle/Tl"] = cal.Tl.item()
-                    wandb_log[f"{prefix}oracle/Ts"] = cal.Ts.item()
-                if r2_stats and not math.isnan(r2_stats["r2_l"]):
-                    wandb_log[f"{prefix}proxy/r2_large"] = r2_stats["r2_l"]
-                    wandb_log[f"{prefix}proxy/r2_small"] = r2_stats["r2_s"]
-                if corr_stats and corr_stats["n"] > 0:
-                    for key in ("sel_acc",
-                                "l_r2", "l_pearson_r", "l_spearman_rho",
-                                "l_pred_r2", "l_pred_pearson_r", "l_pred_spearman_rho",
-                                "s_r2", "s_pearson_r", "s_spearman_rho",
-                                "s_pred_r2", "s_pred_pearson_r", "s_pred_spearman_rho"):
-                        v = corr_stats[key]
-                        if not math.isnan(v):
-                            wandb_log[f"{prefix}proxy/{key}"] = v
+                    wandb_log[f"{prefix}{model_name}/accuracy"] = metrics["accuracy"]
+                    wandb_log[f"{prefix}{model_name}/ece"] = metrics["ece"]
+                    wandb_log[f"{prefix}{model_name}/nll"] = metrics["nll"]
+                    wandb_log[f"{prefix}{model_name}/entropy"] = entropy_by_model[model_name]
                 wandb_run.log(wandb_log)
 
             logger.info(f"Results for {corruption_type} severity {severity}: {metrics_by_model['duo']}")
             row = {"mode": duo.mode, "corruption": corruption_type, "severity": severity}
             for model_name, metrics in metrics_by_model.items():
-                row.update({f"{model_name}/{k}": v for k, v in metrics.items()})
-            row.update({f"intersection/{k}": v for k, v in intersection_metrics.items()})
+                row[f"{model_name}/accuracy"] = metrics["accuracy"]
+                row[f"{model_name}/ece"] = metrics["ece"]
+                row[f"{model_name}/nll"] = metrics["nll"]
+                row[f"{model_name}/entropy"] = entropy_by_model[model_name]
             results_rows.append(row)
 
     if results_rows:
@@ -543,7 +572,10 @@ def evaluate_dynamic_duo(duo, cfg, wandb_project="dynamic-duos", num_samples=Non
                 table.add_data(*[row[c] for c in cols])
             table.add_data(*[avg_row[c] for c in cols])
             wandb_run.log({"summary/results": table})
+        results_rows.append(avg_row)
 
-    if wandb_run is not None:
+    if owns_wandb_run:
         wandb_run.finish()
+
+    return results_rows
 

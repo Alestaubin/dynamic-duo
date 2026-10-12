@@ -1,0 +1,99 @@
+# Pinned upstream repositories. The clones themselves are git-ignored; this manifest is the
+# source of truth. Re-create them with:  python third_party/fetch.py
+#
+# Rule for this repo: TTA methods and benchmark code are implemented from these checkouts,
+# never from memory. When porting code into src/, keep the upstream license header and cite
+# the file + commit in the module docstring.
+#
+# sparse: only these paths are checked out (the repo is large and the rest is unused).
+
+repos:
+  CCC:
+    url: https://github.com/oripress/CCC
+    commit: c47aff6afd1c26acc25e71166bb29542d852b1d3
+    license: MIT
+    purpose: >
+      RDumb paper repo and the CCC benchmark generator. generate.py builds the streams locally
+      from ImageNet *val* (the hosted endpoint is gone); models/rdumb.py is the RDumb reference
+      (ETA reset every 1000 steps). Source of the CCC speeds (1000/2000/5000), seeds (43/44/45)
+      and per-difficulty corruption lists.
+    used_by: [src/utils/datasets/ccc.py, scripts/ccc_generate.py, src/tta/methods/rdumb.py]
+
+  test-time-adaptation:
+    url: https://github.com/mariodoebler/test-time-adaptation
+    commit: 8b2ed63255d906b6b0afaefc6ae630b9ec4bdaa1
+    license: MIT
+    purpose: >
+      Benchmark with reference implementations of Tent, ETA/EATA, SAR, CoTTA, RMT, ROID and
+      RDumb (periodic reset), plus CCC / ImageNet-C / ImageNet-R/A/V2 configs and
+      sort_by_dirichlet (label-correlated streams for the stress test).
+    used_by: [src/tta/methods/, src/tta/single.py, scripts/tab_stress.py]
+
+  cotta:
+    url: https://github.com/qinenergy/cotta
+    commit: c212a204b32be4005092e4323105a24a29ad2952
+    license: MIT
+    purpose: >
+      Official CoTTA. imagenet/cfgs/10orders and cifar/cfgs/10orders hold the 10 corruption
+      orders used for the continual protocol (copied to cfgs/corruption_orders.yaml).
+    used_by: [cfgs/corruption_orders.yaml, src/tta/methods/cotta.py]
+
+  tent:
+    url: https://github.com/DequanWang/tent
+    commit: e9e926a668d85244c66a6d5c006efbd2b82e83e8
+    license: MIT
+    purpose: Official Tent (reference for src/tta/tent.py).
+    used_by: [src/tta/tent.py]
+
+  EATA:
+    url: https://github.com/mr-eggplant/EATA
+    commit: f739b3668cc7617e9b9f1979c1a358497a3472c3
+    license: MIT
+    purpose: Official EATA / ETA (ETA = EATA without the Fisher regularizer).
+    used_by: [src/tta/methods/eata.py]
+
+  SAR:
+    url: https://github.com/mr-eggplant/SAR
+    commit: 20f6e24b17525f34503510afccedc0629b67b7c4
+    license: BSD-3-Clause
+    purpose: Official SAR (sharpness-aware entropy minimization + model recovery, which we disable).
+    used_by: [src/tta/methods/sar.py]
+
+  imagenet-r:
+    url: https://github.com/hendrycks/imagenet-r
+    commit: 3131cacee97c407bd2ecea15846a67817a64f924
+    license: MIT
+    purpose: Official ImageNet-R. eval.py holds the 200 wnids and the 1000->200 logit mask.
+    used_by: [src/utils/datasets/class_lists/imagenet_r_wnids.txt]
+
+  natural-adv-examples:
+    url: https://github.com/hendrycks/natural-adv-examples
+    commit: 07770705658c3a1c8acce31fd9dbd68f06e297c3
+    license: MIT
+    purpose: Official ImageNet-A. eval.py holds thousand_k_to_200 (the 1000->200 logit mask).
+    used_by: [src/utils/datasets/class_lists/imagenet_a_wnids.txt]
+
+  ImageNet-Sketch:
+    url: https://github.com/HaohanWang/ImageNet-Sketch
+    commit: 4d4280057a95c8d00b6ae6c76256d1ed458e445e
+    license: MIT
+    purpose: Official ImageNet-Sketch (download instructions and layout).
+    used_by: [src/utils/datasets/imagenet_sketch.py]
+
+  ImageNetV2:
+    url: https://github.com/modestyachts/ImageNetV2
+    commit: 0b0c3fe89058e4c7ee2348938b3f4f706a931bf3
+    license: MIT
+    purpose: Official ImageNetV2 (matched-frequency). Folder names are ImageNet class indices 0..999.
+    sparse: [code, notebooks]
+    used_by: [src/utils/datasets/imagenet_v2.py]
+
+  robustness:
+    url: https://github.com/hendrycks/robustness
+    commit: 8190fe329f5f072a06e3a2aea02bb5dda69aed9f
+    license: Apache-2.0
+    purpose: >
+      ImageNet-C corruption code. Only needed offline for CCC generation: generate.py downloads
+      the frost textures from here, so the textures are taken from this checkout instead.
+    sparse: [ImageNet-C/create_c]
+    used_by: [scripts/ccc_generate.py]

@@ -1,0 +1,5 @@
+{
+    "name": "fixed_ts_default",
+    "calibration_mode": "fixed_ts",
+    "fixed_ts_config": "checkpoints/fixed_ts/default"
+}

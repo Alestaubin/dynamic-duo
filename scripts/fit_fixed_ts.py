@@ -15,15 +15,17 @@ import argparse
 import os
 import torch
 
+from src.utils.device import get_device
 from src.utils.data import load_config
 from src.utils.logits import get_model_logits
 from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.utils.logit_transforms import logit_pnorm, normalize
 from src.utils.metrics import get_metrics_dict
+from scripts._cli import add_duo_config_arg, add_seed_arg
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="cfgs/dynamic_duo_config.yaml")
+    add_duo_config_arg(parser)
     parser.add_argument("--out", type=str, required=True,
                         help="Folder to save the calibrator (config.json)")
     parser.add_argument("--cache_dir", type=str, default="cache/logits",
@@ -38,7 +40,7 @@ def main():
     parser.add_argument("--test", action="store_true",
                         help="After fitting, evaluate the temperatures on the EVAL "
                              "corruptions from the config and report accuracy.")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed for reproducibility")
+    add_seed_arg(parser)
     args = parser.parse_args()
 
     if args.clean_only and args.corruptions_only:
@@ -55,7 +57,7 @@ def main():
     test_dir    = cfg["TEST_DIR"]
     batch_size  = cfg["BS"]
     num_workers = cfg["WORKERS"]
-    device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device      = get_device()
 
     def get_logits(model_name, corruption=None, severity=None):
         return get_model_logits(

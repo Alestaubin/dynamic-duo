@@ -123,3 +123,10 @@ wandb==0.24.0
 wcwidth==0.6.0
 werkzeug==3.1.5
 widgetsnbextension==4.0.15
+
+# --- only needed to GENERATE CCC streams (third_party/CCC/generate.py); reading them needs nothing extra ---
+# webdataset
+# opencv-python-headless
+# numba
+# Wand          # also needs the ImageMagick system library (e.g. `module load imagemagick`)
+# (scikit-image, requests, pandas are already available)
