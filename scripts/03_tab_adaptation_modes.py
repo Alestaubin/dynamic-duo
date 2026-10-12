@@ -18,10 +18,10 @@ pooled, on the logits of independently adapted members (the "Held-out TS" of 01_
 this reuses), and stored under paths.checkpoints. --temps_checkpoint DIR uses another JointFixedTS checkpoint.
 One live run per (mode, seed) over the 15 test corruptions (severity 5); each is cached, so a repeat only replays.
 
-    sbatch slurm/job.sh scripts/02_tab_adaptation_modes.py --temps_only                  # once: fit T_L, T_S
-    sbatch --array=0-20 slurm/job.sh scripts/02_tab_adaptation_modes.py --shard auto      # one job per (mode, seed)
-    python scripts/02_tab_adaptation_modes.py --report_only                               # tables from the cache
-    python scripts/02_tab_adaptation_modes.py --modes joint indep_duo --seeds 0 --num_samples 2000   # smoke test
+    sbatch slurm/job.sh scripts/03_tab_adaptation_modes.py --temps_only                  # once: fit T_L, T_S
+    sbatch --array=0-20 slurm/job.sh scripts/03_tab_adaptation_modes.py --shard auto      # one job per (mode, seed)
+    python scripts/03_tab_adaptation_modes.py --report_only                               # tables from the cache
+    python scripts/03_tab_adaptation_modes.py --modes joint indep_duo --seeds 0 --num_samples 2000   # smoke test
 
 Writes <paths.paper>/tab_adaptation_modes__<tag>.tex (accuracy per corruption, one row per mode),
 tab_adaptation_modes_summary__<tag>.tex (members' accuracy under each mode, duo accuracy / ECE / NLL, averaged over
@@ -74,7 +74,7 @@ def main() -> int:
           .groupby("series")["accuracy"].mean().mul(100).round(2).to_string())
 
     dest = out if args.num_samples else ctx.g.path("paper")       # a capped run (smoke test) must not overwrite the paper's
-    source = "scripts/02_tab_adaptation_modes.py"
+    source = "scripts/03_tab_adaptation_modes.py"
     write_table(dest / f"tab_adaptation_modes__{tag}.tex", AM.render_corruption_table(
         df, ctx, args.tta, temps, label=f"tab:adaptation_modes:{tag}", source=source))
     write_table(dest / f"tab_adaptation_modes_summary__{tag}.tex", AM.render_summary_table(

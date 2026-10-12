@@ -14,10 +14,10 @@ best learning rate is the smallest or largest tried. Default grid: Adam lr 5e-5.
 1e-4..1e-2 with momentum 0 or 0.9, 15 trials + the reference. Each trial is stored on its own, so a killed job resumes
 and a SLURM array splits the grid:
 
-    sbatch slurm/job.sh scripts/03_tune_tta.py --model resnet50                       # whole grid in one job
-    sbatch --array=0-15 slurm/job.sh scripts/03_tune_tta.py --model vit_b_16 --shard auto   # one trial per task
-    python scripts/03_tune_tta.py --model resnet50 --report_only                      # ranking + tuned file from the stored trials
-    python scripts/03_tune_tta.py --model resnet50 --optimizers Adam --adam_lrs 1e-4 3e-4 --num_samples 2000   # smoke test
+    sbatch slurm/job.sh scripts/02_tune_tta.py --model resnet50                       # whole grid in one job
+    sbatch --array=0-15 slurm/job.sh scripts/02_tune_tta.py --model vit_b_16 --shard auto   # one trial per task
+    python scripts/02_tune_tta.py --model resnet50 --report_only                      # ranking + tuned file from the stored trials
+    python scripts/02_tune_tta.py --model resnet50 --optimizers Adam --adam_lrs 1e-4 3e-4 --num_samples 2000   # smoke test
 
 Writes <paths.out>/results/tune_tta/<model>__tent/{trials/*.json, ranking.csv} and, once every trial is in,
 <paths.tuned>/tent__<model>.yaml. A capped run (--num_samples) never writes the tuned file: short streams favour
