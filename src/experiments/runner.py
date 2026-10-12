@@ -27,6 +27,7 @@ from typing import Callable, Sequence
 import torch
 from tqdm import tqdm
 
+from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.utils.device import describe_device, get_device
 from src.experiments.cache import MemberCache
 from src.experiments.evaluate import OnlineEval
@@ -48,11 +49,13 @@ class Context:
     model_factory: Callable | None = None
 
     @classmethod
-    def create(cls, duo_name: str, g: GlobalConfig | None = None, device: str | None = None) -> "Context":
+    def create(cls, duo_name: str, g: GlobalConfig | None = None, device: str | None = None,
+               tta: str = "tent") -> "Context":
+        """`tta` selects which tuned optimizer settings (cfgs/tuned/<tta>__<model>.yaml) override the duo YAML's."""
         g = g or load_global()
         device = get_device(device)
         print(f"device: {describe_device(device)}")
-        return cls(g, load_duo(duo_name, g), device)
+        return cls(g, load_duo(duo_name, g, tta=tta), device)
 
     @property
     def batch_size(self) -> int:
@@ -95,9 +98,22 @@ def _store_segment(runner: MemberRunner, seg: Segment, spec: RunSpec, ctx: Conte
     return sum(len(y) for y in ys)
 
 
+def loop_calibrator(spec: RunSpec, device: torch.device) -> JointFixedTS | None:
+    """The static duo inside the adaptation loop of a *_duo run (None for the other modes): the same
+    JointFixedTS a replay builds for GateSpec(kind="fixed_ts") from a checkpoint with these temperatures."""
+    if spec.loop_ts is None:
+        return None
+    cal = JointFixedTS(Tl=spec.loop_ts[0], Ts=spec.loop_ts[1], verbose=False)
+    cal.device = device                    # JointFixedTS defaults to get_device(); follow the runner's instead
+    for prm in cal.parameters():
+        prm.requires_grad_(False)
+    return cal
+
+
 def _runner(spec: RunSpec, ctx: Context) -> MemberRunner:
     return MemberRunner(ctx.duo, spec.tta, spec.tta_kwargs, spec.mode, ctx.device, ctx.objective_logits,
-                        models=ctx.model_factory() if ctx.model_factory else None)
+                        models=ctx.model_factory() if ctx.model_factory else None,
+                        loop_calibrator=loop_calibrator(spec, ctx.device))
 
 
 def ensure_members(spec: RunSpec, ctx: Context, segments: list[Segment] | None = None) -> MemberCache:
@@ -306,11 +322,14 @@ if __name__ == "__main__":
             z_l, z_s = r.step(imgs, ds)
             assert z_l.shape == (32, 1000), "returned logits are always the full 1000"
         assert seen == {"masked": 200, "full": 1000}, seen
-        try:
-            MemberRunner(DUO, mode="both_duo", device="cpu", models=copy.deepcopy(base))
-            raise AssertionError("duo modes must be rejected")
-        except ValueError as e:
-            assert "calibrator" in str(e)
+        for bad, expect in ((dict(mode="both_duo"), "needs a loop_calibrator"),
+                            (dict(mode="both_indep", loop_calibrator=JointFixedTS(verbose=False)), "loop_calibrator only applies"),
+                            (dict(mode="nonsense"), "unknown mode")):
+            try:
+                MemberRunner(DUO, device="cpu", models=copy.deepcopy(base), **bad)
+                raise AssertionError(f"must be rejected: {bad}")
+            except ValueError as e:
+                assert expect in str(e), str(e)
 
         # ---- 6b. preprocessing in DataLoader workers changes nothing but speed ---------------------------------
         outs = {}
@@ -321,6 +340,40 @@ if __name__ == "__main__":
         assert len(outs[0]) == len(outs[2]) == 4
         assert all(a.equal(c) and b.equal(d) and y.equal(e) for (a, b, y), (c, d, e) in zip(outs[0], outs[2])), \
             "workers must not change the logits"
+
+        # ---- 6c. duo-entropy modes: the loss is the entropy of the static duo, backpropagated into who adapts -----
+        for mode, (a_l, a_s) in (("both_duo", (True, True)), ("large_duo", (True, False)), ("small_duo", (False, True))):
+            dspec = RunSpec("tiny", seed=3, mode=mode, loop_ts=(1.4, 0.9))
+            dcache = ensure_members(dspec, ctx, two)
+            (large, lp), (small, sp) = copy.deepcopy(base)
+            tta = build_tta_method("tent")
+            tta.setup(large, small, DUO, a_l, a_s)
+            old_cal = JointFixedTS(Tl=1.4, Ts=0.9, verbose=False)
+            for seg in two:
+                tta.reset()
+                zl, zs = [], []
+                for imgs, _ in seg.dataset.loader(32, None, 3, 0):
+                    _, a, b = forward_and_adapt(imgs, large, lp, small, sp, old_cal, tta, mode)
+                    zl.append(a.detach()); zs.append(b.detach())
+                d = dcache.read(seg.file_stem)
+                assert d["z_l"].equal(center_fp16(torch.cat(zl)).float()), f"{mode}: large logits differ from the old engine"
+                assert d["z_s"].equal(center_fp16(torch.cat(zs)).float()), f"{mode}: small logits differ from the old engine"
+            # the replayed static duo IS the in-loop calibrator, so the replay scores what the loop optimized
+            rep_d, live_d = replay(dspec, ctx, gates[:1], two), evaluate_live(dspec, ctx, gates[:1], two)
+            for a, b in zip(rep_d.rows, live_d.rows):
+                assert abs(a["accuracy"] - b["accuracy"]) <= 2 / 150, (mode, a, b)
+            # who moves: an anchored member is exactly the frozen member; an adapting one is not
+            fro = ensure_members(RunSpec("tiny", seed=3, mode="no_adapt"), ctx, two).read("s0__s5")
+            first = dcache.read("s0__s5")
+            assert (not first["z_l"].equal(fro["z_l"])) == a_l and (not first["z_s"].equal(fro["z_s"])) == a_s, \
+                f"{mode}: only the adapting side(s) may differ from the frozen logits"
+        joint = ensure_members(RunSpec("tiny", seed=3, mode="both_duo", loop_ts=(1.4, 0.9)), ctx, two).read("s1__s5")
+        indep = ensure_members(spec, ctx, two).read("s1__s5")
+        assert not joint["z_l"].equal(indep["z_l"]), "the duo loss is not the members' own loss"
+        other = ensure_members(RunSpec("tiny", seed=3, mode="both_duo", loop_ts=(2.0, 0.9)), ctx, two).read("s1__s5")
+        assert not other["z_l"].equal(joint["z_l"]), "the in-loop temperatures change what the members learn"
+        assert run_dir(RunSpec("tiny", seed=3, mode="both_duo", loop_ts=(1.4, 0.9)), ctx) != \
+            run_dir(RunSpec("tiny", seed=3, mode="both_duo", loop_ts=(2.0, 0.9)), ctx), "loop_ts is part of the cache key"
 
         # ---- 7. a 200-class dataset is gated on its 200 classes ---------------------------------------------
         nat = [Segment("fake200", FakeStream(150, seed=4, masked=True), True)]

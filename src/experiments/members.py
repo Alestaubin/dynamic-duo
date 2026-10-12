@@ -1,16 +1,21 @@
 """
 members.py
 ==========
-MemberRunner: the two members adapting independently, one batch at a time.
+MemberRunner: the two members adapting, one batch at a time.
 
-This is the independent-adaptation branch of src/tta/dynamic_duo.py::forward_and_adapt without the
-calibrator, the diagnostics and wandb around it: both models see the same batch (each through its own
-preprocessing), each computes its own TTA loss on its own logits and updates itself, and the logits
-returned are the PRE-update logits of that step (the TENT convention, identical to the old engine).
+This is src/tta/dynamic_duo.py::forward_and_adapt without the diagnostics and wandb around it: both models
+see the same batch (each through its own preprocessing), the adapting ones update, and the logits returned
+are the PRE-update logits of that step (the TENT convention, identical to the old engine).
 
-Only the independent modes are supported: with `*_duo` modes the calibrator sits inside the adaptation
-loop, so the gate could no longer be varied by replay. The paper reports the independent case and leaves
-the joint mode to future work.
+  *_indep modes   each adapting member minimizes its OWN loss. No calibrator is involved, so any gate can be
+                  replayed on the cached logits.
+  *_duo modes     the loss is computed on the combined logits of a STATIC calibrator (`loop_calibrator`, e.g.
+                  JointFixedTS) and backpropagated into the adapting member(s): both (joint), or one while the
+                  other is frozen and its logits enter as a constant (anchor). The calibrator is a pure function
+                  of this batch's logits, so replaying the same calibrator on the cached logits reproduces the
+                  run's predictions; its temperatures change the members' logits though, so they are part of
+                  the RunSpec (`loop_ts`). Stateful calibrators (the proxy-weighted gate) are not supported in
+                  the loop: a replay could not reproduce their state.
 
 The 200-class natural shifts (ImageNet-A/R): `objective_logits` ("masked" | "full", cfgs/global.yaml
 protocol.objective_logits_200class) decides whether the TTA loss sees the dataset's 200 logits or all 1000;
@@ -25,6 +30,7 @@ from typing import Iterator
 import torch
 
 from src.utils.device import get_device
+from src.experiments.specs import DUO_MODES
 from src.tta.methods import build_tta_method, resolve_tta_spec
 from src.utils.datasets.base import ShiftDataset
 from src.utils.model import _preprocess_batch, get_model
@@ -38,6 +44,12 @@ INDEP_MODES = {
     "small_indep": (False, True),
     "no_adapt": (False, False),
 }
+DUO_SIDES = {
+    "both_duo": (True, True),
+    "large_duo": (True, False),
+    "small_duo": (False, True),
+}
+assert tuple(DUO_SIDES) == DUO_MODES
 
 
 class PairCollate:
@@ -71,18 +83,24 @@ def load_models(duo_cfg: dict, device: torch.device):
 class MemberRunner:
     def __init__(self, duo_cfg: dict, tta: str = "tent", tta_kwargs: dict | None = None,
                  mode: str = "both_indep", device: torch.device | str | None = None,
-                 objective_logits: str = "masked", models=None):
-        if mode not in INDEP_MODES:
+                 objective_logits: str = "masked", models=None, loop_calibrator=None):
+        sides = {**INDEP_MODES, **DUO_SIDES}
+        if mode not in sides:
+            raise ValueError(f"unknown mode {mode!r}: expected one of {sorted(sides)}")
+        if mode in DUO_SIDES and loop_calibrator is None:
             raise ValueError(
-                f"mode {mode!r} is not supported here: only {sorted(INDEP_MODES)}. The *_duo modes put the "
-                f"calibrator inside the adaptation loop, so the gate could not be replayed."
+                f"mode {mode!r} adapts on the duo's entropy, which needs a loop_calibrator (a static calibrator "
+                f"such as JointFixedTS); the calibrator is inside the adaptation loop"
             )
+        if mode not in DUO_SIDES and loop_calibrator is not None:
+            raise ValueError(f"loop_calibrator only applies to {sorted(DUO_SIDES)}, not {mode!r}")
         if objective_logits not in ("masked", "full"):
             raise ValueError(f"objective_logits must be 'masked' or 'full', got {objective_logits!r}")
         self.device = get_device(device)
         self.mode = mode
         self.objective_logits = objective_logits
-        self.adapt_large, self.adapt_small = INDEP_MODES[mode]
+        self.loop_calibrator = loop_calibrator
+        self.adapt_large, self.adapt_small = sides[mode]
 
         (self.large, self.large_preprocess), (self.small, self.small_preprocess) = (
             models if models is not None else load_models(duo_cfg, self.device)
@@ -102,14 +120,23 @@ class MemberRunner:
 
     def step_tensors(self, x_l: torch.Tensor, x_s: torch.Tensor, dataset: ShiftDataset
                      ) -> tuple[torch.Tensor, torch.Tensor]:
-        """One batch of already-preprocessed inputs: forward both members, adapt each on its own logits.
+        """One batch of already-preprocessed inputs: forward both members and adapt the adapting ones, each
+        on its own logits (*_indep) or all on the loop calibrator's combination (*_duo).
         Returns the pre-update full (B, 1000) logits (z_large, z_small), detached, on the model device."""
         x_l, x_s = x_l.to(self.device, non_blocking=True), x_s.to(self.device, non_blocking=True)
         with torch.set_grad_enabled(self.adapt_large or self.adapt_small):
             z_l, z_s = self.large(x_l), self.small(x_s)
-            for side, do, z in (("large", self.adapt_large, z_l), ("small", self.adapt_small, z_s)):
-                if do:
-                    self.tta.update(self.tta.loss(dataset.objective_logits(z, self.objective_logits), side), [side])
+            if self.loop_calibrator is not None:
+                # a frozen member's logits are a constant of the duo loss: the gradient reaches only the other one
+                z_bar = self.loop_calibrator.calibrate_with_grad(
+                    logits_l=z_l if self.adapt_large else z_l.detach(),
+                    logits_s=z_s if self.adapt_small else z_s.detach())
+                sides = [s for s, do in (("large", self.adapt_large), ("small", self.adapt_small)) if do]
+                self.tta.update(self.tta.loss(dataset.objective_logits(z_bar, self.objective_logits), "duo"), sides)
+            else:
+                for side, do, z in (("large", self.adapt_large, z_l), ("small", self.adapt_small, z_s)):
+                    if do:
+                        self.tta.update(self.tta.loss(dataset.objective_logits(z, self.objective_logits), side), [side])
         return z_l.detach(), z_s.detach()
 
     def iter_batches(self, dataset: ShiftDataset, *, batch_size: int, workers: int, seed: int | None,

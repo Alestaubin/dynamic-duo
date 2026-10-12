@@ -3,7 +3,7 @@ cli.py
 ======
 The flags every script in scripts/ takes, and the setup they share.
 
-    --duo NAME          cfgs/duos/<NAME>.yaml                          (default vitb16_rn50)
+    --duo NAME          cfgs/duos/<NAME>.yaml                          (default vitb16_rn50; not for single-model scripts)
     --tta METHOD        tent | eata | ...; --tta_kwargs '{"k": v}'      (default tent)
     --seeds 0 1 2       stream-order seeds                              (default: cfgs/global.yaml)
     --num_samples N     cap per stream, for smoke tests                 (default: the whole stream)
@@ -33,7 +33,7 @@ from typing import Callable, Sequence, TypeVar
 import torch
 
 from src.experiments.runner import Context
-from src.utils.config import load_global
+from src.utils.config import GlobalConfig, load_global
 
 T = TypeVar("T")
 
@@ -45,8 +45,12 @@ def _json_object(text: str) -> dict:
     return obj
 
 
-def add_common_args(p: argparse.ArgumentParser, *, tta: bool = True, seeds: bool = True) -> argparse.ArgumentParser:
-    p.add_argument("--duo", default="vitb16_rn50", help="cfgs/duos/<name>.yaml")
+def add_common_args(p: argparse.ArgumentParser, *, tta: bool = True, seeds: bool = True,
+                    duo: bool = True) -> argparse.ArgumentParser:
+    """`duo=False` for a script that works on one model rather than a pair (the tuner): it then builds no
+    Context (use `setup_global`)."""
+    if duo:
+        p.add_argument("--duo", default="vitb16_rn50", help="cfgs/duos/<name>.yaml")
     if tta:
         p.add_argument("--tta", default="tent", help="TTA method of the adapting members")
         p.add_argument("--tta_kwargs", type=_json_object, default=None, metavar="JSON")
@@ -93,16 +97,23 @@ def pin_threads() -> None:
     torch.set_num_threads(int(n) if n else min(8, os.cpu_count() or 1))
 
 
-def setup(args: argparse.Namespace, script: str, default_seeds: Sequence[int] | None = None
-          ) -> tuple[Context, list[int], Path]:
-    """(context, seeds, output dir) for a script. Seeds: --seeds, else `default_seeds`, else protocol.seeds."""
+def setup_global(args: argparse.Namespace, script: str, default_seeds: Sequence[int] | None = None
+                 ) -> tuple[GlobalConfig, list[int], Path]:
+    """(global config, seeds, output dir). Seeds: --seeds, else `default_seeds`, else protocol.seeds."""
     pin_threads()
     g = load_global(args.global_path)
-    ctx = Context.create(args.duo, g, args.device)
     seeds = list(args.seeds) if getattr(args, "seeds", None) else list(default_seeds or g.seeds)
     out = Path(args.out) if args.out else g.path("out") / "results" / script
     out.mkdir(parents=True, exist_ok=True)
-    return ctx, seeds, out
+    return g, seeds, out
+
+
+def setup(args: argparse.Namespace, script: str, default_seeds: Sequence[int] | None = None
+          ) -> tuple[Context, list[int], Path]:
+    """(context, seeds, output dir) for a script. Seeds: --seeds, else `default_seeds`, else protocol.seeds.
+    The duo's optimizer settings are the tuned ones of the selected --tta method, where cfgs/tuned has them."""
+    g, seeds, out = setup_global(args, script, default_seeds)
+    return Context.create(args.duo, g, args.device, tta=getattr(args, "tta", "tent")), seeds, out
 
 
 if __name__ == "__main__":
@@ -131,4 +142,6 @@ if __name__ == "__main__":
     p = add_common_args(argparse.ArgumentParser())
     a = p.parse_args(["--seeds", "0", "1", "--shard", "1/3", "--tta_kwargs", '{"d_margin": 0.1}'])
     assert a.seeds == [0, 1] and a.tta == "tent" and a.tta_kwargs == {"d_margin": 0.1} and not a.report_only
+    single = add_common_args(argparse.ArgumentParser(), duo=False).parse_args([])
+    assert not hasattr(single, "duo") and single.tta == "tent" and single.seeds is None
     print("cli self-test passed")

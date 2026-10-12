@@ -126,4 +126,16 @@ if __name__ == "__main__":
     assert base != RunSpec("d").fingerprint(duo, 64, "full")
     assert base != RunSpec("d").fingerprint(duo, 32, "masked")
     assert base != RunSpec("d").fingerprint({**duo, "LARGE": {"NAME": "a", "OPTIM": {"LR": 2e-4}}}, 64, "masked")
+    # the key of an independent-mode run is pinned: changing it orphans every member-logit cache on disk
+    assert base == "e0ec2ee19e0c", f"fingerprint payload changed: every cache under cache/members is now unreachable ({base})"
+    # duo-entropy modes: the static duo's temperatures are part of the key (they change what the members learn)
+    j = RunSpec("d", mode="both_duo", loop_ts=(1.4, 0.9)).fingerprint(duo, 64, "masked")
+    assert j != base and j != RunSpec("d", mode="both_duo", loop_ts=(1.5, 0.9)).fingerprint(duo, 64, "masked")
+    assert j != RunSpec("d", mode="large_duo", loop_ts=(1.4, 0.9)).fingerprint(duo, 64, "masked")
+    for bad in (dict(mode="both_duo"), dict(mode="both_indep", loop_ts=(1.0, 1.0))):
+        try:
+            RunSpec("d", **bad)
+            raise AssertionError(f"{bad} must be rejected")
+        except ValueError:
+            pass
     print("protocols self-test passed")

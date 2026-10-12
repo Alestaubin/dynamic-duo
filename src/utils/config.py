@@ -6,7 +6,7 @@ Loads the repo-wide configuration (cfgs/global.yaml) and the per-duo model confi
     g = load_global()                     # honours $DUO_GLOBAL_CONFIG
     g.path("imagenet_c")                  # Path, resolved against the repo root
     g.test_corruptions                    # the 15 ImageNet-C test corruptions, in table-column order
-    duo = load_duo("vitb16_rn50")         # LARGE/SMALL + the legacy keys src/tta still reads
+    duo = load_duo("vitb16_rn50")         # LARGE/SMALL + the legacy keys src/tta still reads (tuned OPTIM applied)
 
 A dataset path set to `null` in global.yaml means "not imported yet": `g.path(key)` then raises
 DatasetPathNotSet naming the key to fill in, instead of failing later with a confusing IO error.
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import functools
 import os
+import warnings
 from pathlib import Path
 
 import yaml
@@ -187,10 +188,22 @@ def load_global(path: str | Path | None = None) -> GlobalConfig:
     return _load(str(_resolve(chosen)))
 
 
-def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None) -> dict:
+def tuned_file(g: GlobalConfig, model: str, tta: str) -> Path | None:
+    """cfgs/tuned/<tta>__<model>.yaml (paths.tuned), written by scripts/03_tune_tta.py; None if not tuned yet."""
+    if "tuned" not in g.raw["paths"]:
+        return None
+    p = g.path("tuned") / f"{tta}__{model}.yaml"
+    return p if p.is_file() else None
+
+
+def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None, tta: str = "tent") -> dict:
     """A duo config (LARGE/SMALL) merged with the global values under the key names the existing
     src/tta engine reads (TEST_DIR, VAL_DIR, BS, WORKERS, EVAL, CALIBRATOR). `name_or_path` is a file
-    in cfgs/duos/ (with or without .yaml) or a path to a duo YAML."""
+    in cfgs/duos/ (with or without .yaml) or a path to a duo YAML.
+
+    Each member's OPTIM is the duo YAML's (the pre-tuning default) unless cfgs/tuned/<tta>__<model>.yaml exists,
+    in which case the tuned OPTIM replaces it (`tta` = the TTA method the run will use). The tuned file must have
+    been tuned for the same NORM (otherwise the learning rate belongs to a different set of parameters)."""
     g = global_cfg or load_global()
     p = Path(name_or_path)
     if not p.suffix:
@@ -201,6 +214,17 @@ def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None) -
     for side in ("LARGE", "SMALL"):
         if side not in duo or "NAME" not in duo[side] or "NORM" not in duo[side]:
             raise ValueError(f"{p}: {side} must define NAME and NORM")
+    for side in ("LARGE", "SMALL"):
+        tuned = tuned_file(g, duo[side]["NAME"], tta)
+        if tuned is None:
+            continue
+        t = yaml.safe_load(tuned.read_text())
+        if t["NORM"] != duo[side]["NORM"]:
+            raise ValueError(f"{tuned} was tuned adapting {t['NORM']} layers, but {p} adapts {duo[side]['NORM']} "
+                             f"for {duo[side]['NAME']}: retune (scripts/03_tune_tta.py) or fix NORM")
+        if t.get("batch_size") not in (None, g.batch_size):
+            warnings.warn(f"{tuned} was tuned at batch size {t['batch_size']}, the protocol uses {g.batch_size}")
+        duo[side]["OPTIM"] = dict(t["OPTIM"])
     sev = [g.severity]
     duo.update(
         TEST_DIR=str(g.path_or_none("imagenet_c") or ""),
@@ -244,6 +268,25 @@ if __name__ == "__main__":
         raise AssertionError("all-missing candidates must raise")
     except FileNotFoundError as e:
         assert "/nonexistent/b" in str(e)
+
+    # tuned optimizer settings replace the duo YAML's for the matching model and TTA method only
+    base_duo = load_duo("vitb16_rn50", tta="tent")
+    with tempfile.TemporaryDirectory() as tmp:
+        g_tuned = GlobalConfig({**g.raw, "paths": {**g.raw["paths"], "tuned": tmp}}, g.source)
+        (Path(tmp) / "tent__resnet50.yaml").write_text(yaml.safe_dump(
+            {"model": "resnet50", "tta": "tent", "NORM": "BN", "batch_size": 64,
+             "OPTIM": {"METHOD": "SGD", "STEPS": 1, "LR": 0.0007, "MOMENTUM": 0.9, "DAMPENING": 0.0, "WD": 0.0, "NESTEROV": False}}))
+        d = load_duo("vitb16_rn50", g_tuned, tta="tent")
+        assert d["SMALL"]["OPTIM"]["LR"] == 0.0007 and d["SMALL"]["OPTIM"]["METHOD"] == "SGD", "tuned file applies"
+        assert d["LARGE"]["OPTIM"] == base_duo["LARGE"]["OPTIM"], "a model with no tuned file keeps the YAML's"
+        assert load_duo("vitb16_rn50", g_tuned, tta="eata")["SMALL"]["OPTIM"] == base_duo["SMALL"]["OPTIM"], "per TTA method"
+        assert load_duo("vitb16_rn50", tta="tent")["SMALL"]["OPTIM"] == base_duo["SMALL"]["OPTIM"], "paths.tuned of the real config"
+        (Path(tmp) / "tent__resnet50.yaml").write_text(yaml.safe_dump({"NORM": "LN", "OPTIM": {"METHOD": "Adam"}}))
+        try:
+            load_duo("vitb16_rn50", g_tuned)
+            raise AssertionError("a tuned file for another NORM must be rejected")
+        except ValueError as e:
+            assert "tuned adapting LN" in str(e)
 
     for name in list_duos():
         duo = load_duo(name)

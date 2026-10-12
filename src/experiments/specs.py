@@ -23,17 +23,29 @@ from typing import Any
 # segments the run visits, so runs that differ only in the segment list share one cache directory.
 INDEPENDENT_PROTOCOLS = ("episodic", "tuning", "natural")
 
+# Modes whose adaptation loss is the entropy of a STATIC duo (both members' logits combined by a fixed
+# calibrator) instead of each member's own entropy. The calibrator sits inside the adaptation loop, so its
+# temperatures change the members' logits and are part of the spec (`loop_ts`).
+DUO_MODES = ("both_duo", "large_duo", "small_duo")
+
 
 @dataclass(frozen=True)
 class RunSpec:
     duo: str                                        # cfgs/duos/<duo>.yaml
     tta: str = "tent"
     tta_kwargs: dict = field(default_factory=dict)
-    mode: str = "both_indep"                        # which members adapt (independently); see MemberRunner
+    mode: str = "both_indep"                        # which members adapt, on which logits; see MemberRunner
     protocol: str = "episodic"                      # episodic | tuning | natural | continual | ccc
     protocol_args: dict = field(default_factory=dict)   # episodic/tuning: {corruptions, clean}; natural: {dataset}; continual: {order}; ccc: {difficulty, speed, ccc_seed}
     seed: int = 0                                   # stream order (subset + shuffle) seed
     num_samples: int | None = None                  # cap per segment; None = the whole stream
+    loop_ts: tuple[float, float] | None = None      # (T_L, T_S) of the static duo whose entropy drives a DUO_MODES run
+
+    def __post_init__(self):
+        if self.mode in DUO_MODES and self.loop_ts is None:
+            raise ValueError(f"mode {self.mode!r} adapts on the duo's entropy, so the spec needs loop_ts=(T_L, T_S)")
+        if self.mode not in DUO_MODES and self.loop_ts is not None:
+            raise ValueError(f"loop_ts only applies to the duo-entropy modes {DUO_MODES}, not {self.mode!r}")
 
     @property
     def protocol_tag(self) -> str:
@@ -71,6 +83,8 @@ class RunSpec:
             "batch_size": batch_size,
             "objective_logits": objective_logits,
         }
+        if self.mode in DUO_MODES:      # only here, so every existing (independent-mode) cache keeps its key
+            payload["loop_ts"] = list(self.loop_ts)
         return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
     def describe(self) -> dict:

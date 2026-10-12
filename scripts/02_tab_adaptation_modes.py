@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""
+Different ways of adapting the duo: Joint, Large anchor, Small anchor, Independent large / small / duo.
+
+Every row is scored by the same static duo (z_L / T_L + z_S / T_S) / 2, so the rows differ only in how the members'
+weights were adapted:
+
+    Joint               both members minimize the entropy of the duo's combined prediction
+    Large anchor        only the large member adapts, on the duo entropy; the small one is frozen (constant logits)
+    Small anchor        only the small member adapts, on the duo entropy; the large one is frozen
+    Independent large   Tent on the large member's own entropy; the small member is not adapted
+    Independent small   Tent on the small member's own entropy; the large member is not adapted
+    Independent duo     both members run Tent on their own entropy
+    (No adaptation)     frozen weights with test-batch statistics, as the reference row
+
+The temperatures T_L, T_S are the paper's Fixed TS, shared by every mode: fitted once on the 4 held-out corruptions
+pooled, on the logits of independently adapted members (the "Held-out TS" of 01_tab_temperatures.py, whose cache
+this reuses), and stored under paths.checkpoints. --temps_checkpoint DIR uses another JointFixedTS checkpoint.
+One live run per (mode, seed) over the 15 test corruptions (severity 5); each is cached, so a repeat only replays.
+
+    sbatch slurm/job.sh scripts/02_tab_adaptation_modes.py --temps_only                  # once: fit T_L, T_S
+    sbatch --array=0-20 slurm/job.sh scripts/02_tab_adaptation_modes.py --shard auto      # one job per (mode, seed)
+    python scripts/02_tab_adaptation_modes.py --report_only                               # tables from the cache
+    python scripts/02_tab_adaptation_modes.py --modes joint indep_duo --seeds 0 --num_samples 2000   # smoke test
+
+Writes <paths.paper>/tab_adaptation_modes__<tag>.tex (accuracy per corruption, one row per mode),
+tab_adaptation_modes_summary__<tag>.tex (members' accuracy under each mode, duo accuracy / ECE / NLL, averaged over
+the corruptions) and <paths.out>/results/tab_adaptation_modes/<tag>.csv. <tag> is the TTA method (plus the duo name
+unless it is the default duo). A capped run (--num_samples) writes its tables to the results folder instead.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import pandas as pd
+
+from src.experiments import adaptation_modes as AM
+from src.experiments.cli import add_common_args, select_jobs, setup
+from src.experiments.results import per_seed_average, save_rows
+from src.utils.tables import write_table
+
+
+def main() -> int:
+    ap = add_common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter))
+    AM.add_args(ap)
+    args = ap.parse_args()
+    ctx, seeds, out = setup(args, "tab_adaptation_modes")
+
+    temps = AM.resolve_temperatures(ctx, AM.temperature_spec(args.duo, args.tta, args.tta_kwargs, args.num_samples),
+                                    args.temps_checkpoint, report_only=args.report_only)
+    print(f"static duo: T_L = {temps.T_l}, T_S = {temps.T_s}  ({temps.folder})")
+    if args.temps_only:
+        return 0
+
+    jobs = AM.mode_jobs(args.duo, args.tta, args.tta_kwargs, seeds, args.num_samples, temps, args.modes)
+    if not args.report_only:
+        AM.compute_members(ctx, select_jobs(jobs, AM.job_label, args.shard, args.only))
+    gaps = AM.missing(ctx, jobs)
+    if gaps:
+        for label, streams in gaps.items():
+            print(f"{label}: member logits missing for {len(streams)} streams (e.g. {streams[:3]}); "
+                  f"run without --report_only to compute them")
+        return 0 if args.shard or args.only else 1      # a shard only fills the cache; the full run renders
+
+    df = pd.DataFrame(AM.duo_rows(jobs, ctx, temps))
+    tag = AM.output_tag(args, ap.get_default("duo"))
+    save_rows(out / f"{tag}.csv", df)
+    print(per_seed_average(df.assign(series=df["mode"] + "/" + df["series"]))
+          .groupby("series")["accuracy"].mean().mul(100).round(2).to_string())
+
+    dest = out if args.num_samples else ctx.g.path("paper")       # a capped run (smoke test) must not overwrite the paper's
+    source = "scripts/02_tab_adaptation_modes.py"
+    write_table(dest / f"tab_adaptation_modes__{tag}.tex", AM.render_corruption_table(
+        df, ctx, args.tta, temps, label=f"tab:adaptation_modes:{tag}", source=source))
+    write_table(dest / f"tab_adaptation_modes_summary__{tag}.tex", AM.render_summary_table(
+        df, ctx, args.tta, temps, label=f"tab:adaptation_modes_summary:{tag}", source=source))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
