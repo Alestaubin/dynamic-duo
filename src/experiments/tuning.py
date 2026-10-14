@@ -97,16 +97,18 @@ class SingleCollate:
 
 class SingleModel:
     """One model adapted by a TTAMethod: the method is set up on it as the "large" side, the other side being a
-    placeholder that is never run. `optim=None` freezes it (batch statistics, no updates): the reference."""
+    placeholder that is never run. `optim=None` freezes it, no updates: the reference. A frozen BatchNorm model
+    uses the test batch's statistics with `bn` (--bn), else the usual eval() mode on the source statistics; an
+    adapting model always uses batch statistics."""
 
     def __init__(self, model: nn.Module, preprocess, norm: str, optim: dict | None, device: torch.device,
-                 tta: str = "tent"):
+                 tta: str = "tent", bn: bool = False):
         self.model, self.preprocess, self.device = model.to(device), preprocess, device
         self.adapt = optim is not None
         side = {"NAME": "model", "NORM": norm, "OPTIM": optim or {}}
         self.tta = build_tta_method(tta)
         self.tta.setup(self.model, nn.Identity(), {"LARGE": side, "SMALL": {**side, "NAME": "placeholder"}},
-                       adapt_large=self.adapt, adapt_small=False)
+                       adapt_large=self.adapt, adapt_small=False, bn=bn)
 
     def reset(self) -> None:
         if self.adapt:
@@ -139,10 +141,10 @@ def run_stream(runner: SingleModel, dataset: ShiftDataset, *, batch_size: int, w
 
 def run_trial(trial: Trial, make_model: Callable[[], tuple[nn.Module, object]], norm: str,
               streams: Sequence[tuple[str, ShiftDataset]], *, device: torch.device, batch_size: int, workers: int,
-              seed: int, num_samples: int | None, tta: str = "tent", ece_bins: int = 15) -> dict:
+              seed: int, num_samples: int | None, tta: str = "tent", ece_bins: int = 15, bn: bool = False) -> dict:
     """A fresh model, then every stream in turn (episodic). Returns the trial's result record."""
     model, preprocess = make_model()
-    runner = SingleModel(model, preprocess, norm, trial.optim, device, tta)
+    runner = SingleModel(model, preprocess, norm, trial.optim, device, tta, bn)
     per_stream = {label: run_stream(runner, ds, batch_size=batch_size, workers=workers, seed=seed,
                                     num_samples=num_samples, ece_bins=ece_bins, desc=f"{trial.name} | {label}")
                   for label, ds in streams}
@@ -155,10 +157,14 @@ def run_trial(trial: Trial, make_model: Callable[[], tuple[nn.Module, object]], 
 # ------------------------------------------------------------------------------------------ storage and ranking
 
 def trial_key(trial: Trial, *, model: str, tta: str, norm: str, stream_labels: Sequence[str], batch_size: int,
-              seed: int, num_samples: int | None) -> str:
+              seed: int, num_samples: int | None, bn: bool = False) -> str:
     """File name of a trial's stored result: the trial's name plus a hash of everything that determines it."""
     payload = {"model": model, "tta": tta, "norm": norm, "optim": trial.optim, "streams": list(stream_labels),
                "batch_size": batch_size, "seed": seed, "num_samples": num_samples}
+    if trial.optim is None and norm == "BN" and not bn:
+        # Only the frozen reference of a BatchNorm model depends on --bn. Stored results from before the flag
+        # existed used test-batch statistics (bn=True), so that case keeps its old key.
+        payload["frozen_bn"] = "source"
     return f"{trial.name}__{hashlib.sha1(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:10]}"
 
 
@@ -203,12 +209,15 @@ def edge_warnings(best: dict, trials: Sequence[Trial]) -> list[str]:
 
 
 def tuned_record(best: dict, frozen: dict, *, model: str, tta: str, norm: str, batch_size: int,
-                 stream_labels: Sequence[str], seed: int) -> dict:
-    """The content of cfgs/tuned/<tta>__<model>.yaml; load_duo reads NORM, OPTIM and batch_size, the rest is provenance."""
-    return {"model": model, "tta": tta, "NORM": norm, "batch_size": batch_size, "OPTIM": dict(best["optim"]),
-            "tuned_on": {"streams": list(stream_labels), "seed": seed},
-            "macro_accuracy": round(best["macro_accuracy"], 5), "frozen_macro_accuracy": round(frozen["macro_accuracy"], 5),
-            "written_by": "scripts/02_tune_tta.py"}
+                 stream_labels: Sequence[str], seed: int, bn: bool = False) -> dict:
+    """The content of cfgs/tuned/<tta>__<model>.yaml; load_duo reads NORM, OPTIM and batch_size, the rest is provenance.
+    For a BatchNorm model the frozen score depends on --bn, so the record says which kind of frozen model it is."""
+    rec = {"model": model, "tta": tta, "NORM": norm, "batch_size": batch_size, "OPTIM": dict(best["optim"]),
+           "tuned_on": {"streams": list(stream_labels), "seed": seed},
+           "macro_accuracy": round(best["macro_accuracy"], 5), "frozen_macro_accuracy": round(frozen["macro_accuracy"], 5)}
+    if norm == "BN":
+        rec["frozen_bn_batch_stats"] = bn
+    return {**rec, "written_by": "scripts/02_tune_tta.py"}
 
 
 def write_tuned(path: Path, record: dict) -> Path:
@@ -266,6 +275,23 @@ if __name__ == "__main__":
     assert big["streams"]["s0/s5"]["entropy"] != frozen["streams"]["s0/s5"]["entropy"], "a real learning rate must adapt"
     assert abs(big["macro_accuracy"] - sum(m["accuracy"] for m in big["streams"].values()) / 2) < 1e-12
 
+    # ---- --bn: only the FROZEN reference of a BatchNorm model changes -----------------------------------------------
+    make_bn = lambda: copy.deepcopy((small, pre))                                                           # noqa: E731
+    f_src = run_trial(FROZEN, make_bn, "BN", streams, **kw)                                                  # default: eval(), source stats
+    f_bn = run_trial(FROZEN, make_bn, "BN", streams, **kw, bn=True)
+    zero_bn = Trial("zero", {"METHOD": "Adam", "STEPS": 1, "LR": 0.0, "BETA": 0.9, "WD": 0.0})
+    a_src = run_trial(zero_bn, make_bn, "BN", streams, **kw)
+    a_bn = run_trial(zero_bn, make_bn, "BN", streams, **kw, bn=True)
+    assert f_src["streams"] != f_bn["streams"], "frozen BatchNorm: source vs test-batch statistics differ"
+    assert a_src["streams"] == a_bn["streams"], "an adapting model always uses batch statistics: the flag is irrelevant"
+    assert a_bn["streams"] == f_bn["streams"], "a model that adapts with lr = 0 is the frozen model on test-batch statistics"
+    assert f_src["streams"] == run_trial(FROZEN, make_bn, "BN", streams, **kw)["streams"], "the default is bn=False"
+    k = lambda t, norm, bn: trial_key(t, model="m", tta="tent", norm=norm, stream_labels=["a"], batch_size=64,   # noqa: E731
+                                      seed=0, num_samples=None, bn=bn)
+    assert k(FROZEN, "BN", False) != k(FROZEN, "BN", True), "the frozen BatchNorm reference is keyed by --bn"
+    assert k(FROZEN, "LN", False) == k(FROZEN, "LN", True), "a LayerNorm model has no batch statistics: same result"
+    assert k(zero_bn, "BN", False) == k(zero_bn, "BN", True), "an adapting trial does not depend on --bn"
+
     # ---- the single-model path IS the engine's independent adaptation of that member ---------------------------------
     ds = FakeStream(160, seed=0)
     optim = {"METHOD": "Adam", "STEPS": 1, "LR": 1e-2, "BETA": 0.9, "WD": 0.0}
@@ -313,7 +339,10 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         g2 = GlobalConfig({**g.raw, "paths": {**g.raw["paths"], "tuned": tmp}}, g.source)
         rec = tuned_record(ranked[0], res[0], model="resnet50", tta="tent", norm="BN", batch_size=g.batch_size,
-                           stream_labels=["a", "b"], seed=0)
+                           stream_labels=["a", "b"], seed=0, bn=True)
+        assert rec["frozen_bn_batch_stats"] is True
+        assert "frozen_bn_batch_stats" not in tuned_record(ranked[0], res[0], model="m", tta="tent", norm="LN",
+                                                           batch_size=64, stream_labels=["a"], seed=0)
         out = write_tuned(Path(tmp) / "tent__resnet50.yaml", rec)
         assert yaml.safe_load(out.read_text()) == rec and out.read_text().startswith("# Written by")
         duo = load_duo("vitb16_rn50", g2)

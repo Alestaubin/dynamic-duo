@@ -36,6 +36,7 @@ from typing import Sequence
 import pandas as pd
 
 from src.experiments import oracles as O
+from src.experiments.cli import bn_tag
 from src.experiments.protocols import Segment, build_segments
 from src.experiments.results import mean_std_over_seeds, per_seed_average
 from src.experiments.runner import Context, EvalResult, ensure_members, evaluate
@@ -115,7 +116,7 @@ def resolve_temperatures(ctx: Context, spec: RunSpec, checkpoint: str | None = N
         folder = Path(checkpoint).expanduser().resolve()
         tl, ts = load_temperatures(folder)
         return Temps(folder, tl, ts, f"taken from the checkpoint \\texttt{{{latex_escape(folder.name)}}}")
-    fp = spec.fingerprint(ctx.duo, ctx.batch_size, ctx.objective_logits)
+    fp = spec.fingerprint(ctx.duo, ctx.batch_size, ctx.objective_logits, ctx.bn)
     folder = ctx.g.path("checkpoints") / "fixed_ts" / f"heldout_{spec.duo}_{spec.tta}_{fp}"
     origin = "fitted on the four held-out corruptions pooled, on the logits of independently adapted members"
     if (folder / "config.json").is_file():
@@ -190,6 +191,14 @@ def _modes_present(df: pd.DataFrame) -> list[Mode]:
     return [m for m in MODES if m.key in set(df["mode"])]
 
 
+def _frozen_text(ctx: Context) -> str:
+    """How a model that does not adapt is run (the --bn flag), for the captions: said only if a member has BatchNorm."""
+    if not any(ctx.duo[side].get("NORM") == "BN" for side in ("LARGE", "SMALL")):
+        return "frozen weights"
+    return ("frozen weights, BatchNorm on the test batch's statistics" if ctx.bn
+            else "frozen weights in eval() mode, BatchNorm on the source statistics")
+
+
 def _setting(ctx: Context, tta: str, temps: Temps, n_seeds: int, severity: int) -> str:
     large, small = (latex_escape(MODEL_NAMES.get(n, n)) for n in (ctx.duo["LARGE"]["NAME"], ctx.duo["SMALL"]["NAME"]))
     return (f"Large / small: {large} / {small}, adapted with {tta.upper()}, severity {severity}. "
@@ -199,7 +208,8 @@ def _setting(ctx: Context, tta: str, temps: Temps, n_seeds: int, severity: int) 
             f"both at once (Joint) or one while the other is frozen (Large / Small anchor: the named model adapts). "
             f"\\emph{{Own entropy}}: each adapting model minimizes its own entropy (Tent) and the duo only combines "
             f"them; Independent duo adapts both, Independent large / small only the named one. "
-            f"\\emph{{Reference}}: frozen weights with test-batch statistics."
+            f"\\emph{{Reference}}: {_frozen_text(ctx)}; the model that does not adapt in the anchor and "
+            f"single-model rows is frozen in the same way."
             + (f" Mean $\\pm$ std over {n_seeds} seeds." if n_seeds > 1 else ""))
 
 
@@ -254,7 +264,9 @@ def add_args(ap) -> None:
 
 
 def output_tag(args, default_duo: str) -> str:
-    return args.tta + ("" if args.duo == default_duo else f"__{args.duo}")
+    """File-name tag: the TTA method, `__<duo>` unless it is the default duo, `_bn` with --bn (the frozen members'
+    BatchNorm statistics change the numbers, so the two settings must not overwrite each other)."""
+    return args.tta + ("" if args.duo == default_duo else f"__{args.duo}") + bn_tag(args)
 
 
 if __name__ == "__main__":
@@ -346,6 +358,13 @@ if __name__ == "__main__":
         body2 = [l.strip() for l in t2.splitlines() if l.strip().endswith("\\\\") and "&" in l]
         assert len(body2) == 1 + len(names) and body2[0].startswith("Mode & Large acc.") and t2.count("\\midrule") == 3
         assert all(l.count("&") == 5 for l in body2) and "--" not in t2
+        # the caption says how the frozen BatchNorm model is run (--bn); the tag keeps the two settings apart
+        assert "BatchNorm on the source statistics" in t1 and "test batch" not in t1.split("\\begin{tabular}")[0]
+        bn_ctx = make_context(tmp, batch_size=32, base=tiny_models(0), bn=True)
+        assert "BatchNorm on the test batch's statistics" in render_corruption_table(df, label="x", **{**kw, "ctx": bn_ctx})
+        from types import SimpleNamespace as NS
+        assert output_tag(NS(tta="tent", duo="d", bn=False), "d") == "tent" and output_tag(NS(tta="tent", duo="d", bn=True), "d") == "tent_bn"
+        assert output_tag(NS(tta="tent", duo="e", bn=True), "d") == "tent__e_bn"
         sub = render_summary_table(df[df["mode"].isin(["joint", "indep_duo"])], label="x", **kw)
         assert "Large anchor" not in sub and "Joint" in sub, "only the modes present get a row"
         if shutil.which("pdflatex"):

@@ -211,6 +211,10 @@ def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None, t
     elif not p.is_absolute() and not p.exists():
         p = DUO_DIR / p.name
     duo = yaml.safe_load(_resolve(p).read_text())
+    if duo.get("NAME") != p.stem:
+        # The duo's name is its cache key and the --duo argument. A copied file that keeps the old NAME would be
+        # run, and cached, as the duo it was copied from.
+        raise ValueError(f"{p}: NAME is {duo.get('NAME')!r} but the file is called {p.stem!r}; set `NAME: {p.stem}`")
     for side in ("LARGE", "SMALL"):
         if side not in duo or "NAME" not in duo[side] or "NORM" not in duo[side]:
             raise ValueError(f"{p}: {side} must define NAME and NORM")
@@ -289,8 +293,21 @@ if __name__ == "__main__":
         except ValueError as e:
             assert "tuned adapting LN" in str(e)
 
+    # a duo file whose NAME differs from its file name (a copy that was not renamed) is rejected at load time
+    with tempfile.TemporaryDirectory() as tmp:
+        copy_of = Path(tmp) / "copied_duo.yaml"
+        copy_of.write_text((DUO_DIR / "vitb16_rn50.yaml").read_text())          # still says NAME: vitb16_rn50
+        try:
+            load_duo(copy_of)
+            raise AssertionError("a duo file with the wrong NAME must be rejected")
+        except ValueError as e:
+            assert "set `NAME: copied_duo`" in str(e), str(e)
+        copy_of.write_text((DUO_DIR / "vitb16_rn50.yaml").read_text().replace("NAME: vitb16_rn50\n", "NAME: copied_duo\n", 1))
+        assert load_duo(copy_of)["NAME"] == "copied_duo"
+
     for name in list_duos():
         duo = load_duo(name)
+        assert duo["NAME"] == name, name
         assert duo["EVAL"]["CORRUPTIONS"] == g.test_corruptions and duo["BS"] == 64, name
         assert set(duo["EVAL"]["CORRUPTIONS"]).isdisjoint(duo["CALIBRATOR"]["CORRUPTIONS"]), name
 

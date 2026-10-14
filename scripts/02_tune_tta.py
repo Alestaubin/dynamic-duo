@@ -9,8 +9,10 @@ experiment script picks it up (src/utils/config.py::load_duo overlays it on the 
 
 A trial is one optimizer setting run over the 4 full streams (batch size and stream order as in the protocol; the
 model is reset to its source weights before every stream). Score = the mean of the 4 streams' accuracies. The frozen
-model (batch statistics, no updates) is run as the reference; the winner must beat it, and a warning says when the
-best learning rate is the smallest or largest tried. Default grid: Adam lr 5e-5..1e-3 (beta 0.9) and SGD lr
+model (no updates) is run as the reference; the winner must beat it. A frozen BatchNorm model (ResNet) is run in
+eval() mode on the source statistics, or with --bn on the test batch's statistics (a stricter reference; the trials
+themselves always use batch statistics, so --bn changes nothing else). A warning says when the
+best learning rate is the smallest or largest tried. Default grid: Adam lr 1e-5..1e-3 (beta 0.9) and SGD lr
 1e-4..1e-2 with momentum 0 or 0.9, 15 trials + the reference. Each trial is stored on its own, so a killed job resumes
 and a SLURM array splits the grid:
 
@@ -69,17 +71,21 @@ def main() -> int:
                                         args.sgd_momentums, args.wd)]
     print(f"{args.model} ({norm}), {args.tta}: {len(trials) - 1} trials + frozen reference on {labels}, "
           f"batch size {g.batch_size}, {args.num_samples or 'all'} images per stream")
+    if norm == "BN":
+        print("frozen reference: BatchNorm on " + ("the test batch's statistics (--bn)" if args.bn
+                                                   else "the source statistics (eval() mode; --bn for test-batch statistics)"))
 
     trial_dir = out / "trials"
     key = lambda t: T.trial_key(t, model=args.model, tta=args.tta, norm=norm, stream_labels=labels,        # noqa: E731
-                                batch_size=g.batch_size, seed=args.seed, num_samples=args.num_samples)
+                                batch_size=g.batch_size, seed=args.seed, num_samples=args.num_samples, bn=args.bn)
     if not args.report_only:
         for t in select_jobs(trials, lambda t: t.name, args.shard, args.only):
             if T.load_result(trial_dir, key(t)) is not None:
                 print(f"{t.name}: stored, skipped")
                 continue
             res = T.run_trial(t, make_model, norm, streams, device=device, batch_size=g.batch_size, workers=g.workers,
-                              seed=args.seed, num_samples=args.num_samples, tta=args.tta, ece_bins=g.ece_bins)
+                              seed=args.seed, num_samples=args.num_samples, tta=args.tta, ece_bins=g.ece_bins,
+                              bn=args.bn)
             T.store_result(trial_dir, key(t), res)
             print(f"{t.name}: macro accuracy {100 * res['macro_accuracy']:.2f}  "
                   f"(last quarter {100 * res['macro_final_accuracy']:.2f})")
@@ -113,7 +119,7 @@ def main() -> int:
         return 1
     path = T.write_tuned(g.path("tuned") / f"{args.tta}__{args.model}.yaml", T.tuned_record(
         best, frozen, model=args.model, tta=args.tta, norm=norm, batch_size=g.batch_size, stream_labels=labels,
-        seed=args.seed))
+        seed=args.seed, bn=args.bn))
     print(f"wrote {path}")
     return 0
 

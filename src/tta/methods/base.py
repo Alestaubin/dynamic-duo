@@ -20,9 +20,10 @@ automatically in TTA_METHODS and is selectable via --tta_method, the duo
 YAML's `TTA:` block, or setup_duo(tta_method=...).
 
 Non-adapting sides are NOT the method's business: setup() always puts them in
-the shared frozen configuration (configure_model_frozen -- live batch stats,
-no grad), so `no_adapt` logits are identical whichever method is selected and
-every frozen-logit cache stays valid across methods.
+the shared frozen configuration (configure_model_frozen: no grad, and BatchNorm
+on the test batch's statistics if `bn` else the usual eval() source statistics),
+so `no_adapt` logits are identical whichever method is selected and every
+frozen-logit cache stays valid across methods.
 """
 
 from __future__ import annotations
@@ -99,9 +100,14 @@ class TTAMethod(ABC):
 
     # --- setup ------------------------------------------------------------ #
     def setup(self, large: nn.Module, small: nn.Module, cfg: dict,
-              adapt_large: bool, adapt_small: bool) -> None:
+              adapt_large: bool, adapt_small: bool, bn: bool = True) -> None:
         """Configure both models. Adapting sides go through the method's own
-        _setup_side(); the rest get the shared frozen configuration."""
+        _setup_side(); the rest get the shared frozen configuration.
+
+        `bn` only concerns the NON-adapting sides that use BatchNorm: True = the
+        test batch's statistics, False = eval() with the source statistics. (The
+        default True is what the old engine, src/tta/dynamic_duo.py, always did;
+        the new engine passes the --bn flag explicitly.)"""
         self.cfg = cfg
         self.models = {"large": large, "small": small}
         self.adapting = {s for s, do in (("large", adapt_large), ("small", adapt_small)) if do}
@@ -112,8 +118,9 @@ class TTAMethod(ABC):
                             f"with norm={side_cfg['NORM']}")
                 self._setup_side(side, model, side_cfg)
             else:
-                logger.info(f"Configuring {side} model (frozen, batch stats) with norm={side_cfg['NORM']}")
-                configure_model_frozen(model, side_cfg["NORM"])
+                stats = "" if side_cfg["NORM"] != "BN" else (", test-batch BN stats" if bn else ", source BN stats")
+                logger.info(f"Configuring {side} model (frozen{stats}) with norm={side_cfg['NORM']}")
+                configure_model_frozen(model, side_cfg["NORM"], batch_stats=bn)
 
     @abstractmethod
     def _setup_side(self, side: str, model: nn.Module, side_cfg: dict) -> None:

@@ -5,6 +5,7 @@ Check that this checkout is ready to run the paper's experiments.
     python scripts/setup_check.py                  # layouts, splits, duo configs
     python scripts/setup_check.py --full           # also count every ImageNet-C corruption's 50,000 files
     python scripts/setup_check.py --probe 200      # also score a pretrained ResNet-50 on 200 images per dataset
+    python scripts/setup_check.py --probe 200 --bn # ... with BatchNorm on the test batch's statistics
 
 What it verifies
   * cfgs/global.yaml loads and its splits hold: the tuning corruptions are in no test stream and no CCC
@@ -88,15 +89,17 @@ def check_ccc(g) -> str:
     return f"{len(done)}/{len(done) + len(missing)} streams generated"
 
 
-def probe(g, n: int, device: str) -> None:
+def probe(g, n: int, device: str, bn: bool = False) -> None:
     import torch
 
+    from src.tta.tent import configure_model_frozen
     from src.utils.model import _preprocess_batch, get_model
 
     model, preprocess = get_model("resnet50", freeze=True, verbose=False)
-    model.to(device).eval()
+    configure_model_frozen(model.to(device), "BN", batch_stats=bn)      # eval() on the source statistics, or --bn
     cases = [("imagenet_val", {}), ("imagenet_c", {"corruption": "fog"}), *[(d, {}) for d in NATURAL_SHIFTS]]
-    print(f"\nProbe: frozen ResNet-50 on {n} random images per dataset (device={device})")
+    print(f"\nProbe: frozen ResNet-50 on {n} random images per dataset (device={device}; BatchNorm on "
+          f"{'the test batch' if bn else 'the source'} statistics)")
     for name, kw in cases:
         try:
             ds = get_dataset(name, g, **kw)
@@ -123,6 +126,9 @@ def main() -> int:
     ap.add_argument("--global", dest="global_path", default=None, help="global config (default: cfgs/global.yaml)")
     ap.add_argument("--full", action="store_true", help="count every ImageNet-C file instead of a structure check")
     ap.add_argument("--probe", type=int, default=0, metavar="N", help="score ResNet-50 on N images per dataset")
+    ap.add_argument("--bn", action="store_true",
+                    help="--probe: run the frozen ResNet-50 on the test batch's BatchNorm statistics (default: eval() "
+                         "mode on the source statistics)")
     ap.add_argument("--strict", action="store_true", help="treat PENDING (unset path) as a failure")
     ap.add_argument("--skip-train-slice", action="store_true",
                     help="skip building the clean train slice file list (lists 1.28M files the first time)")
@@ -169,7 +175,7 @@ def main() -> int:
         run(f"duo {name}", check_duo, results)
 
     if args.probe:
-        probe(g, args.probe, str(get_device()))
+        probe(g, args.probe, str(get_device()), args.bn)
 
     bad = [label for label, st in results if st == BAD or (args.strict and st == PENDING)]
     pending = [label for label, st in results if st == PENDING]

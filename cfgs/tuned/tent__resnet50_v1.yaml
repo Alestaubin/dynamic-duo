@@ -1,0 +1,25 @@
+# Written by scripts/02_tune_tta.py on the held-out corruptions; read by src/utils/config.py::load_duo.
+# Do not edit by hand: rerun the tuner.
+model: resnet50_v1
+tta: tent
+NORM: BN
+batch_size: 64
+OPTIM:
+  METHOD: SGD
+  STEPS: 1
+  LR: 0.00025
+  MOMENTUM: 0.9
+  DAMPENING: 0.0
+  WD: 0.0
+  NESTEROV: false
+tuned_on:
+  streams:
+  - speckle_noise/s5
+  - gaussian_blur/s5
+  - spatter/s5
+  - saturate/s5
+  seed: 0
+macro_accuracy: 0.40609
+frozen_macro_accuracy: 0.32199
+frozen_bn_batch_stats: true
+written_by: scripts/02_tune_tta.py

@@ -30,10 +30,11 @@ import torch.nn.functional as F
 from src.experiments import oracles as O
 from src.experiments.cache import MemberCache
 from src.experiments.protocols import build_segments
+from src.experiments.cli import bn_tag
 from src.experiments.runner import Context, run_dir
 from src.experiments.specs import RunSpec
 from src.utils.config import GlobalConfig
-from src.utils.tables import fmt_cell, pretty_name, table_env
+from src.utils.tables import fmt_cell, latex_escape, pretty_name, table_env
 
 
 @dataclass
@@ -86,12 +87,12 @@ class DictSource:
 
 
 def study_spec(duo: str, g: GlobalConfig, *, tta: str = "tent", mode: str = "both_indep", seed: int = 0,
-               num_samples: int | None = None, clean: str = "val") -> RunSpec:
+               num_samples: int | None = None, clean: str = "val", tta_kwargs: dict | None = None) -> RunSpec:
     labels = StudyLabels.from_config(g, clean)
     corruptions = [c for c in g.test_corruptions + g.tuning_corruptions]
     del labels
-    return RunSpec(duo, tta=tta, mode=mode, protocol="episodic", seed=seed, num_samples=num_samples,
-                   protocol_args={"corruptions": corruptions, "clean": clean})
+    return RunSpec(duo, tta=tta, tta_kwargs=tta_kwargs or {}, mode=mode, protocol="episodic", seed=seed,
+                   num_samples=num_samples, protocol_args={"corruptions": corruptions, "clean": clean})
 
 
 def missing_streams(spec: RunSpec, ctx: Context) -> list[str]:
@@ -229,13 +230,15 @@ def render_table(df: pd.DataFrame, labels: StudyLabels, *, batch_sizes: Sequence
 
 # ------------------------------------------------------------------------------------------ script plumbing
 
-MODEL_NAMES = {"vit_b_16": "ViT-B/16", "vit_l_16": "ViT-L/16", "vit_s_16": "ViT-S/16", "resnet50": "ResNet-50"}
+MODEL_NAMES = {"vit_b_16": "ViT-B/16", "vit_l_16": "ViT-L/16", "vit_s_16": "ViT-S/16", "resnet50": "ResNet-50",
+               "resnet50_v1": "ResNet-50 (V1)", "vit_b_16_augreg": "ViT-B/16 (AugReg)",
+               "vit_b_16_augreg2": "ViT-B/16 (AugReg2)"}
 
 
 def add_study_args(ap) -> None:
     ap.add_argument("--mode", default="both_indep", choices=["both_indep", "no_adapt"],
                     help="both_indep: the members adapt independently with --tta (the paper's setting); "
-                         "no_adapt: frozen weights with batch statistics")
+                         "no_adapt: frozen weights (BatchNorm on the source statistics, or on the test batch's with --bn)")
     ap.add_argument("--clean_source", default="val", choices=["val", "train_slice"],
                     help="images that define 'clean' (default: the 50,000 validation images)")
     ap.add_argument("--batch_sizes", type=int, nargs="+", default=[16, 128], metavar="B",
@@ -243,15 +246,21 @@ def add_study_args(ap) -> None:
     ap.add_argument("--steps", type=int, default=200, help="gradient steps of the per-sample oracle")
 
 
-def study_tag(args) -> str:
-    """File-name tag naming the regime: 'frozen', or the TTA method; '_trainslice' if clean comes from train."""
-    tag = "frozen" if args.mode == "no_adapt" else args.tta
-    return tag + ("_trainslice" if args.clean_source == "train_slice" else "")
+def study_tag(args, default_duo: str | None = None) -> str:
+    """File-name tag naming the regime: 'frozen' or the TTA method; `_bn` with --bn (in every mode: only frozen
+    BatchNorm members change, but the name must not depend on that); '_trainslice' if clean comes from train;
+    `__<duo>` if `default_duo` is given and this is another duo (so a second duo never overwrites the default
+    duo's table)."""
+    tag = ("frozen" if args.mode == "no_adapt" else args.tta) + bn_tag(args)
+    tag += "_trainslice" if args.clean_source == "train_slice" else ""
+    return tag + (f"__{args.duo}" if default_duo is not None and args.duo != default_duo else "")
 
 
 def regime_text(args) -> str:
-    return ("with frozen weights, using test-batch statistics in their normalization layers" if args.mode == "no_adapt"
-            else f"adapted independently with {args.tta.upper()}")
+    if args.mode != "no_adapt":
+        return f"adapted independently with {args.tta.upper()}"
+    return ("with frozen weights, their BatchNorm layers using test-batch statistics" if args.bn
+            else "with frozen weights in eval() mode, their BatchNorm layers using the source statistics")
 
 
 def clean_text(args) -> str:
@@ -260,7 +269,7 @@ def clean_text(args) -> str:
 
 def study_specs(args, ctx: Context, seeds: Sequence[int]) -> list[RunSpec]:
     return [study_spec(args.duo, ctx.g, tta=args.tta, mode=args.mode, seed=s, num_samples=args.num_samples,
-                       clean=args.clean_source) for s in seeds]
+                       clean=args.clean_source, tta_kwargs=args.tta_kwargs) for s in seeds]
 
 
 def compute_members(args, ctx: Context, specs: Sequence[RunSpec]) -> None:
@@ -287,7 +296,7 @@ def all_cached(ctx: Context, specs: Sequence[RunSpec]) -> bool:
 
 def model_names(ctx: Context) -> tuple[str, str]:
     a, b = ctx.duo["LARGE"]["NAME"], ctx.duo["SMALL"]["NAME"]
-    return MODEL_NAMES.get(a, a), MODEL_NAMES.get(b, b)
+    return MODEL_NAMES.get(a) or latex_escape(a), MODEL_NAMES.get(b) or latex_escape(b)      # raw names go into a caption
 
 
 if __name__ == "__main__":
@@ -361,6 +370,18 @@ if __name__ == "__main__":
     body1 = [l.strip() for l in t1.splitlines() if l.strip().endswith("\\\\") and "&" in l]
     assert body1[0].count("&") == 4 and all(l.count("&") == 9 for l in body1[1:]) and "every batch of 16 consecutive samples" in t1
     assert "{tabular}{l|cc|cc|cc|ccc}" in t1 and "the frozen duo" in t1 and "\\multicolumn{1}{c}{Batch-wise TS}" in t1
+
+    # the frozen regime is named by --bn: the two settings give different numbers, so different files and captions
+    from types import SimpleNamespace as NS
+    a = lambda **k: NS(**{"mode": "no_adapt", "bn": False, "tta": "tent", "clean_source": "val", **k})   # noqa: E731
+    assert study_tag(a()) == "frozen" and study_tag(a(bn=True)) == "frozen_bn" and study_tag(a(clean_source="train_slice")) == "frozen_trainslice"
+    assert study_tag(a(mode="both_indep")) == "tent" and study_tag(a(mode="both_indep", bn=True)) == "tent_bn", \
+        "--bn renames the files in every mode, even where it changes no number"
+    assert study_tag(a(bn=True, clean_source="train_slice")) == "frozen_bn_trainslice" and study_tag(a(duo="e", bn=True), "d") == "frozen_bn__e"
+    assert study_tag(a(duo="d"), "d") == "frozen" and study_tag(a(duo="e"), "d") == "frozen__e", "another duo has its own files"
+    assert study_tag(a(duo="e")) == "frozen", "no default given: the old behaviour"
+    assert "source statistics" in regime_text(a()) and "test-batch statistics" in regime_text(a(bn=True))
+    assert regime_text(a(mode="both_indep")) == "adapted independently with TENT"
 
     if shutil.which("pdflatex"):
         with tempfile.TemporaryDirectory() as tmp:

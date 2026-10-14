@@ -47,15 +47,19 @@ class Context:
     # Returns fresh ((large, preprocess), (small, preprocess)); None = load the duo's pretrained models.
     # Lets tests run the whole engine on tiny CPU models.
     model_factory: Callable | None = None
+    # The --bn flag: members that do NOT adapt use BatchNorm on the test batch's statistics (True) or the usual
+    # eval() mode with the source statistics (False). Like batch_size, it is a setting of the whole run
+    # environment that changes the members' logits, so it enters the cache key (RunSpec.fingerprint).
+    bn: bool = False
 
     @classmethod
     def create(cls, duo_name: str, g: GlobalConfig | None = None, device: str | None = None,
-               tta: str = "tent") -> "Context":
+               tta: str = "tent", bn: bool = False) -> "Context":
         """`tta` selects which tuned optimizer settings (cfgs/tuned/<tta>__<model>.yaml) override the duo YAML's."""
         g = g or load_global()
         device = get_device(device)
-        print(f"device: {describe_device(device)}")
-        return cls(g, load_duo(duo_name, g, tta=tta), device)
+        print(f"device: {describe_device(device)}" + (" | frozen BN members use test-batch statistics" if bn else ""))
+        return cls(g, load_duo(duo_name, g, tta=tta), device, bn=bn)
 
     @property
     def batch_size(self) -> int:
@@ -77,12 +81,17 @@ class EvalResult:
 def run_dir(spec: RunSpec, ctx: Context) -> Path:
     if spec.duo != ctx.duo["NAME"]:
         raise ValueError(f"spec.duo={spec.duo!r} but the context holds duo {ctx.duo['NAME']!r}")
-    fp = spec.fingerprint(ctx.duo, ctx.batch_size, ctx.objective_logits)
+    fp = spec.fingerprint(ctx.duo, ctx.batch_size, ctx.objective_logits, ctx.bn)
     return ctx.g.path("cache") / "members" / spec.duo / spec.tta / f"{spec.cache_tag}_seed{spec.seed}_{fp}"
 
 
 def _member_names(ctx: Context) -> tuple[str, str]:
     return ctx.duo["LARGE"]["NAME"], ctx.duo["SMALL"]["NAME"]
+
+
+def _run_label(spec: RunSpec) -> str:
+    """What a progress bar calls a run: a frozen run applies no TTA method, whatever spec.tta says."""
+    return "frozen" if spec.mode == "no_adapt" else spec.tta
 
 
 def _store_segment(runner: MemberRunner, seg: Segment, spec: RunSpec, ctx: Context, cache: MemberCache) -> int:
@@ -91,7 +100,7 @@ def _store_segment(runner: MemberRunner, seg: Segment, spec: RunSpec, ctx: Conte
     for z_l, z_s, labels in tqdm(
         runner.iter_batches(seg.dataset, batch_size=ctx.batch_size, workers=ctx.g.workers,
                             seed=spec.seed, num_samples=loader_n),
-        desc=f"{spec.tta} {seg.label}", leave=False,
+        desc=f"{_run_label(spec)} {seg.label}", leave=False,
     ):
         zs_l.append(z_l.cpu()); zs_s.append(z_s.cpu()); ys.append(labels)
     cache.write(seg.file_stem, torch.cat(zs_l), torch.cat(zs_s), torch.cat(ys))
@@ -113,7 +122,7 @@ def loop_calibrator(spec: RunSpec, device: torch.device) -> JointFixedTS | None:
 def _runner(spec: RunSpec, ctx: Context) -> MemberRunner:
     return MemberRunner(ctx.duo, spec.tta, spec.tta_kwargs, spec.mode, ctx.device, ctx.objective_logits,
                         models=ctx.model_factory() if ctx.model_factory else None,
-                        loop_calibrator=loop_calibrator(spec, ctx.device))
+                        loop_calibrator=loop_calibrator(spec, ctx.device), bn=ctx.bn)
 
 
 def ensure_members(spec: RunSpec, ctx: Context, segments: list[Segment] | None = None) -> MemberCache:
@@ -135,7 +144,7 @@ def ensure_members(spec: RunSpec, ctx: Context, segments: list[Segment] | None =
         sizes[seg.label] = n
         n_images += n
         cache.write_manifest({
-            "spec": spec.describe(), "batch_size": ctx.batch_size, "objective_logits": ctx.objective_logits,
+            "spec": spec.describe(), "batch_size": ctx.batch_size, "objective_logits": ctx.objective_logits, "bn": ctx.bn,
             "duo": {s: ctx.duo[s] for s in ("LARGE", "SMALL")}, "tta": runner.tta.describe(),
             "segments": {**(cache.read_manifest().get("segments", {}) if cache.manifest_path.exists() else {}), **sizes},
             "seconds": time.time() - t0, "images_adapted": n_images,
@@ -199,7 +208,7 @@ def evaluate_live(spec: RunSpec, ctx: Context, gates: Sequence[GateSpec],
         for z_l, z_s, labels in tqdm(
             runner.iter_batches(seg.dataset, batch_size=ctx.batch_size, workers=ctx.g.workers, seed=spec.seed,
                                 num_samples=spec.num_samples),
-            desc=f"{spec.tta} {seg.label}", total=-(-n // ctx.batch_size), leave=False,
+            desc=f"{_run_label(spec)} {seg.label}", total=-(-n // ctx.batch_size), leave=False,
         ):
             ev.update(z_l, z_s, labels)
         ev.end_segment()
@@ -232,7 +241,9 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         base = tiny_models(0)
-        ctx = make_context(tmp, batch_size=32, base=base)
+        # bn=True: the old engine (forward_and_adapt) always ran frozen members on test-batch statistics, and every
+        # parity check below compares against it. The --bn semantics themselves are tested in 6d.
+        ctx = make_context(tmp, batch_size=32, base=base, bn=True)
         ts_dir = tmp / "ts"
         JointFixedTS(Tl=1.4, Ts=0.9, verbose=False).save(str(ts_dir))
         gates = [GateSpec("fixed", kind="fixed_ts", fixed_ts=str(ts_dir)),
@@ -303,7 +314,7 @@ if __name__ == "__main__":
                 raise AssertionError("replay must not touch the dataset")
         poisoned = [Segment("s0/s5", Poisoned(150, 1), True), Segment("s1/s5", Poisoned(150, 2), True)]
         assert replay(spec, ctx, gates, poisoned).rows == rep.rows
-        no_models = Context(ctx.g, ctx.duo, ctx.device, model_factory=lambda: (_ for _ in ()).throw(AssertionError("no models")))
+        no_models = Context(ctx.g, ctx.duo, ctx.device, model_factory=lambda: (_ for _ in ()).throw(AssertionError("no models")), bn=ctx.bn)
         assert evaluate(spec, no_models, gates, report_only=True, segments=two).rows == rep.rows
         try:
             replay(RunSpec("tiny", seed=99), ctx, gates, two)
@@ -374,6 +385,34 @@ if __name__ == "__main__":
         assert not other["z_l"].equal(joint["z_l"]), "the in-loop temperatures change what the members learn"
         assert run_dir(RunSpec("tiny", seed=3, mode="both_duo", loop_ts=(1.4, 0.9)), ctx) != \
             run_dir(RunSpec("tiny", seed=3, mode="both_duo", loop_ts=(2.0, 0.9)), ctx), "loop_ts is part of the cache key"
+
+        # ---- 6d. --bn: only members that do NOT adapt and use BatchNorm change, and so does only their cache key -------
+        src_ctx = make_context(tmp, batch_size=32, base=base, bn=False)      # same cache folder, the default flag
+        key = lambda m, c: run_dir(RunSpec("tiny", seed=3, mode=m), c)       # noqa: E731
+        assert key("both_indep", ctx) == key("both_indep", src_ctx), "nothing is frozen: the flag is irrelevant"
+        assert key("small_indep", ctx) == key("small_indep", src_ctx), "the frozen member is the LayerNorm one: irrelevant"
+        assert key("large_indep", ctx) != key("large_indep", src_ctx), "a frozen BatchNorm member: the flag is part of the key"
+        assert key("no_adapt", ctx) != key("no_adapt", src_ctx)
+        frozen_bn = ensure_members(RunSpec("tiny", seed=3, mode="no_adapt"), ctx, two).read("s0__s5")
+        frozen_src = ensure_members(RunSpec("tiny", seed=3, mode="no_adapt"), src_ctx, two).read("s0__s5")
+        assert frozen_bn["z_l"].equal(frozen_src["z_l"]), "a LayerNorm member does not care about --bn"
+        assert not frozen_bn["z_s"].equal(frozen_src["z_s"]), "a BatchNorm member does"
+        # --bn off = the usual eval() mode on the source statistics
+        (_, pre), (small_ref, _) = base
+        ref = copy.deepcopy(small_ref).eval()
+        with torch.no_grad():
+            want = [ref(torch.stack([pre(i) for i in imgs])) for imgs, _ in two[0].dataset.loader(32, None, 3, 0)]
+        assert frozen_src["z_s"].equal(center_fp16(torch.cat(want)).float()), "default: plain eval(), source statistics"
+        # the adapting member is unaffected: the large member of large_indep adapts on its own entropy either way
+        li_bn = ensure_members(RunSpec("tiny", seed=3, mode="large_indep"), ctx, two).read("s1__s5")
+        li_src = ensure_members(RunSpec("tiny", seed=3, mode="large_indep"), src_ctx, two).read("s1__s5")
+        assert li_bn["z_l"].equal(li_src["z_l"]) and not li_bn["z_s"].equal(li_src["z_s"])
+        for flag in (True, False):
+            r = MemberRunner(DUO, mode="no_adapt", device="cpu", models=copy.deepcopy(base), bn=flag)
+            assert r.small.training is flag and (r.small.net[1].running_mean is None) is flag, "BatchNorm: batch vs source stats"
+            assert r.large.training is False, "a LayerNorm member is plain eval() under either flag"
+            a = MemberRunner(DUO, mode="large_indep", device="cpu", models=copy.deepcopy(base), bn=flag)
+            assert a.large.training is True and a.small.training is flag, "the adapting member is always in Tent's train mode"
 
         # ---- 7. a 200-class dataset is gated on its 200 classes ---------------------------------------------
         nat = [Segment("fake200", FakeStream(150, seed=4, masked=True), True)]

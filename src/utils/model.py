@@ -11,6 +11,12 @@ def get_model(model_name, freeze=True, verbose=True):
         model, preprocess = load_resnet50(verbose=verbose)
     elif model_name == "convnext_base":
         model, preprocess = load_convnext_base(verbose=verbose)
+    elif model_name == "resnet50_v1":
+        model, preprocess = load_resnet50_v1(verbose=verbose)
+    elif model_name == "vit_b_16_augreg":
+        model, preprocess = load_vit_b_16_augreg(verbose=verbose)
+    elif model_name == "vit_b_16_augreg2":
+        model, preprocess = load_vit_b_16_augreg2(verbose=verbose)
     elif model_name == "resnet18":
         model, preprocess = load_resnet18(verbose=verbose)
     elif model_name == "resnet34":
@@ -108,7 +114,9 @@ def load_mobilenet_v3_large(verbose=True):
 
 def load_resnet50(verbose=True):
     """
-    Loads ResNet-50 pretrained on ImageNet-1K.
+    Loads ResNet-50 pretrained on ImageNet-1K. DEFAULT is torchvision's IMAGENET1K_V2 recipe (80.9% top-1, trained
+    with label smoothing and mixup, so its outputs are far less confident than the original ResNet-50's); the
+    original weights are `resnet50_v1`.
     """
     if verbose:
         print("Loading ResNet-50 (Pretrained: ImageNet-1K)...")
@@ -118,6 +126,50 @@ def load_resnet50(verbose=True):
     #     transforms.CenterCrop(224),   # no-op on 224 imgs; no resize, no normalize
     #     transforms.ToTensor(),        # PIL -> [0,1] tensor, that's all
     # ])
+    model = models.resnet50(weights=weights)
+    model.eval()
+    return model, preprocess
+
+def _load_timm_vit_b_16(tag, verbose=True):
+    """timm's ViT-B/16 with an explicit pretrained tag. A bare `vit_base_patch16_224` resolves to different weights
+    in different timm versions (augreg_in21k_ft_in1k up to 0.6.x, augreg2_in21k_ft_in1k from 0.9), so the tag is
+    always spelled out. The preprocessing is the one timm ships with that tag (0.5/0.5 normalization, crop 0.9)."""
+    import timm
+    from timm.data import resolve_data_config
+    from timm.data.transforms_factory import create_transform
+    name = f"vit_base_patch16_224.{tag}"
+    if verbose:
+        print(f"Loading ViT-B/16 (timm, {name})...")
+    model = timm.create_model(name, pretrained=True)
+    model.eval()
+    preprocess = create_transform(**resolve_data_config({}, model=model))
+    return model, preprocess
+
+def load_vit_b_16_augreg(verbose=True):
+    """
+    ViT-B/16 AugReg, ImageNet-21k pretrained and fine-tuned on ImageNet-1k (timm `augreg_in21k_ft_in1k`): what a bare
+    `vit_base_patch16_224` gave in timm 0.6.x, which the SAR / EATA / COCA code bases were written against. Not
+    torchvision's `vit_b_16` (trained on ImageNet-1k only).
+    """
+    return _load_timm_vit_b_16("augreg_in21k_ft_in1k", verbose)
+
+def load_vit_b_16_augreg2(verbose=True):
+    """
+    ViT-B/16 AugReg2 (timm `augreg2_in21k_ft_in1k`, a further fine-tune of the AugReg model): what a bare
+    `vit_base_patch16_224` gives in timm >= 0.9, including the timm this repo pins.
+    """
+    return _load_timm_vit_b_16("augreg2_in21k_ft_in1k", verbose)
+
+def load_resnet50_v1(verbose=True):
+    """
+    Loads ResNet-50 with the ORIGINAL torchvision weights (IMAGENET1K_V1, 76.1% top-1), the ones the Tent paper,
+    RobustBench and most TTA benchmarks use. Kept next to `resnet50` (the V2 weights) so that results of the two
+    never share a name, a cache or a tuned-settings file.
+    """
+    if verbose:
+        print("Loading ResNet-50 (Pretrained: ImageNet-1K, V1 weights)...")
+    weights = models.ResNet50_Weights.IMAGENET1K_V1
+    preprocess = weights.transforms()
     model = models.resnet50(weights=weights)
     model.eval()
     return model, preprocess

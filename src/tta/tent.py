@@ -95,13 +95,22 @@ def configure_model(model, norm_type):
             m.running_var = None
     return model
 
-def configure_model_frozen(model, norm_type):
-    """Put a non-adapting model in train mode with batch statistics but no grad.
+def configure_model_frozen(model, norm_type, batch_stats=True):
+    """Configure a non-adapting model: no grad, and one of two normalization behaviors.
 
-    This gives better-calibrated logits on corrupted data (batch stats replace
-    stale running stats) without allowing any parameter adaptation.
+    batch_stats=True and norm_type == "BN": train mode with the BatchNorm layers on the TEST batch's statistics
+    instead of the stale source ones (what `configure_model` does for Tent). This gives better-calibrated logits
+    on corrupted data without allowing any parameter adaptation.
+
+    Otherwise (batch_stats=False, or a model without BatchNorm): the usual eval() mode, i.e. the source
+    (running) statistics of BatchNorm layers. LayerNorm/GroupNorm have no running statistics, so for those
+    models the flag changes nothing except that eval() switches dropout / stochastic depth off.
     """
-    model = configure_model(model, norm_type)
+    assert norm_type in {"BN", "LN", "GN"}, f"Unsupported norm type {norm_type}"
+    if batch_stats and norm_type == "BN":
+        model = configure_model(model, norm_type)
+    else:
+        model.eval()
     model.requires_grad_(False)
     return model
 

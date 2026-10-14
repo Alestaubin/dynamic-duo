@@ -138,4 +138,13 @@ if __name__ == "__main__":
             raise AssertionError(f"{bad} must be rejected")
         except ValueError:
             pass
+    # --bn (frozen BatchNorm members on test-batch statistics) enters the key only where it changes the logits:
+    # a frozen member with NORM: BN. bn=True is the key every cache had before the flag existed.
+    duo_bn = {"LARGE": {"NAME": "a", "NORM": "LN", "OPTIM": {"LR": 1e-4}}, "SMALL": {"NAME": "b", "NORM": "BN", "OPTIM": {"LR": 1e-3}}}
+    fp = lambda mode, bn: RunSpec("d", mode=mode).fingerprint(duo_bn, 64, "masked", bn)     # noqa: E731
+    assert fp("both_indep", False) == fp("both_indep", True), "nothing frozen: the flag is irrelevant"
+    assert fp("small_indep", False) == fp("small_indep", True), "the frozen member is LayerNorm: irrelevant"
+    assert fp("large_indep", False) != fp("large_indep", True) and fp("no_adapt", False) != fp("no_adapt", True)
+    assert RunSpec("d", mode="no_adapt").fingerprint(duo_bn, 64, "masked", True) == "604ae09b16a9", \
+        "bn=True must stay the pre-flag key of frozen runs"
     print("protocols self-test passed")

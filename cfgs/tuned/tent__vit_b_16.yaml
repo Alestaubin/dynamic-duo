@@ -1,4 +1,4 @@
-# Written by scripts/03_tune_tta.py on the held-out corruptions; read by src/utils/config.py::load_duo.
+# Written by scripts/02_tune_tta.py on the held-out corruptions; read by src/utils/config.py::load_duo.
 # Do not edit by hand: rerun the tuner.
 model: vit_b_16
 tta: tent
@@ -21,4 +21,4 @@ tuned_on:
   seed: 0
 macro_accuracy: 0.50958
 frozen_macro_accuracy: 0.47037
-written_by: scripts/03_tune_tta.py
+written_by: scripts/02_tune_tta.py

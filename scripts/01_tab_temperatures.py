@@ -16,12 +16,14 @@ The last row averages the 15 test corruptions. Duo = (z_L / T_L + z_S / T_S) / 2
 one adaptation run per seed; every fit then runs on those logits, on all 20 streams (no blank cells).
 
     sbatch slurm/job.sh scripts/01_tab_temperatures.py                       # members adapt with Tent, seed 0
-    sbatch slurm/job.sh scripts/01_tab_temperatures.py --mode no_adapt       # frozen members (batch statistics)
+    sbatch slurm/job.sh scripts/01_tab_temperatures.py --mode no_adapt       # frozen members (BatchNorm: source statistics)
+    sbatch slurm/job.sh scripts/01_tab_temperatures.py --mode no_adapt --bn  # frozen members on the test batch's statistics
     python scripts/01_tab_temperatures.py --report_only                      # table from the cache, no model
     python scripts/01_tab_temperatures.py --mode no_adapt --batch_sizes 16 64 128
 
 Writes <paths.paper>/tab_temperatures__<tag>.tex and <paths.out>/results/tab_temperatures/<tag>.csv (accuracy
-and NLL of every column).
+and NLL of every column). <tag> is the TTA method or `frozen`, plus `_bn` with --bn, `_trainslice` with
+--clean_source train_slice, and `__<duo>` for a duo other than the default.
 """
 
 from __future__ import annotations
@@ -58,7 +60,7 @@ def main() -> int:
     rows = []
     for spec in specs:
         rows += annotate(study_rows(CacheSource(spec, ctx), labels, batch_sizes=batch_sizes, steps=args.steps), spec)
-    tag = study_tag(args)
+    tag = study_tag(args, ap.get_default("duo"))
     save_rows(out / f"{tag}.csv", rows)
     tex = render_table(
         pd.DataFrame(rows), labels, batch_sizes=batch_sizes, models=model_names(ctx), regime=regime_text(args),

@@ -17,6 +17,11 @@ are the PRE-update logits of that step (the TENT convention, identical to the ol
                   the RunSpec (`loop_ts`). Stateful calibrators (the proxy-weighted gate) are not supported in
                   the loop: a replay could not reproduce their state.
 
+`bn` (the --bn flag) decides how a member that does NOT adapt treats BatchNorm: True = the test batch's statistics,
+False = the usual eval() mode with the source statistics. Adapting members always use batch statistics (Tent), so
+it only changes the frozen members' logits: the no_adapt run and the non-adapting member of the anchor and
+single-adapting modes.
+
 The 200-class natural shifts (ImageNet-A/R): `objective_logits` ("masked" | "full", cfgs/global.yaml
 protocol.objective_logits_200class) decides whether the TTA loss sees the dataset's 200 logits or all 1000;
 the returned logits are always the full 1000, and callers score accuracy on `dataset.apply_class_mask`.
@@ -30,26 +35,12 @@ from typing import Iterator
 import torch
 
 from src.utils.device import get_device
-from src.experiments.specs import DUO_MODES
+from src.experiments.specs import DUO_MODES, MODE_SIDES
 from src.tta.methods import build_tta_method, resolve_tta_spec
 from src.utils.datasets.base import ShiftDataset
 from src.utils.model import _preprocess_batch, get_model
 
 logger = logging.getLogger(__name__)
-
-# mode -> (adapt_large, adapt_small)
-INDEP_MODES = {
-    "both_indep": (True, True),
-    "large_indep": (True, False),
-    "small_indep": (False, True),
-    "no_adapt": (False, False),
-}
-DUO_SIDES = {
-    "both_duo": (True, True),
-    "large_duo": (True, False),
-    "small_duo": (False, True),
-}
-assert tuple(DUO_SIDES) == DUO_MODES
 
 
 class PairCollate:
@@ -83,31 +74,31 @@ def load_models(duo_cfg: dict, device: torch.device):
 class MemberRunner:
     def __init__(self, duo_cfg: dict, tta: str = "tent", tta_kwargs: dict | None = None,
                  mode: str = "both_indep", device: torch.device | str | None = None,
-                 objective_logits: str = "masked", models=None, loop_calibrator=None):
-        sides = {**INDEP_MODES, **DUO_SIDES}
-        if mode not in sides:
-            raise ValueError(f"unknown mode {mode!r}: expected one of {sorted(sides)}")
-        if mode in DUO_SIDES and loop_calibrator is None:
+                 objective_logits: str = "masked", models=None, loop_calibrator=None, bn: bool = False):
+        if mode not in MODE_SIDES:
+            raise ValueError(f"unknown mode {mode!r}: expected one of {sorted(MODE_SIDES)}")
+        if mode in DUO_MODES and loop_calibrator is None:
             raise ValueError(
                 f"mode {mode!r} adapts on the duo's entropy, which needs a loop_calibrator (a static calibrator "
                 f"such as JointFixedTS); the calibrator is inside the adaptation loop"
             )
-        if mode not in DUO_SIDES and loop_calibrator is not None:
-            raise ValueError(f"loop_calibrator only applies to {sorted(DUO_SIDES)}, not {mode!r}")
+        if mode not in DUO_MODES and loop_calibrator is not None:
+            raise ValueError(f"loop_calibrator only applies to {sorted(DUO_MODES)}, not {mode!r}")
         if objective_logits not in ("masked", "full"):
             raise ValueError(f"objective_logits must be 'masked' or 'full', got {objective_logits!r}")
         self.device = get_device(device)
         self.mode = mode
         self.objective_logits = objective_logits
         self.loop_calibrator = loop_calibrator
-        self.adapt_large, self.adapt_small = sides[mode]
+        self.bn = bn
+        self.adapt_large, self.adapt_small = MODE_SIDES[mode]
 
         (self.large, self.large_preprocess), (self.small, self.small_preprocess) = (
             models if models is not None else load_models(duo_cfg, self.device)
         )
         name, kwargs = resolve_tta_spec(duo_cfg, tta, tta_kwargs)
         self.tta = build_tta_method(name, **kwargs)
-        self.tta.setup(self.large, self.small, duo_cfg, self.adapt_large, self.adapt_small)
+        self.tta.setup(self.large, self.small, duo_cfg, self.adapt_large, self.adapt_small, bn=bn)
 
     def reset(self) -> None:
         """Both adapting members back to their source weights (and the method's own state)."""

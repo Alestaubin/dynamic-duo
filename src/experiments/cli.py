@@ -7,6 +7,9 @@ The flags every script in scripts/ takes, and the setup they share.
     --tta METHOD        tent | eata | ...; --tta_kwargs '{"k": v}'      (default tent)
     --seeds 0 1 2       stream-order seeds                              (default: cfgs/global.yaml)
     --num_samples N     cap per stream, for smoke tests                 (default: the whole stream)
+    --bn                frozen models (no adaptation) that use BatchNorm run on the TEST batch's statistics;
+                        without it they run in the usual eval() mode on the source statistics. Models that
+                        adapt always use batch statistics, so this only changes frozen runs
     --report_only       never run a model: build the table/figure from what is cached, or fail
                         listing what is missing
     --shard i/N         run only every N-th job, starting at i. "auto" reads $SLURM_ARRAY_TASK_ID and
@@ -57,6 +60,10 @@ def add_common_args(p: argparse.ArgumentParser, *, tta: bool = True, seeds: bool
     if seeds:
         p.add_argument("--seeds", type=int, nargs="+", default=None, help="default: protocol.seeds in global.yaml")
     p.add_argument("--num_samples", type=int, default=None, help="cap per stream (smoke tests); default: all")
+    p.add_argument("--bn", action="store_true",
+                   help="frozen models that use BatchNorm (e.g. ResNet) use the test batch's statistics; default: "
+                        "eval() mode with the source statistics. Models that adapt always use batch statistics, "
+                        "so this only changes frozen runs")
     p.add_argument("--report_only", action="store_true", help="never run a model; fail if the cache is incomplete")
     p.add_argument("--shard", default=None, metavar="i/N|auto", help="run only jobs i, i+N, i+2N, ...")
     p.add_argument("--only", nargs="+", default=None, metavar="TEXT", help="run only jobs whose label contains TEXT")
@@ -90,6 +97,12 @@ def select_jobs(jobs: Sequence[T], label: Callable[[T], str], shard: str | None 
     return [j for k, j in enumerate(jobs) if k % n == i]
 
 
+def bn_tag(args: argparse.Namespace) -> str:
+    """`_bn` when --bn was given, else "". Every script that names an output file adds it (in any mode, even where the
+    flag changes no number), so that the two settings never share a file name."""
+    return "_bn" if getattr(args, "bn", False) else ""
+
+
 def pin_threads() -> None:
     """Match torch's CPU threads to the allocation. Left alone, torch uses every core of the node and a
     128x1000 SVD on a busy node runs thousands of times slower than with 4 threads."""
@@ -113,7 +126,7 @@ def setup(args: argparse.Namespace, script: str, default_seeds: Sequence[int] | 
     """(context, seeds, output dir) for a script. Seeds: --seeds, else `default_seeds`, else protocol.seeds.
     The duo's optimizer settings are the tuned ones of the selected --tta method, where cfgs/tuned has them."""
     g, seeds, out = setup_global(args, script, default_seeds)
-    return Context.create(args.duo, g, args.device, tta=getattr(args, "tta", "tent")), seeds, out
+    return Context.create(args.duo, g, args.device, tta=getattr(args, "tta", "tent"), bn=args.bn), seeds, out
 
 
 if __name__ == "__main__":
@@ -142,6 +155,8 @@ if __name__ == "__main__":
     p = add_common_args(argparse.ArgumentParser())
     a = p.parse_args(["--seeds", "0", "1", "--shard", "1/3", "--tta_kwargs", '{"d_margin": 0.1}'])
     assert a.seeds == [0, 1] and a.tta == "tent" and a.tta_kwargs == {"d_margin": 0.1} and not a.report_only
+    assert a.bn is False and p.parse_args(["--bn"]).bn is True, "--bn is a plain switch, off by default"
+    assert bn_tag(a) == "" and bn_tag(p.parse_args(["--bn"])) == "_bn" and bn_tag(argparse.Namespace()) == ""
     single = add_common_args(argparse.ArgumentParser(), duo=False).parse_args([])
-    assert not hasattr(single, "duo") and single.tta == "tent" and single.seeds is None
+    assert not hasattr(single, "duo") and single.tta == "tent" and single.seeds is None and single.bn is False
     print("cli self-test passed")

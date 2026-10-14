@@ -28,6 +28,13 @@ INDEPENDENT_PROTOCOLS = ("episodic", "tuning", "natural")
 # temperatures change the members' logits and are part of the spec (`loop_ts`).
 DUO_MODES = ("both_duo", "large_duo", "small_duo")
 
+# mode -> (adapt_large, adapt_small): which members adapt. The one table the runner and the cache key share.
+MODE_SIDES = {
+    "both_indep": (True, True), "large_indep": (True, False), "small_indep": (False, True), "no_adapt": (False, False),
+    "both_duo": (True, True), "large_duo": (True, False), "small_duo": (False, True),
+}
+assert tuple(m for m in MODE_SIDES if m.endswith("_duo")) == DUO_MODES
+
 
 @dataclass(frozen=True)
 class RunSpec:
@@ -71,8 +78,15 @@ class RunSpec:
         """Cache directory name: shared by every independent-segment protocol, per stream otherwise."""
         return "independent" if self.independent else self.protocol_tag
 
-    def fingerprint(self, duo_cfg: dict, batch_size: int, objective_logits: str) -> str:
-        """12 hex chars identifying every input that affects the members' logits."""
+    def frozen_bn_matters(self, duo_cfg: dict) -> bool:
+        """True if the --bn flag changes this run's logits: a member that does not adapt uses BatchNorm (NORM: BN).
+        Adapting members always use batch statistics, and LayerNorm models have none."""
+        adapt = dict(zip(("LARGE", "SMALL"), MODE_SIDES[self.mode]))
+        return any(not adapt[side] and duo_cfg[side].get("NORM") == "BN" for side in adapt)
+
+    def fingerprint(self, duo_cfg: dict, batch_size: int, objective_logits: str, bn: bool = False) -> str:
+        """12 hex chars identifying every input that affects the members' logits. `bn`: the --bn flag (frozen
+        BatchNorm members on the test batch's statistics, instead of eval() with the source ones)."""
         payload: dict[str, Any] = {
             "models": {side: duo_cfg[side] for side in ("LARGE", "SMALL")},
             "tta": [self.tta, self.tta_kwargs],
@@ -85,6 +99,10 @@ class RunSpec:
         }
         if self.mode in DUO_MODES:      # only here, so every existing (independent-mode) cache keeps its key
             payload["loop_ts"] = list(self.loop_ts)
+        # Only a run whose logits depend on it, and only for the non-default value: every cache made before the
+        # flag existed used test-batch statistics, which is what bn=True means, so those keys stay valid.
+        if not bn and self.frozen_bn_matters(duo_cfg):
+            payload["frozen_bn"] = "source"
         return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
     def describe(self) -> dict:

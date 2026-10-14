@@ -77,14 +77,14 @@ class FakeStream(ShiftDataset):
         return _Images(self.n, self.seed, self.num_classes)
 
 
-def make_context(tmp: Path, batch_size: int = 32, base=None) -> Context:
+def make_context(tmp: Path, batch_size: int = 32, base=None, bn: bool = False) -> Context:
     """A Context whose cache lives in `tmp` and whose models are tiny copies of one initialisation."""
     raw = copy.deepcopy(load_global().raw)
     raw["paths"]["cache"] = str(tmp / "cache")
     raw["protocol"]["adaptation_batch_size"] = batch_size
     g = GlobalConfig(raw, Path("<test>"))
     base = base or tiny_models(0)
-    return Context(g, copy.deepcopy(DUO), torch.device("cpu"), model_factory=lambda: copy.deepcopy(base))
+    return Context(g, copy.deepcopy(DUO), torch.device("cpu"), model_factory=lambda: copy.deepcopy(base), bn=bn)
 
 
 def tmp_dir() -> tempfile.TemporaryDirectory:

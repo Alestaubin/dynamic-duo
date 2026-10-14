@@ -30,11 +30,25 @@ Dataset locations, output folders and the protocol constants (severity 5, batch 
 | `cfgs/global.yaml` | Shared settings: dataset paths, output folders, protocol constants. |
 | `cfgs/duos/` | The model pairs (default `vitb16_rn50`). |
 | `cfgs/tuned/` | Tuned Tent settings per model, written by `scripts/02_tune_tta.py` and read by every other script. |
-| `slurm/job.sh` | The one launcher for running any script as a SLURM job. |
+| `slurm/job.sh`, `slurm/job_cpu.sh` | The launchers for running a script as a SLURM job: with one GPU, and without a GPU (for steps that run no model). |
 | `out/paper/` | The final tables and figures (tracked by git). |
 | `out/results/<script>/` | Each script's CSV files (git-ignored). |
 | `cache/` | The cached model outputs, about 3 GB per full run (git-ignored). |
 | `checkpoints/` | Fitted temperatures and other fitted values (git-ignored). |
+
+## Models and weights
+
+The model name decides which pretrained weights are loaded (`src/utils/model.py`), and it is part of every cache key, so a different set of weights always gets a different name. Several names look alike:
+
+| Name | Weights |
+|---|---|
+| `resnet50` | torchvision **V2** (80.9% clean). Trained with label smoothing and mixup, so its outputs are very under-confident and Tent needs a much larger learning rate. |
+| `resnet50_v1` | torchvision **V1**, the original weights (76.1% clean) that Tent, RobustBench and COCA use. |
+| `vit_b_16` | torchvision ViT-B/16 (ImageNet-1k only). |
+| `vit_b_16_augreg` | timm `vit_base_patch16_224.augreg_in21k_ft_in1k` (ImageNet-21k pretrained). What a bare `vit_base_patch16_224` gave in timm 0.6.x, as used by SAR, EATA and COCA. |
+| `vit_b_16_augreg2` | timm `...augreg2_in21k_ft_in1k`. What a bare `vit_base_patch16_224` gives in timm 0.9 and later, including the timm pinned here. |
+
+The duos `vitb16aug_rn50v1` and `vitb16aug2_rn50v1` pair each timm ViT with `resnet50_v1`, to compare with COCA ("When Small Guides Large"). Weights are downloaded on first use and then cached (`$TORCH_HOME` for torchvision, `~/.cache/huggingface` for timm). Loading a new model once on the login node first is a good habit, so that a job array does not start many downloads at once; Hugging Face is reachable from the compute nodes, but I have not tested torchvision's download server from there.
 
 ## How the scripts work
 
@@ -52,26 +66,35 @@ sbatch --array=0-2 slurm/job.sh scripts/01_tab_temperatures.py --seeds 0 1 2 --s
 
 Array indices must be `0..N-1`. A shard only fills the cache and exits. When you then run the script without `--shard`, it finds everything in the cache and builds the tables. Anything still missing is computed at that point, unless you pass `--report_only`: then it fails and lists what is missing.
 
-**Flags every script takes:**
+**Flags the scripts share** (which script takes which, and the defaults, are in [Arguments of each script](#arguments-of-each-script) below):
 
 | Flag | Meaning |
 |---|---|
 | `--duo NAME` | Which model pair, `cfgs/duos/NAME.yaml`. |
-| `--tta METHOD` | TTA method of the adapting models (default `tent`). |
+| `--tta METHOD` | TTA method of the adapting models (default `tent`). `--tta_kwargs JSON` gives it hyperparameters, e.g. `'{"d_margin": 0.1}'`. |
 | `--seeds 0 1 2` | Stream-order seeds. Tables show mean ± std over them. |
+| `--bn` | Frozen models that use BatchNorm (such as ResNet-50) run on the **test batch's** statistics. Without it they run in the usual `eval()` mode on the **source** statistics. Only frozen runs are affected (see below). |
 | `--num_samples N` | Use only N images per stream. **For smoke tests**: results are written to `out/results/`, never to `out/paper/`. |
 | `--report_only` | Never run a model: build the tables from the cache, or fail and list what is missing. |
 | `--shard i/N` or `auto` | Run only every N-th job (see above). |
 | `--only TEXT [...]` | Run only the jobs whose label contains TEXT, such as `seed1`. |
 | `--out DIR`, `--global FILE`, `--device cuda/cpu` | Output folder, alternative global config, device. |
 
+**Frozen models and `--bn`.** A model that adapts with Tent always uses the test batch's statistics in its BatchNorm layers, so `--bn` does not touch it. It matters only for a model that is *not* adapted:
+- without `--bn`, a frozen BatchNorm model is put in the usual `eval()` mode and uses the statistics it was trained with (the source statistics);
+- with `--bn`, it uses the statistics of each test batch instead. This usually helps on corrupted images, so it is the stricter baseline.
+
+LayerNorm models (ViT, DeiT, Swin) have no running statistics, so for them `--bn` changes nothing. The flag only has an effect where something is frozen: the frozen runs of script 01, the frozen reference of script 02, and in script 03 the frozen reference row and the model that is not adapted in the anchor and single-model modes. Every output file made with `--bn` gets a `_bn` in its name, in every mode, so the two settings never overwrite each other. All frozen runs and caches made before this flag existed used the test batch's statistics: they are the `--bn` runs, and `--bn` reuses them.
+
 **Running a script as a job.** `slurm/job.sh` takes the script and its arguments. It loads the modules, checks that the GPU is usable, and runs the script. Output goes to `logs/<jobid>_<name>.out` and `.err`. Options you give to `sbatch` override the defaults at the top of the file:
 
 ```bash
 sbatch slurm/job.sh scripts/01_tab_temperatures.py                 # 1 GPU, default walltime
 sbatch -t 05:00:00 slurm/job.sh scripts/01_tab_temperatures.py     # longer walltime
-sbatch --gres=gpu:0 -t 00:30:00 slurm/job.sh scripts/setup_check.py # a job without a GPU
+sbatch slurm/job_cpu.sh scripts/setup_check.py                      # a job without a GPU
 ```
+
+`slurm/job_cpu.sh` is the same launcher without the GPU request. Use it only for steps that run no model, such as checking the setup or ranking saved results. Never use it for a step that adapts models: on the CPU that runs at about 1 image per second.
 
 On this cluster the login node kills processes above 5 GB of memory, so run anything with real models as a job.
 
@@ -114,6 +137,9 @@ The oracles use the labels and are fitted on the same data they are scored on, s
 sbatch slurm/job.sh scripts/01_tab_temperatures.py                       # Tent-adapted members, seed 0
 sbatch slurm/job.sh scripts/01_tab_temperatures.py --mode no_adapt       # frozen members instead
 sbatch slurm/job.sh scripts/01_tab_temperatures.py --report_only         # rebuild the table from the cache
+
+# The table in the paper is obtained with
+sbatch slurm/job.sh scripts/01_tab_temperatures.py --duo vitb16_rn50v1 --mode no_adapt --batch_sizes 16 64 128
 ```
 
 The first command adapts both models over the 20 streams and caches their logits. Expect roughly 1 to 1.5 hours per seed on one GPU. Run the table step as a job too: the fits go over all 20 streams' logits and are slow on a CPU login node. The default is seed 0 only. `--seeds 0 1 2` adds the mean ± std over seeds, and makes the work three jobs (one per seed), which `--shard auto` can spread over a job array (see above).
@@ -121,15 +147,15 @@ The first command adapts both models over the 20 streams and caches their logits
 **Output.**
 - `out/paper/tab_temperatures__<tag>.tex`: the table.
 - `out/results/tab_temperatures/<tag>.csv`: the accuracy and NLL of every column.
-- `<tag>` is the TTA method (`tent`), or `frozen` with `--mode no_adapt`, with `_trainslice` added if `--clean_source train_slice`.
+- `<tag>` is the TTA method (`tent`), or `frozen` with `--mode no_adapt`. `_bn` is added with `--bn` (in every mode), `_trainslice` with `--clean_source train_slice`, and `__<duo>` if the duo is not the default one. For example `tab_temperatures__frozen_bn__vitb16_rn50v1.tex`.
 
 ## Script 02: tune Tent
 
 `02_tune_tta.py` finds good optimizer settings for Tent, one model at a time. Tent's only hyperparameters are the optimizer's, and the best ones differ between models, so they are tuned on the 4 held-out corruptions. Those are never test corruptions, so tuning on them does not leak into the results.
 
-**What one trial is.** One optimizer setting: Adam with a learning rate, or SGD with a learning rate and a momentum. The model is adapted over each of the 4 held-out streams in turn (severity 5, batch size 64, all 50,000 images), and reset to its original weights before each stream. The trial's score is the mean accuracy over the 4 streams. A frozen reference (no updates, test-batch statistics) is run as well, and the winner has to beat it.
+**What one trial is.** One optimizer setting: Adam with a learning rate, or SGD with a learning rate and a momentum. The model is adapted over each of the 4 held-out streams in turn (severity 5, batch size 64, all 50,000 images), and reset to its original weights before each stream. The trial's score is the mean accuracy over the 4 streams. A frozen reference (no updates) is run as well, and the winner has to beat it. For a BatchNorm model such as ResNet-50 the frozen reference is in `eval()` mode on the source statistics, or on the test batch's statistics with `--bn` (a stricter bar). The trials themselves always use batch statistics, so `--bn` changes nothing else, and the trials are reused either way.
 
-The default grid is Adam with learning rates 5e-5 to 1e-3, and SGD with learning rates 1e-4 to 1e-2 and momentum 0 or 0.9. That is 15 trials plus the reference. `--optimizers`, `--adam_lrs`, `--adam_betas`, `--sgd_lrs`, `--sgd_momentums` and `--wd` change it. If the best learning rate is the smallest or largest one tried, the script warns that the real optimum may lie outside the grid.
+The default grid is Adam with learning rates 1e-5 to 1e-3, and SGD with learning rates 1e-4 to 1e-2 and momentum 0 or 0.9. That is 15 trials plus the reference. `--optimizers`, `--adam_lrs`, `--adam_betas`, `--sgd_lrs`, `--sgd_momentums` and `--wd` change it. If the best learning rate is the smallest or largest one tried, the script warns that the real optimum may lie outside the grid.
 
 The model is any name known to `src/utils/model.py` (`resnet50`, `vit_b_16`, `convnext_tiny`, ...). The type of normalization layer that Tent adapts (BN, LN or GN) is read from the model; `--norm` overrides it.
 
@@ -138,10 +164,10 @@ The model is any name known to `src/utils/model.py` (`resnet50`, `vit_b_16`, `co
 ```bash
 sbatch slurm/job.sh scripts/02_tune_tta.py --model resnet50                              # the whole grid in one job
 sbatch --array=0-15 slurm/job.sh scripts/02_tune_tta.py --model vit_b_16 --shard auto   # one trial per array task
-sbatch slurm/job.sh scripts/02_tune_tta.py --model vit_b_16 --report_only                # rank the stored trials, write the result
+python scripts/02_tune_tta.py --model vit_b_16 --report_only                             # rank the stored trials, write the result
 ```
 
-Each trial runs 4 × 50,000 images, so for the large models use the array. A finished trial is saved on its own: if a job dies, run the same command again and only the missing trials run. When all 16 are saved, a run without `--shard` ranks them. Do not use `--num_samples` to make tuning cheaper: a learning rate that wins over a few updates is usually too large for the 780 updates of a full stream. (It is fine for a smoke test, and a capped run never writes the result.)
+Each trial runs 4 × 50,000 images, so for the large models use the array. A finished trial is saved on its own: if a job dies, run the same command again and only the missing trials run. When all 16 are saved, a run without `--shard` ranks them. That last step only reads the saved trials, so it needs no GPU and runs in seconds on the login node (as in the third command above; it loads the model once to read its norm type, so set `TORCH_HOME` as `slurm/job.sh` does, or pass `--norm LN` / `--norm BN` to skip that). Do not use `--num_samples` to make tuning cheaper: a learning rate that wins over a few updates is usually too large for the 780 updates of a full stream. (It is fine for a smoke test, and a capped run never writes the result.)
 
 **Output.**
 - `cfgs/tuned/tent__<model>.yaml`: the winning optimizer settings, plus its score and the frozen model's score. Every other script reads it: for that model and `--tta tent`, it replaces the optimizer settings in `cfgs/duos/*.yaml`. Delete the file to go back to the defaults in the duo file. The script writes it only if the winner beats the frozen model, and only from a full run.
@@ -162,7 +188,7 @@ The *duo entropy* is the entropy of that combined prediction. In every name belo
 | Independent large | The large model only | Its own entropy (plain Tent). The small model is not adapted, but still contributes to the prediction. |
 | Independent small | The small model only | Its own entropy. |
 | Independent duo | Both models | Each on its own entropy, with no signal between them. The paper's standard setting. |
-| No adaptation | Neither | The reference row: frozen weights, test-batch statistics. |
+| No adaptation | Neither | The reference row: frozen weights (BatchNorm on the source statistics, or on the test batch's with `--bn`). |
 
 **The temperatures.** The duo entropy depends on T_L and T_S, so they must exist before the run. All modes share one pair, the paper's Fixed TS: it is fitted once on the 4 held-out corruptions, using models adapted independently. It is the same fit as the "Held-out TS" column of script 01, and it reuses 01's cache. The pair is saved in `checkpoints/fixed_ts/heldout_...`. `--temps_checkpoint DIR` uses another saved pair instead.
 
@@ -180,7 +206,77 @@ sbatch slurm/job.sh scripts/03_tab_adaptation_modes.py --report_only            
 - `out/paper/tab_adaptation_modes__<tag>.tex`: accuracy per corruption, one row per mode, grouped as in the ImageNet-C paper.
 - `out/paper/tab_adaptation_modes_summary__<tag>.tex`: one row per mode with each model's accuracy under that mode, then the duo's accuracy, ECE and NLL, averaged over the 15 corruptions.
 - `out/results/tab_adaptation_modes/<tag>.csv`: the numbers behind both tables.
-- `<tag>` is the TTA method (`tent`), followed by the duo's name if it is not the default duo.
+- `<tag>` is the TTA method (`tent`), followed by the duo's name if it is not the default duo, and `_bn` with `--bn`.
+
+## Arguments of each script
+
+`python scripts/<name>.py --help` always shows the live list. Giving a script a flag it does not take is an error (for example `--duo` for script 02, which works on one model).
+
+**Who takes what.** The meaning of the shared flags is in the table under [How the scripts work](#how-the-scripts-work).
+
+| Flag | 01 | 02 | 03 | `setup_check` |
+|---|---|---|---|---|
+| `--duo NAME` | default `vitb16_rn50` | no (it has `--model`) | default `vitb16_rn50` | no |
+| `--tta METHOD` | default `tent` | `tent` is the only choice | default `tent` | no |
+| `--tta_kwargs JSON` | yes | no | yes | no |
+| `--seeds` | default `0` | no (it has `--seed`, default 0) | default `0 1 2` | no |
+| `--num_samples N` | yes | yes (and the tuned file is not written) | yes | no |
+| `--bn` | yes | yes (the frozen reference) | yes | yes (with `--probe`) |
+| `--report_only` | yes | yes (ranks the stored trials) | yes | no |
+| `--shard`, `--only` | one job per seed, labelled `seed0` | one job per trial, labelled like `Adam_lr0.001_b0.9` or `frozen` | one job per (mode, seed), labelled like `joint/seed0` | no |
+| `--out DIR` | CSV folder, default `out/results/tab_temperatures` | trials and ranking, default `out/results/tune_tta/<model>__tent` | CSV folder, default `out/results/tab_adaptation_modes` | no |
+| `--global FILE` | yes | yes | yes | yes |
+| `--device` | yes | yes | yes | no |
+
+For 01 and 03 the tables go to `out/paper/` (`paths.paper`), not to `--out`, except in a capped run (`--num_samples`), which writes them to `--out`. `--global FILE` replaces `cfgs/global.yaml` for that run (the environment variable `DUO_GLOBAL_CONFIG` does the same for a whole shell).
+
+### Script 01: `01_tab_temperatures.py`
+
+| Argument | Meaning | Default |
+|---|---|---|
+| `--mode {both_indep,no_adapt}` | `both_indep`: the two models adapt independently with `--tta`. `no_adapt`: frozen models (BatchNorm on the source statistics, or on the test batch's with `--bn`). | `both_indep` |
+| `--clean_source {val,train_slice}` | What defines the "clean" row: the 50,000 validation images, or the held-out clean slice of the training set. | `val` |
+| `--batch_sizes B [B ...]` | Batch sizes of the batch-wise oracle, one table column each. | `16 128` |
+| `--steps N` | Gradient steps of the per-sample oracle. | `200` |
+
+### Script 02: `02_tune_tta.py`
+
+A trial is one combination of optimizer settings: Adam is learning rate × beta, SGD is learning rate × momentum. A trial that is already saved is reused, so enlarging a grid only runs the new combinations.
+
+| Argument | Meaning | Default |
+|---|---|---|
+| `--model NAME` | **Required.** A model name from [Models and weights](#models-and-weights), such as `resnet50_v1` or `vit_b_16`. | none |
+| `--norm {BN,LN,GN}` | The normalization layer that Tent adapts. | read from the model |
+| `--optimizers {Adam,SGD} [...]` | Which optimizer families to try. | both |
+| `--adam_lrs LR [...]` | Adam learning rates. | `1e-5 5e-5 1e-4 5e-4 1e-3` |
+| `--adam_betas B [...]` | Adam beta1 (beta2 is fixed at 0.999). | `0.9` |
+| `--sgd_lrs LR [...]` | SGD learning rates. | `1e-4 5e-4 1e-3 5e-3 1e-2` |
+| `--sgd_momentums M [...]` | SGD momentums. | `0 0.9` |
+| `--wd W` | Weight decay, for both optimizers. | `0` |
+| `--seed N` | Seed of the stream order. | `0` |
+
+Two cautions. All shards of an array, and the final ranking run, must be given the **same grid flags**: the list of trials comes from the flags, and a trial outside the list is neither run nor ranked. And `--report_only` writes the tuned file from the best trial *in the grid you pass*, so a report with a smaller grid can overwrite it with a different winner.
+
+### Script 03: `03_tab_adaptation_modes.py`
+
+| Argument | Meaning | Default |
+|---|---|---|
+| `--modes MODE [...]` | Which modes to run: `joint`, `large_anchor`, `small_anchor`, `indep_large`, `indep_small`, `indep_duo`, `frozen`. | all seven |
+| `--temps_checkpoint DIR` | Use the temperatures saved in a `JointFixedTS` checkpoint (a folder with a `config.json`) instead of fitting them on the held-out corruptions. | fit on the held-out corruptions |
+| `--temps_only` | Fit and save the temperatures, then stop. Run it once before a `--shard` array. | off |
+
+The number of array tasks is the number of modes times the number of seeds.
+
+### `setup_check.py`
+
+| Argument | Meaning | Default |
+|---|---|---|
+| `--full` | Count every ImageNet-C corruption's 50,000 files, instead of only checking the folder structure. | off |
+| `--probe N` | Also score a pretrained ResNet-50 on N images from each dataset, a check that the labels are right. It needs the archives extracted, so run it as a job. | off |
+| `--bn` | With `--probe`: run the ResNet-50 on the test batch's BatchNorm statistics instead of `eval()` mode. | off |
+| `--strict` | Count a dataset path that is not set yet as a failure, not as pending. | off |
+| `--skip-train-slice` | Skip building the list of clean training-slice files (it lists 1.28M files the first time). | off |
+| `--global FILE` | Use another global config. | `cfgs/global.yaml` |
 
 ## Checking the code
 
