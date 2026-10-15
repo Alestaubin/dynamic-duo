@@ -15,6 +15,7 @@ Vocabulary (the paper's). The duo is (z_L / T_L + z_S / T_S) / 2 throughout.
 Oracles (labels used; in-sample; upper bounds), finest last:
   Corruption-wise TS  the accuracy at T_L*, T_S*
   Batch-wise TS       (T_L, T_S) refitted on every consecutive batch of B samples, for each B asked for
+                      (one column each, the largest B first, so that the oracles get finer left to right)
   Per-sample oracle   (T_L, T_S) per sample, by gradient descent on that sample's NLL
 """
 
@@ -178,8 +179,9 @@ def render_table(df: pd.DataFrame, labels: StudyLabels, *, batch_sizes: Sequence
                  source: str) -> str:
     """The merged table: per stream T_L*, T_S*, the members, the two fixed-temperature fits and the oracles
     (corruption-wise, batch-wise for each B in `batch_sizes`, per-sample). `table_labels[0]` is the label,
-    the others are extra \\label{}s for the same table."""
-    batch_sizes = list(batch_sizes)
+    the others are extra \\label{}s for the same table. The batch-wise columns run from the largest B to the
+    smallest, whatever order `batch_sizes` is given in."""
+    batch_sizes = sorted(set(batch_sizes), reverse=True)
     nb = len(batch_sizes)
     ref = {k: tuple(float(df[f"{k}_T_{m}"].mean()) for m in "ls") for k in ("clean", "heldout")}
     num = [c for c in df.columns if c.startswith(("acc_", "nll_", "T_"))]
@@ -242,7 +244,7 @@ def add_study_args(ap) -> None:
     ap.add_argument("--clean_source", default="val", choices=["val", "train_slice"],
                     help="images that define 'clean' (default: the 50,000 validation images)")
     ap.add_argument("--batch_sizes", type=int, nargs="+", default=[16, 128], metavar="B",
-                    help="batch sizes of the batch-wise TS oracle: one column each (default: 16 128)")
+                    help="batch sizes of the batch-wise TS oracle: one column each, the largest first (default: 16 128)")
     ap.add_argument("--steps", type=int, default=200, help="gradient steps of the per-sample oracle")
 
 
@@ -360,12 +362,12 @@ if __name__ == "__main__":
     body = [l.strip() for l in t.splitlines() if l.strip().endswith("\\\\") and "&" in l]
     assert len(body) == 3 + 1 + 4 + 15 + 1, len(body)                      # 3 header rows (groups, batch title, names)
     assert body[0].count("&") == 4 and body[1].count("&") == 9 and all(l.count("&") == 10 for l in body[2:])   # 11 columns
-    assert body[2].startswith("Stream") and "$B{=}16$ & $B{=}128$ & Per-sample" in body[2]
+    assert body[2].startswith("Stream") and "$B{=}128$ & $B{=}16$ & Per-sample" in body[2], "largest B first"
     assert body[3].startswith("Clean (val)") and body[4].startswith("Speckle noise$^\\dagger$") and "pm" in body[-1]
     assert body[-1].startswith("Average (15 test)") and "--" not in t
     assert t.count("\\midrule") == 4 and "\\cmidrule(lr){9-10}" in t and "\\multicolumn{2}{c}{Batch-wise TS}" in t
     assert "\\label{tab:temperatures:tent}" in t and "\\label{tab:oracles:tent}" in t and "{tabular}{l|cc|cc|cc|cccc}" in t
-    assert "$B \\in \\{16, 128\\}$" in t and "\\begin{table*}[t]" in t and "tabcolsep}{4.5pt}" in t
+    assert "$B \\in \\{128, 16\\}$" in t and "\\begin{table*}[t]" in t and "tabcolsep}{4.5pt}" in t
     t1 = render_table(pd.DataFrame(with_seed(rows, 0, 0.0)), labels, batch_sizes=(16,), **{**kw, "frozen": True})
     body1 = [l.strip() for l in t1.splitlines() if l.strip().endswith("\\\\") and "&" in l]
     assert body1[0].count("&") == 4 and all(l.count("&") == 9 for l in body1[1:]) and "every batch of 16 consecutive samples" in t1

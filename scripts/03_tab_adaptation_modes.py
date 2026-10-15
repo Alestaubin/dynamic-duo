@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
 """
-Different ways of adapting the duo: Joint, Large anchor, Small anchor, Independent large / small / duo.
+Different ways of adapting the duo: Joint, Large / Small adapt, Independent large / small / both.
 
 Every row is scored by the same static duo (z_L / T_L + z_S / T_S) / 2, so the rows differ only in how the members'
 weights were adapted:
 
     Joint               both members minimize the entropy of the duo's combined prediction
-    Large anchor        only the large member adapts, on the duo entropy; the small one is frozen (constant logits)
-    Small anchor        only the small member adapts, on the duo entropy; the large one is frozen
+    Large adapt         only the large member adapts, on the duo entropy; the small one is frozen (constant logits)
+    Small adapt         only the small member adapts, on the duo entropy; the large one is frozen
     Independent large   Tent on the large member's own entropy; the small member is not adapted
     Independent small   Tent on the small member's own entropy; the large member is not adapted
-    Independent duo     both members run Tent on their own entropy
-    (No adaptation)     frozen weights with test-batch statistics, as the reference row
+    Independent both    both members run Tent on their own entropy
+    (No adaptation)     frozen weights (see --bn), as the reference row
 
 The temperatures T_L, T_S are the paper's Fixed TS, shared by every mode: fitted once on the 4 held-out corruptions
 pooled, on the logits of independently adapted members (the "Held-out TS" of 01_tab_temperatures.py, whose cache
 this reuses), and stored under paths.checkpoints. --temps_checkpoint DIR uses another JointFixedTS checkpoint.
-One live run per (mode, seed) over the 15 test corruptions (severity 5); each is cached, so a repeat only replays.
+One live run per (mode, seed) over the 15 test corruptions (severity 5) and the clean validation images; each stream is
+cached, so a repeat only replays (and a cache from before the clean stream existed only computes that stream).
 
     sbatch slurm/job.sh scripts/03_tab_adaptation_modes.py --temps_only                  # once: fit T_L, T_S
     sbatch --array=0-20 slurm/job.sh scripts/03_tab_adaptation_modes.py --shard auto      # one job per (mode, seed)
     python scripts/03_tab_adaptation_modes.py --report_only                               # tables from the cache
     python scripts/03_tab_adaptation_modes.py --modes joint indep_duo --seeds 0 --num_samples 2000   # smoke test
 
-Writes <paths.paper>/tab_adaptation_modes__<tag>.tex (accuracy per corruption, one row per mode),
+Writes <paths.paper>/tab_adaptation_modes__<tag>.tex (accuracy per corruption: the duo under each mode, and each
+member alone adapting on its own entropy / frozen; a Clean column that is not part of Avg.),
 tab_adaptation_modes_summary__<tag>.tex (members' accuracy under each mode, duo accuracy / ECE / NLL, averaged over
-the corruptions) and <paths.out>/results/tab_adaptation_modes/<tag>.csv. <tag> is the TTA method (plus the duo name
+the corruptions) and <paths.out>/results/tab_adaptation_modes/<tag>.csv (every stream, clean included). <tag> is the TTA method (plus the duo name
 unless it is the default duo). A capped run (--num_samples) writes its tables to the results folder instead.
 """
 
@@ -70,8 +72,10 @@ def main() -> int:
     df = pd.DataFrame(AM.duo_rows(jobs, ctx, temps))
     tag = AM.output_tag(args, ap.get_default("duo"))
     save_rows(out / f"{tag}.csv", df)
-    print(per_seed_average(df.assign(series=df["mode"] + "/" + df["series"]))
-          .groupby("series")["accuracy"].mean().mul(100).round(2).to_string())
+    corruptions, clean = AM.split_clean(df)
+    mean_acc = lambda d: (per_seed_average(d.assign(series=d["mode"] + "/" + d["series"]))     # noqa: E731
+                          .groupby("series")["accuracy"].mean().mul(100).round(2))
+    print(pd.DataFrame({"avg": mean_acc(corruptions), "clean": mean_acc(clean)}).to_string())
 
     dest = out if args.num_samples else ctx.g.path("paper")       # a capped run (smoke test) must not overwrite the paper's
     source = "scripts/03_tab_adaptation_modes.py"

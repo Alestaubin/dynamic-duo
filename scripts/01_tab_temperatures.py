@@ -9,7 +9,7 @@ For clean validation, the 4 held-out corruptions and the 15 ImageNet-C test corr
     Clean TS       accuracy with the temperatures fitted on clean data
     Held-out TS    accuracy with the temperatures fitted on the 4 held-out corruptions pooled ("Fixed TS")
     Corr.-wise     accuracy at the stream's own optimum T_L*, T_S* (oracle: labels, in-sample)
-    Batch-wise     (T_L, T_S) refitted on every consecutive batch of B samples, one column per --batch_sizes
+    Batch-wise     (T_L, T_S) refitted on every consecutive batch of B samples, one column per --batch_sizes (largest B first)
     Per-sample     (T_L, T_S) fitted on each sample by gradient descent: the ceiling
 
 The last row averages the 15 test corruptions. Duo = (z_L / T_L + z_S / T_S) / 2. The members' logits come from

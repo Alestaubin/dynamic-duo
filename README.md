@@ -84,7 +84,7 @@ Array indices must be `0..N-1`. A shard only fills the cache and exits. When you
 - without `--bn`, a frozen BatchNorm model is put in the usual `eval()` mode and uses the statistics it was trained with (the source statistics);
 - with `--bn`, it uses the statistics of each test batch instead. This usually helps on corrupted images, so it is the stricter baseline.
 
-LayerNorm models (ViT, DeiT, Swin) have no running statistics, so for them `--bn` changes nothing. The flag only has an effect where something is frozen: the frozen runs of script 01, the frozen reference of script 02, and in script 03 the frozen reference row and the model that is not adapted in the anchor and single-model modes. Every output file made with `--bn` gets a `_bn` in its name, in every mode, so the two settings never overwrite each other. All frozen runs and caches made before this flag existed used the test batch's statistics: they are the `--bn` runs, and `--bn` reuses them.
+LayerNorm models (ViT, DeiT, Swin) have no running statistics, so for them `--bn` changes nothing. The flag only has an effect where something is frozen: the frozen runs of script 01, the frozen reference of script 02, and in script 03 the frozen reference rows and the model that is not adapted in the Large / Small adapt and Independent large / small modes. Every output file made with `--bn` gets a `_bn` in its name, in every mode, so the two settings never overwrite each other. All frozen runs and caches made before this flag existed used the test batch's statistics: they are the `--bn` runs, and `--bn` reuses them.
 
 **Running a script as a job.** `slurm/job.sh` takes the script and its arguments. It loads the modules, checks that the GPU is usable, and runs the script. Output goes to `logs/<jobid>_<name>.out` and `.err`. Options you give to `sbatch` override the defaults at the top of the file:
 
@@ -104,7 +104,7 @@ On this cluster the login node kills processes above 5 GB of memory, so run anyt
 |---|---|
 | `01_tab_temperatures.py` | Which temperatures Fixed TS should use, and how much better temperature scaling could possibly be. |
 | `02_tune_tta.py --model NAME` | Tunes Tent's optimizer settings for one model on the 4 held-out corruptions, and writes `cfgs/tuned/`. |
-| `03_tab_adaptation_modes.py` | Six ways of adapting the duo (joint, anchors, independent), all scored with the same Fixed TS. |
+| `03_tab_adaptation_modes.py` | Six ways of adapting the duo (joint, one model adapting, independent), all scored with the same Fixed TS. |
 | `setup_check.py` | Checks the dataset paths and the config. |
 
 Later scripts (`08` onwards, the main results) are planned in `plan.md`.
@@ -126,7 +126,7 @@ Later scripts (`08` onwards, the main results) are planned in `plan.md`.
 | Clean TS | Accuracy with temperatures fitted on clean data. |
 | Held-out TS | Accuracy with temperatures fitted on the 4 held-out corruptions. This is the paper's Fixed TS. |
 | Corr.-wise | Oracle: the temperatures `T_L*`, `T_S*` fitted on the stream itself. |
-| Batch-wise, `B=16`, `B=128` | Oracle: temperatures refitted on every consecutive batch of B samples (`--batch_sizes` sets the sizes). |
+| Batch-wise, `B=128`, `B=16` | Oracle: temperatures refitted on every consecutive batch of B samples (`--batch_sizes` sets the sizes; the columns run from the largest B to the smallest). |
 | Per-sample | Oracle: temperatures fitted on each single sample. The ceiling. |
 
 The oracles use the labels and are fitted on the same data they are scored on, so they are upper bounds and not methods.
@@ -183,11 +183,11 @@ The *duo entropy* is the entropy of that combined prediction. In every name belo
 | Mode | Who adapts | On which loss |
 |---|---|---|
 | Joint | Both models | The duo entropy, backpropagated through both models together. |
-| Large anchor | The large model only | The duo entropy. The small model is frozen, and its logits are a constant in the loss. |
-| Small anchor | The small model only | The duo entropy. The large model is frozen. |
+| Large adapt | The large model only | The duo entropy. The small model is frozen, and its logits are a constant in the loss. |
+| Small adapt | The small model only | The duo entropy. The large model is frozen. |
 | Independent large | The large model only | Its own entropy (plain Tent). The small model is not adapted, but still contributes to the prediction. |
 | Independent small | The small model only | Its own entropy. |
-| Independent duo | Both models | Each on its own entropy, with no signal between them. The paper's standard setting. |
+| Independent both | Both models | Each on its own entropy, with no signal between them. The paper's standard setting. |
 | No adaptation | Neither | The reference row: frozen weights (BatchNorm on the source statistics, or on the test batch's with `--bn`). |
 
 **The temperatures.** The duo entropy depends on T_L and T_S, so they must exist before the run. All modes share one pair, the paper's Fixed TS: it is fitted once on the 4 held-out corruptions, using models adapted independently. It is the same fit as the "Held-out TS" column of script 01, and it reuses 01's cache. The pair is saved in `checkpoints/fixed_ts/heldout_...`. `--temps_checkpoint DIR` uses another saved pair instead.
@@ -200,12 +200,15 @@ sbatch --array=0-20 slurm/job.sh scripts/03_tab_adaptation_modes.py --shard auto
 sbatch slurm/job.sh scripts/03_tab_adaptation_modes.py --report_only                 # build the tables from the cache
 ```
 
-`--modes joint indep_duo ...` runs only some modes (then the array has `modes × seeds` tasks), and `--seeds` changes the seeds. The mode names are `joint`, `large_anchor`, `small_anchor`, `indep_large`, `indep_small`, `indep_duo` and `frozen`. The independent-duo and no-adaptation runs are the same runs as in script 01, so they are read from the cache when the settings match. As a rough estimate, the 21 runs take about 9 GPU-hours on an H100.
+`--modes joint indep_duo ...` runs only some modes (then the array has `modes × seeds` tasks), and `--seeds` changes the seeds. The mode names are `joint`, `large_anchor`, `small_anchor`, `indep_large`, `indep_small`, `indep_duo` and `frozen`. The independent-both and no-adaptation runs are the same runs as in script 01, so they are read from the cache when the settings match. As a rough estimate, the 21 runs take about 9 GPU-hours on an H100.
+
+Every run also visits the clean validation images (the 50,000 images ImageNet-C is rendered from), like one more corruption. A cache from before this existed only computes that one stream per run, since the corruption caches keep their keys.
 
 **Output.**
-- `out/paper/tab_adaptation_modes__<tag>.tex`: accuracy per corruption, one row per mode, grouped as in the ImageNet-C paper.
+- `out/paper/tab_adaptation_modes__<tag>.tex`: accuracy per corruption, grouped as in the ImageNet-C paper, with the group of each row (Duo entropy / Own entropy / Reference) as a heading and no standard deviations in the cells (the caption gives their maximum). Besides the duo under each mode it has rows for the members alone: *Large / Small adapt* under Own entropy (the large model of the Independent large run, the small model of the Independent small run, each scored without the duo) and *Large / Small frozen* under Reference. A *Clean* column holds the accuracy on the clean validation images; it is not part of *Avg.*, which is the mean over the 15 corruptions.
 - `out/paper/tab_adaptation_modes_summary__<tag>.tex`: one row per mode with each model's accuracy under that mode, then the duo's accuracy, ECE and NLL, averaged over the 15 corruptions.
-- `out/results/tab_adaptation_modes/<tag>.csv`: the numbers behind both tables.
+- `out/results/tab_adaptation_modes/<tag>.csv`: the numbers behind both tables (clean stream included, as segment `clean`).
+- Both tables' captions list the hyperparameters of the adapting models: the batch size and each model's optimizer with all its parameters, read from the duo config after `cfgs/tuned/` is applied (the values the cached logits were made with).
 - `<tag>` is the TTA method (`tent`), followed by the duo's name if it is not the default duo, and `_bn` with `--bn`.
 
 ## Arguments of each script
@@ -236,7 +239,7 @@ For 01 and 03 the tables go to `out/paper/` (`paths.paper`), not to `--out`, exc
 |---|---|---|
 | `--mode {both_indep,no_adapt}` | `both_indep`: the two models adapt independently with `--tta`. `no_adapt`: frozen models (BatchNorm on the source statistics, or on the test batch's with `--bn`). | `both_indep` |
 | `--clean_source {val,train_slice}` | What defines the "clean" row: the 50,000 validation images, or the held-out clean slice of the training set. | `val` |
-| `--batch_sizes B [B ...]` | Batch sizes of the batch-wise oracle, one table column each. | `16 128` |
+| `--batch_sizes B [B ...]` | Batch sizes of the batch-wise oracle, one table column each (largest first, whatever order you give). | `16 128` |
 | `--steps N` | Gradient steps of the per-sample oracle. | `200` |
 
 ### Script 02: `02_tune_tta.py`

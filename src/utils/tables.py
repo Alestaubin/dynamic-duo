@@ -104,19 +104,26 @@ def _split(segment: str) -> tuple[str, str | None]:
 def corruption_table(
     df: pd.DataFrame, rows: Sequence[tuple[str, Sequence[tuple[str, str]]]], families: dict[str, Sequence[str]], *,
     value: str = "accuracy", caption: str, label: str, std: bool = True, decimals: int = 1, pct: bool = True,
-    star: bool = True, source: str = "",
+    star: bool = True, source: str = "", clean: str | None = None, group_rows: bool = False,
+    tabcolsep: float | None = None,
 ) -> str:
     """Per-corruption table in the ImageNet-C paper's layout: columns grouped by family, a trailing Avg.
 
     df    tidy rows with columns segment ("fog/s5" or "fog"), series, seed and `value`.
     rows  [(group label, [(series key, display label), ...]), ...], e.g.
-          [("Models", [("large", "ViT-B/16"), ("small", "ResNet-50")]), ("Gates", [("fixed", "Fixed TS"), ...])]
+          [("Models", [("large", "ViT-B/16"), ("small", "ResNet-50")]), ("Gates", [("ours", "Ours (nuclear_norm)")])]
     families  {"noise": [...], "blur": [...], ...} in column order (GlobalConfig.corruption_families); only
           corruptions present in df get a column, and a family with none is dropped.
+    clean  segment label of a clean-data stream (e.g. "clean"): it gets its own "Clean" column, left of the
+          corruptions, and is NOT part of Avg. Rows of df with that segment never become a corruption column.
+    group_rows  False: a leading \\multirow "Group" column. True: no such column; each group is a full-width
+          \\textit row above its members, which are indented by \\quad, under a single "Method" column.
+    tabcolsep  (pt) a tighter column gap, for a wide table.
     """
     df = df.copy()
     df["_base"] = df["segment"].map(lambda s: _split(s)[0])
-    present = set(df["_base"])
+    clean_base = _split(clean)[0] if clean else None
+    present = set(df["_base"]) - {clean_base}
     columns = [(fam, c) for fam, cs in families.items() for c in cs if c in present]
     extra = sorted(present - {c for _, c in columns})
     if extra:
@@ -128,44 +135,52 @@ def corruption_table(
         d = df[df["series"] == series].groupby(["seed", "_base"])[value].mean().unstack("_base")
         return d.reindex(index=seeds, columns=[c for _, c in columns])
 
-    body_rows, group_sizes = [], []
+    def summarise(v: pd.Series) -> str:                    # mean (and std) over seeds of one cell
+        v = v.dropna()
+        return fmt_cell(v.mean() if len(v) else float("nan"), v.std(ddof=1) if std and len(v) > 1 else None,
+                        decimals, pct)
+
+    body_rows = []
     for group, members in rows:
-        group_sizes.append(len(members))
         for key, name in members:
             v = per_seed_values(key)
-            avg = v.mean(axis=1, skipna=True)                # Avg. is taken per seed, then summarised over seeds
-            cells = []
-            for c in v.columns:
-                col = v[c].dropna()
-                cells.append(fmt_cell(col.mean() if len(col) else float("nan"),
-                                      col.std(ddof=1) if std and len(col) > 1 else None, decimals, pct))
-            avg_ok = avg.dropna()
-            cells.append(fmt_cell(avg_ok.mean() if len(avg_ok) else float("nan"),
-                                  avg_ok.std(ddof=1) if std and len(avg_ok) > 1 else None, decimals, pct))
-            body_rows.append((group, name, cells))
+            cells = [summarise(v[c]) for c in v.columns]
+            cells.append(summarise(v.mean(axis=1, skipna=True)))   # Avg. is taken per seed, then summarised over seeds
+            if clean_base:
+                cl = df[(df["series"] == key) & (df["_base"] == clean_base)].groupby("seed")[value].mean()
+                cells.insert(0, summarise(cl.reindex(seeds)))
+            body_rows.append((name, cells))
 
-    n_cols = len(columns)
-    spec = "ll|" + "|".join("c" * sum(1 for f, _ in columns if f == fam) for fam in fam_order) + "|c"
-    cursor, cmid, fam_cells = 3, [], []
+    n_lead = 1 if group_rows else 2                         # label columns before the data
+    n_data = len(columns) + 1 + (1 if clean_base else 0)    # corruptions, Avg., Clean
+    spec = ("l|" if group_rows else "ll|") + ("c|" if clean_base else "") \
+        + "|".join("c" * sum(1 for f, _ in columns if f == fam) for fam in fam_order) + "|c"
+    cursor, cmid, fam_cells = n_lead + 1 + (1 if clean_base else 0), [], []
     for fam in fam_order:
         n = sum(1 for f, _ in columns if f == fam)
         fam_cells.append(f"\\multicolumn{{{n}}}{{c}}{{{latex_escape(fam.capitalize())}}}")
         cmid.append(f"\\cmidrule(lr){{{cursor}-{cursor + n - 1}}}")
         cursor += n
-    body = ["& & " + " & ".join(fam_cells) + " & \\\\", "".join(cmid),
-            "Group & Method & " + " & ".join(latex_escape(ABBREV.get(c, c)) for _, c in columns) + " & Avg. \\\\",
+    n_blank = n_lead + (1 if clean_base else 0)             # label columns (and Clean) have no family above them
+    body = ["& " * n_blank + " & ".join(fam_cells) + " & \\\\", "".join(cmid),
+            " & ".join(["Method" if group_rows else "Group & Method", *(["Clean"] if clean_base else []),
+                        *(latex_escape(ABBREV.get(c, c)) for _, c in columns), "Avg."]) + " \\\\",
             "\\midrule"]
     i = 0
     for gi, (group, members) in enumerate(rows):
+        if group_rows:
+            body.append(f"\\multicolumn{{{n_lead + n_data}}}{{l}}{{\\textit{{{latex_escape(group)}}}}} \\\\")
         for j in range(len(members)):
-            g_cell = f"\\multirow{{{len(members)}}}{{*}}{{\\textit{{{latex_escape(group)}}}}}" if j == 0 else ""
-            _, name, cells = body_rows[i]
-            body.append(f"{g_cell} & {latex_escape(name)} & " + " & ".join(cells) + " \\\\")
+            name, cells = body_rows[i]
+            if group_rows:
+                body.append(f"\\quad {latex_escape(name)} & " + " & ".join(cells) + " \\\\")
+            else:
+                g_cell = f"\\multirow{{{len(members)}}}{{*}}{{\\textit{{{latex_escape(group)}}}}}" if j == 0 else ""
+                body.append(f"{g_cell} & {latex_escape(name)} & " + " & ".join(cells) + " \\\\")
             i += 1
         if gi < len(rows) - 1:
             body.append("\\midrule")
-    del n_cols
-    return table_env(body, spec, caption, label, star=star, source=source)
+    return table_env(body, spec, caption, label, star=star, source=source, tabcolsep=tabcolsep)
 
 
 def write_table(path: str | Path, text: str) -> Path:
@@ -216,9 +231,27 @@ if __name__ == "__main__":
                         caption="Proxies.", label="tab:proxies", midrule_before=[1], star=False)
     assert plain.count("\\midrule") == 2 and "\\begin{table}[t]" in plain and "Gate input & Avg. & Order" in plain
 
+    # group_rows + clean + no std: groups are full-width rows, Clean is its own column and not part of Avg.
+    cdf = pd.concat([df, pd.DataFrame([{"seed": sd, "segment": "clean", "series": se, "accuracy": a}
+                                       for sd in (0, 1, 2) for se, a in (("large", 0.80), ("small", 0.70), ("ours", 0.90))])])
+    ctex = corruption_table(cdf, rows, fam, caption="c.", label="tab:c", std=False, clean="clean", group_rows=True,
+                            tabcolsep=3.5)
+    cl = [l.strip() for l in ctex.splitlines()]
+    assert next(l for l in cl if l.startswith("\\begin{tabular}")) == "\\begin{tabular}{l|c|c|cc|c|c}", cl
+    assert "\\setlength{\\tabcolsep}{3.5pt}" in ctex and "Group" not in ctex and "\\multirow{" not in ctex
+    assert next(l for l in cl if l.startswith("Method")) == "Method & Clean & Gauss. & Fog & Snow & Contrast & Avg. \\\\"
+    assert "& & \\multicolumn{1}{c}{Noise} & \\multicolumn{2}{c}{Weather} & \\multicolumn{1}{c}{Digital} & \\\\" in ctex
+    assert "\\cmidrule(lr){3-3}\\cmidrule(lr){4-5}\\cmidrule(lr){6-6}" in ctex, "family rules start after the Clean column"
+    assert "\\multicolumn{7}{l}{\\textit{Models}} \\\\" in cl and "\\multicolumn{7}{l}{\\textit{Gates}} \\\\" in cl
+    ours = next(l for l in cl if l.startswith("\\quad Ours")).rstrip(" \\").split("&")
+    assert ours[1].strip() == "90.0" and "pm" not in "".join(ours), "Clean column; std switched off"
+    avg_plain = next(l for l in tex.splitlines() if "Ours" in l).rstrip(" \\").split("&")[-1].split("{")[0].strip()
+    assert ours[-1].strip() == avg_plain, "Avg. ignores the clean stream"
+    assert all(l.count("&") == 6 for l in cl if l.startswith("\\quad"))
+
     if shutil.which("pdflatex"):
         doc = ("\\documentclass{article}\\usepackage{booktabs,multirow,graphicx}\\usepackage[landscape]{geometry}"
-               "\\begin{document}\n" + tex + "\n" + plain + "\\end{document}\n")
+               "\\begin{document}\n" + tex + "\n" + plain + "\n" + ctex + "\\end{document}\n")
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "t.tex").write_text(doc.replace("table*", "table"))
             r = subprocess.run(["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "t.tex"], cwd=tmp,
