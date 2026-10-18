@@ -23,6 +23,12 @@ from typing import Any
 # segments the run visits, so runs that differ only in the segment list share one cache directory.
 INDEPENDENT_PROTOCOLS = ("episodic", "tuning", "natural")
 
+# The input pipeline of ImageNet-C and CCC streams, part of every cache key those streams enter. The images are 224x224
+# already, and since "native224" they reach the models without the models' Resize(256) (ShiftDataset.input_transform;
+# before, every stream was zoomed by 14%). The natural shifts and the clean images keep the models' own transform and
+# their keys, so only the streams whose logits changed were invalidated.
+INPUTS_TAG = "native224"
+
 # Modes whose adaptation loss is the entropy of a STATIC duo (both members' logits combined by a fixed
 # calibrator) instead of each member's own entropy. The calibrator sits inside the adaptation loop, so its
 # temperatures change the members' logits and are part of the spec (`loop_ts`).
@@ -97,6 +103,8 @@ class RunSpec:
             "batch_size": batch_size,
             "objective_logits": objective_logits,
         }
+        if self.protocol != "natural":  # ImageNet-C / CCC streams: the natural shifts keep the key they always had
+            payload["inputs"] = INPUTS_TAG
         if self.mode in DUO_MODES:      # only here, so every existing (independent-mode) cache keeps its key
             payload["loop_ts"] = list(self.loop_ts)
         # Only a run whose logits depend on it, and only for the non-default value: every cache made before the

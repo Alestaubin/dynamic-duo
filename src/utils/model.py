@@ -1,6 +1,8 @@
 import torchvision.models as models
 from torchvision import transforms
 
+IMAGENET_MEAN, IMAGENET_STD = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+
 def get_model(model_name, freeze=True, verbose=True):
     """
     Dispatcher function to load models by name.
@@ -17,6 +19,8 @@ def get_model(model_name, freeze=True, verbose=True):
         model, preprocess = load_vit_b_16_augreg(verbose=verbose)
     elif model_name == "vit_b_16_augreg2":
         model, preprocess = load_vit_b_16_augreg2(verbose=verbose)
+    elif model_name == "vit_b_16_sar":
+        model, preprocess = load_vit_b_16_sar(verbose=verbose)
     elif model_name == "resnet18":
         model, preprocess = load_resnet18(verbose=verbose)
     elif model_name == "resnet34":
@@ -160,6 +164,23 @@ def load_vit_b_16_augreg2(verbose=True):
     """
     return _load_timm_vit_b_16("augreg2_in21k_ft_in1k", verbose)
 
+def load_vit_b_16_sar(verbose=True):
+    """
+    The ViT-Base-LN of SAR (github.com/mr-eggplant/SAR, requirements `timm==0.6.11`): `timm.create_model(
+    'vit_base_patch16_224', pretrained=True)`, which in timm 0.6.11 is the AugReg checkpoint `augreg_in21k_ft_in1k`
+    (its default_cfg points at B_16-i21k-300ep-...-imagenet2012-steps_20k-lr_0.01-res_224.npz), so the weights are
+    those of `vit_b_16_augreg`. What differs is the input: SAR feeds every model ImageNet mean/std (dataset/
+    selectedRotateImageFolder.py's `normalize`), although these weights were trained with 0.5 / 0.5. That mismatch is
+    part of the published numbers (SAR's no-adapt ViT: Gauss. 9.5, Contrast 44.1, Avg. 29.9), so it is kept here to
+    stay comparable with SAR, EATA and DeYO; `vit_b_16_augreg` is the same network with its own normalization.
+    The pipeline is SAR's `te_transforms` (Resize(256), CenterCrop(224), ToTensor, normalize), for clean images; for
+    ImageNet-C `native_224` drops the first two, which is SAR's `te_transforms_imageC`.
+    """
+    model, _ = _load_timm_vit_b_16("augreg_in21k_ft_in1k", verbose)
+    preprocess = transforms.Compose([transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(),
+                                     transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)])
+    return model, preprocess
+
 def load_resnet50_v1(verbose=True):
     """
     Loads ResNet-50 with the ORIGINAL torchvision weights (IMAGENET1K_V1, 76.1% top-1), the ones the Tent paper,
@@ -277,3 +298,50 @@ def load_resnext50(verbose=True):
 import torch
 def _preprocess_batch(imgs, preprocess, device):
     return torch.stack([preprocess(img) for img in imgs]).to(device)
+
+
+def native_224(preprocess):
+    """`preprocess` for images that are ALREADY 224x224 centre crops (ImageNet-C and CCC, `ShiftDataset.already_224`):
+    the same pipeline without its Resize and CenterCrop, so the pixels reach the model as the benchmark made them
+    (what the Tent, EATA, SAR and DeYO code do: `te_transforms_imageC`, CenterCrop(224) which is the identity on
+    224px images). A model's own transform (Resize(256) + CenterCrop(224), timm: Resize(248) + ...) would zoom into
+    the central 80-87% of such an image, which costs Tent on ResNet-50 7 points on ImageNet-C. The normalization is the
+    model's own. Raises when `preprocess` has a resize or crop it cannot strip, rather than zooming silently."""
+    if isinstance(preprocess, transforms.Compose):
+        kept = [t for t in preprocess.transforms if not isinstance(t, (transforms.Resize, transforms.CenterCrop))]
+        left = [type(t).__name__ for t in kept if "Resize" in type(t).__name__ or "Crop" in type(t).__name__]
+        if left:
+            raise ValueError(f"native_224 cannot strip {left} from {preprocess}")
+        return transforms.Compose(kept)
+    if all(hasattr(preprocess, a) for a in ("resize_size", "crop_size", "mean", "std")):   # torchvision Weights.transforms()
+        return transforms.Compose([transforms.ToTensor(), transforms.Normalize(preprocess.mean, preprocess.std)])
+    raise ValueError(f"native_224 does not know how to strip the resize from {preprocess!r}")
+
+
+if __name__ == "__main__":
+    # No weights are downloaded: only the transforms are built.
+    from PIL import Image
+    import numpy as np
+
+    img = Image.fromarray(np.random.RandomState(0).randint(0, 256, (224, 224, 3), dtype=np.uint8))
+    norm = lambda mean, std: transforms.Compose([transforms.ToTensor(), transforms.Normalize(mean, std)])   # noqa: E731
+
+    # torchvision: Resize(256) + CenterCrop(224) zooms; the native pipeline is ToTensor + Normalize on the pixels as given
+    for w in (models.ResNet50_Weights.IMAGENET1K_V1, models.ViT_B_16_Weights.DEFAULT):
+        pre = w.transforms()
+        assert not torch.allclose(pre(img), norm(pre.mean, pre.std)(img), atol=1e-3), "the default pipeline does zoom"
+        assert torch.equal(native_224(pre)(img), norm(pre.mean, pre.std)(img))
+    # a Compose (timm, SAR): Resize and CenterCrop go, ToTensor and Normalize stay, in order
+    timm_like = transforms.Compose([transforms.Resize(248), transforms.CenterCrop(224), transforms.ToTensor(),
+                                    transforms.Normalize((0.5,) * 3, (0.5,) * 3)])
+    assert torch.equal(native_224(timm_like)(img), norm((0.5,) * 3, (0.5,) * 3)(img))
+    sar = transforms.Compose([transforms.Resize(256), transforms.CenterCrop(224), transforms.ToTensor(),
+                              transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD)])
+    assert torch.equal(native_224(sar)(img), norm(IMAGENET_MEAN, IMAGENET_STD)(img)), "SAR's te_transforms_imageC"
+    for unstrippable in (transforms.Compose([transforms.RandomResizedCrop(224), transforms.ToTensor()]), object()):
+        try:
+            native_224(unstrippable)
+            raise AssertionError("a resize that cannot be stripped must raise")
+        except ValueError:
+            pass
+    print("model self-test passed")

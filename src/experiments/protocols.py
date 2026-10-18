@@ -115,7 +115,12 @@ if __name__ == "__main__":
     assert base == RunSpec("d").fingerprint(duo, 64, "masked")
     # independent segments share a cache whatever segment list a run asks for ...
     assert base == RunSpec("d", protocol_args={"corruptions": ["fog"], "clean": "val"}).fingerprint(duo, 64, "masked")
-    assert base == RunSpec("d", protocol="natural", protocol_args={"dataset": "imagenet_r"}).fingerprint(duo, 64, "masked")
+    assert base == RunSpec("d", protocol="tuning").fingerprint(duo, 64, "masked")
+    # ... except the natural shifts: they never went through the ImageNet-C input pipeline (no resize since "native224"),
+    # so their caches keep the key they had before it; every ImageNet-C / CCC key moved
+    nat = RunSpec("d", protocol="natural", protocol_args={"dataset": "imagenet_r"}).fingerprint(duo, 64, "masked")
+    assert nat == "e0ec2ee19e0c" and nat != base, "natural-shift caches predate the input-pipeline tag and stay valid"
+    assert RunSpec("d", protocol="continual", protocol_args={"order": 0}).fingerprint(duo, 64, "masked") != nat
     assert RunSpec("d").cache_tag == RunSpec("d", protocol="tuning").cache_tag == "independent"
     # ... but a continual stream is a different run per order, and never shares with independent ones
     c0 = RunSpec("d", protocol="continual", protocol_args={"order": 0})
@@ -127,7 +132,7 @@ if __name__ == "__main__":
     assert base != RunSpec("d").fingerprint(duo, 32, "masked")
     assert base != RunSpec("d").fingerprint({**duo, "LARGE": {"NAME": "a", "OPTIM": {"LR": 2e-4}}}, 64, "masked")
     # the key of an independent-mode run is pinned: changing it orphans every member-logit cache on disk
-    assert base == "e0ec2ee19e0c", f"fingerprint payload changed: every cache under cache/members is now unreachable ({base})"
+    assert base == "b0b70ed382d7", f"fingerprint payload changed: every cache under cache/members is now unreachable ({base})"
     # duo-entropy modes: the static duo's temperatures are part of the key (they change what the members learn)
     j = RunSpec("d", mode="both_duo", loop_ts=(1.4, 0.9)).fingerprint(duo, 64, "masked")
     assert j != base and j != RunSpec("d", mode="both_duo", loop_ts=(1.5, 0.9)).fingerprint(duo, 64, "masked")
@@ -145,6 +150,6 @@ if __name__ == "__main__":
     assert fp("both_indep", False) == fp("both_indep", True), "nothing frozen: the flag is irrelevant"
     assert fp("small_indep", False) == fp("small_indep", True), "the frozen member is LayerNorm: irrelevant"
     assert fp("large_indep", False) != fp("large_indep", True) and fp("no_adapt", False) != fp("no_adapt", True)
-    assert RunSpec("d", mode="no_adapt").fingerprint(duo_bn, 64, "masked", True) == "604ae09b16a9", \
+    assert RunSpec("d", mode="no_adapt").fingerprint(duo_bn, 64, "masked", True) == "f609c5ff6bf6", \
         "bn=True must stay the pre-flag key of frozen runs"
     print("protocols self-test passed")

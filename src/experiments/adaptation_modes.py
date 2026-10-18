@@ -17,11 +17,18 @@ the table differ only in how the members' weights were adapted. The modes (the m
 The right-hand names are the engine's modes (src/experiments/members.py). One live run per (mode, seed) caches both
 members' logits (src/experiments/cache.py); the duo's accuracy is a replay of the fixed combination on them.
 
-The per-corruption table has one row per (mode, prediction) pair (ROWS): next to the duo rows it lists the members
-ALONE under the modes that adapt them on their own entropy (Large / Small adapt in "Own entropy": the large member of
-the Independent large run, the small member of the Independent small run) and frozen (Large / Small frozen, from the
-No adaptation run). A "clean" stream (the ImageNet validation images the corruptions are rendered from) is run like
-any corruption and shown in its own Clean column; it is never part of Avg. nor of the summary table's averages.
+The per-corruption table has one row per (mode, prediction) pair (ROWS), in four sections named by what is scored and
+which entropy the adapting models minimize:
+
+  Frozen                              Large, Small, Duo                 from the No adaptation run
+  Single model, own entropy (Tent)    Large / Small adapts              the large member of the Independent large run,
+                                                                        the small member of the Independent small run
+  Duo, own entropy                    Large / Small / Both adapt        the duo of Independent large / small / both
+  Duo, duo entropy                    Large / Small / Both adapt        the duo of Large / Small adapt / Joint
+
+The summary table instead has one row per mode, named by MODES. A "clean" stream (the ImageNet validation images the
+corruptions are rendered from) is run like any corruption and shown in its own Clean column of the per-corruption
+table; it is never part of Avg. nor of the summary table's averages.
 
 Temperatures. The duo entropy of the first three modes depends on T_L and T_S, so they must exist before the run.
 All modes share one pair, the paper's Fixed TS: fitted on the 4 held-out corruptions pooled, on the logits of the
@@ -75,33 +82,31 @@ assert {m.engine for m in MODES if m.group == "Duo entropy"} == set(DUO_MODES)
 
 @dataclass(frozen=True)
 class Row:
-    """One row of the per-corruption table: the prediction `series` of the run of mode `mode`. The row's group is the
-    mode's; `label` defaults to the mode's (a duo row), a member-alone row names itself."""
+    """One row of the per-corruption table: the prediction `series` of the run of mode `mode`, listed under the
+    section `group` as `label`. A section is the pair (what is scored, which entropy is minimized), so one mode can
+    feed rows of two sections (Independent large: its large member alone, and the duo that combines the two)."""
     mode: str
     series: str       # "duo": the static duo's prediction; "large" / "small": that member's own
-    label: str | None = None
+    group: str
+    label: str
 
     @property
     def key(self) -> str:                       # the series of _with_mode_series
         return f"{self.mode}/{self.series}"
 
-    @property
-    def name(self) -> str:
-        return self.label or MODE_BY_KEY[self.mode].label
 
-    @property
-    def group(self) -> str:
-        return MODE_BY_KEY[self.mode].group
-
-
+FROZEN, SINGLE, OWN, DUO = "Frozen", "Single model, own entropy ({method})", "Duo, own entropy", "Duo, duo entropy"
 ROWS = (
-    Row("joint", "duo"), Row("large_anchor", "duo"), Row("small_anchor", "duo"),
-    Row("indep_large", "large", "Large adapt"), Row("indep_small", "small", "Small adapt"),
-    Row("indep_large", "duo"), Row("indep_small", "duo"), Row("indep_duo", "duo"),
-    Row("frozen", "large", "Large frozen"), Row("frozen", "small", "Small frozen"), Row("frozen", "duo"),
+    Row("frozen", "large", FROZEN, "Large"), Row("frozen", "small", FROZEN, "Small"), Row("frozen", "duo", FROZEN, "Duo"),
+    Row("indep_large", "large", SINGLE, "Large adapts"), Row("indep_small", "small", SINGLE, "Small adapts"),
+    Row("indep_large", "duo", OWN, "Large adapts"), Row("indep_small", "duo", OWN, "Small adapts"),
+    Row("indep_duo", "duo", OWN, "Both adapt (Independent)"),
+    Row("large_anchor", "duo", DUO, "Large adapts"), Row("small_anchor", "duo", DUO, "Small adapts"),
+    Row("joint", "duo", DUO, "Both adapt (Joint)"),
 )
-assert all(r.mode in MODE_BY_KEY for r in ROWS) and [r.group for r in ROWS] == sorted(
-    (r.group for r in ROWS), key=[m.group for m in MODES].index), "a group's rows are contiguous, in MODES order"
+_SECTIONS = [r.group for r in ROWS]
+assert all(r.mode in MODE_BY_KEY for r in ROWS) and len({r.key for r in ROWS}) == len(ROWS)
+assert _SECTIONS == sorted(_SECTIONS, key=_SECTIONS.index), "a section's rows are contiguous"
 
 CLEAN = "clean"      # label of the clean-validation stream (protocols.py); shown as the Clean column, never averaged
 
@@ -158,7 +163,7 @@ def resolve_temperatures(ctx: Context, spec: RunSpec, checkpoint: str | None = N
         return Temps(folder, tl, ts, f"taken from the checkpoint \\texttt{{{latex_escape(folder.name)}}}")
     fp = spec.fingerprint(ctx.duo, ctx.batch_size, ctx.objective_logits, ctx.bn)
     folder = ctx.g.path("checkpoints") / "fixed_ts" / f"heldout_{spec.duo}_{spec.tta}_{fp}"
-    origin = "fitted on the four held-out corruptions pooled, on the logits of independently adapted members"
+    origin = "fitted on the four held-out corruptions pooled"
     if (folder / "config.json").is_file():
         return Temps(folder, *load_temperatures(folder), origin)
     if report_only:
@@ -241,12 +246,30 @@ def _modes_present(df: pd.DataFrame) -> list[Mode]:
     return [m for m in MODES if m.key in set(df["mode"])]
 
 
+def _method_name(tta: str) -> str:
+    return "Tent" if tta == "tent" else tta.upper()
+
+
+def _has_bn(ctx: Context) -> bool:
+    return any(ctx.duo[side].get("NORM") == "BN" for side in ("LARGE", "SMALL"))
+
+
 def _frozen_text(ctx: Context) -> str:
-    """How a model that does not adapt is run (the --bn flag), for the captions: said only if a member has BatchNorm."""
-    if not any(ctx.duo[side].get("NORM") == "BN" for side in ("LARGE", "SMALL")):
+    """How a model that does not adapt is run (the --bn flag), for the summary's caption: said only if a member has
+    BatchNorm."""
+    if not _has_bn(ctx):
         return "frozen weights"
     return ("frozen weights, BatchNorm on the test batch's statistics" if ctx.bn
             else "frozen weights in eval() mode, BatchNorm on the source statistics")
+
+
+def _frozen_sentence(ctx: Context) -> str:
+    """The same for the per-corruption table's caption, as a sentence."""
+    kept = "Any model that does not adapt is frozen: it keeps its weights"
+    if not _has_bn(ctx):
+        return kept + "."
+    return kept + (" and uses the test batch's normalization statistics." if ctx.bn
+                   else ", in eval() mode, with the source normalization statistics.")
 
 
 def _math_num(x: float) -> str:
@@ -281,27 +304,33 @@ def _optim_text(optim: dict) -> str:
     return f"{optim['METHOD']} ({', '.join(parts)})"
 
 
-def _setting(ctx: Context, tta: str, temps: Temps, severity: int, *, alone: bool) -> str:
-    """The caption sentences both tables share. `alone`: the table also has rows for a member without the duo."""
-    large, small = (latex_escape(MODEL_NAMES.get(n, n)) for n in (ctx.duo["LARGE"]["NAME"], ctx.duo["SMALL"]["NAME"]))
-    own = ("each adapting model minimizes its own entropy (Tent). Large / Small adapt is that model alone, scored "
-           "without the duo; the Independent rows score the duo that combines them, adapting both (Independent both) "
-           "or only the named one (Independent large / small). " if alone else
-           "each adapting model minimizes its own entropy (Tent) and the duo only combines them; Independent both "
-           "adapts both, Independent large / small only the named one. ")
-    reference = (f"{_frozen_text(ctx)}" + (" (Large / Small frozen: that model alone; No adaptation: the duo of both)"
-                                            if alone else "")
-                 + "; a model that does not adapt in another row is frozen in the same way.")
+def _model_names(ctx: Context) -> tuple[str, str]:
+    return tuple(latex_escape(MODEL_NAMES.get(n, n)) for n in (ctx.duo["LARGE"]["NAME"], ctx.duo["SMALL"]["NAME"]))
+
+
+def _models_text(ctx: Context, tta: str, severity: int) -> str:
+    large, small = _model_names(ctx)
+    return f"Large / small: {large} / {small}, adapted with {tta.upper()}, severity {severity}."
+
+
+def _hyperparameters(ctx: Context) -> str:
+    large, small = _model_names(ctx)
     large_opt, small_opt = (_optim_text(ctx.duo[side]["OPTIM"]) for side in ("LARGE", "SMALL"))
-    return (f"Large / small: {large} / {small}, adapted with {tta.upper()}, severity {severity}. "
-            f"Hyperparameters of the adapting models: batch size {ctx.batch_size}; {large}: {large_opt}; "
-            f"{small}: {small_opt}. "
+    return (f"Hyperparameters of the adapting models: batch size {ctx.batch_size}. {large}: {large_opt}. "
+            f"{small}: {small_opt}.")
+
+
+def _setting(ctx: Context, tta: str, temps: Temps, severity: int) -> str:
+    """The summary table's caption sentences (it has one row per mode, named as in MODES)."""
+    return (f"{_models_text(ctx, tta, severity)} {_hyperparameters(ctx)} "
             f"The duo's prediction in every mode is the same static duo $(z_L / T_L + z_S / T_S) / 2$ with "
             f"$T_L = {temps.T_l:.2f}$, $T_S = {temps.T_s:.2f}$, {temps.origin}. "
             f"\\emph{{Duo entropy}}: the adapting model(s) minimize the entropy of the duo's combined prediction, "
             f"both at once (Joint) or one while the other is frozen (Large / Small adapt: the named model adapts). "
-            f"\\emph{{Own entropy}}: {own}"
-            f"\\emph{{Reference}}: {reference}")
+            f"\\emph{{Own entropy}}: each adapting model minimizes its own entropy (Tent) and the duo only combines "
+            f"them; Independent both adapts both, Independent large / small only the named one. "
+            f"\\emph{{Reference}}: {_frozen_text(ctx)}; a model that does not adapt in another row is frozen in the "
+            f"same way.")
 
 
 def _max_std_points(df: pd.DataFrame, keys: Sequence[str]) -> float | None:
@@ -316,18 +345,30 @@ def _max_std_points(df: pd.DataFrame, keys: Sequence[str]) -> float | None:
 
 def render_corruption_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Temps, *, label: str,
                             source: str) -> str:
-    """Top-1 accuracy per corruption, one row per (mode, prediction) of ROWS (ImageNet-C paper layout): the duo under
-    every mode, the members alone, and the clean stream as its own column. Means over seeds, no std in the cells."""
+    """Top-1 accuracy per corruption, one row per (mode, prediction) of ROWS (ImageNet-C paper layout), in sections:
+    frozen, a single model adapting on its own entropy, the duo with members adapting on their own entropy, the duo
+    with members adapting on the duo's. The clean stream is its own column. Means over seeds, no std in the cells."""
+    modes = set(df["mode"])
     df = _with_mode_series(df)
     rows = [r for r in ROWS if r.key in set(df["series"])]
-    groups = [(g, [(r.key, r.name) for r in rows if r.group == g]) for g in dict.fromkeys(r.group for r in rows)]
+    method = _method_name(tta)
+    groups = [(g.format(method=method), [(r.key, r.label) for r in rows if r.group == g])
+              for g in dict.fromkeys(r.group for r in rows)]
     has_clean = CLEAN in set(df["segment"])
     n_seeds, n_corr = df["seed"].nunique(), df.loc[df["segment"] != CLEAN, "segment"].nunique()
     max_std = _max_std_points(df, [r.key for r in rows])
-    caption = ("Top-1 accuracy (\\%) of the static duo, and of each member alone, under each way of adapting. "
-               + _setting(ctx, tta, temps, ctx.g.severity, alone=True)
+    caption = ("Top-1 accuracy (\\%) of each member alone and of the static duo, under each way of adapting. "
+               + _models_text(ctx, tta, ctx.g.severity)
+               + f" Each section header gives what is scored, a single model or the duo, and the entropy that the "
+                 f"adapting models minimize: their \\emph{{own}} entropy, as in {method}, or the entropy of the "
+                 f"\\emph{{duo}}'s combined prediction. Each row gives which models adapt. {_frozen_sentence(ctx)} "
+                 f"The duo's prediction is always $(z_L / T_L + z_S / T_S) / 2$ with $T_L = {temps.T_l:.2f}$, "
+                 f"$T_S = {temps.T_s:.2f}$, {temps.origin}."
+               + (" With both models adapting, the own-entropy and duo-entropy rows are the Independent and Joint "
+                  "modes of Section~\\ref{sec:duo_tent}." if {"indep_duo", "joint"} <= modes else "")
+               + f" {_hyperparameters(ctx)}"
                + (f" \\emph{{Clean}}: the ImageNet validation images the corruptions are rendered from, adapted to like "
-                  f"any other stream; it is not part of Avg., the mean over the {n_corr} corruptions." if has_clean else "")
+                  f"any other stream. It is not part of Avg., the mean over the {n_corr} corruptions." if has_clean else "")
                + (f" Mean over {n_seeds} seeds." + (f" Standard deviations are at most {max_std:.1f} points."
                                                     if max_std is not None else "") if n_seeds > 1 else ""))
     return corruption_table(df, groups, ctx.g.corruption_families, value="accuracy", caption=caption, label=label,
@@ -356,7 +397,7 @@ def render_summary_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Temps,
                      cell(f"{m.key}/duo", "ece", 1, True), cell(f"{m.key}/duo", "nll", 2, False)])
     n_corr, n_seeds = df["segment"].nunique(), df["seed"].nunique()
     caption = (f"Accuracy (\\%) of each member under each way of adapting, and accuracy, ECE (\\%) and NLL of the duo, "
-               f"averaged over the {n_corr} corruptions. " + _setting(ctx, tta, temps, ctx.g.severity, alone=False)
+               f"averaged over the {n_corr} corruptions. " + _setting(ctx, tta, temps, ctx.g.severity)
                + (f" Mean $\\pm$ std over {n_seeds} seeds." if n_seeds > 1 else ""))
     return latex_table(header, body, caption=caption, label=label, midrule_before=mid, star=False, resize=False,
                        source=source)
@@ -469,22 +510,34 @@ if __name__ == "__main__":
         lines1 = [l.strip() for l in t1.splitlines()]
         body1 = [l for l in lines1 if l.endswith("\\\\") and "&" in l]
         names = ["Joint", "Large adapt", "Small adapt", "Independent large", "Independent small", "Independent both", "No adaptation"]
-        assert len(body1) == 2 + len(ROWS) and all(n in "".join(body1) for n in names + ["Large frozen", "Small frozen"])
+        assert len(body1) == 2 + len(ROWS)
         # the layout asked for: no Group column, group rows, members indented, Clean first and apart from the average
         assert "\\multirow{" not in t1 and "Group" not in t1 and sum(l.startswith("\\quad ") for l in lines1) == len(ROWS)
         assert "\\begin{tabular}{l|c|ccc|c}" in t1 and "\\setlength{\\tabcolsep}{3.5pt}" in t1
-        assert all(f"\\multicolumn{{6}}{{l}}{{\\textit{{{g}}}}} \\\\" in lines1 for g in ("Duo entropy", "Own entropy", "Reference"))
         assert "Method & Clean & Gauss. & Shot & Impulse & Avg. \\\\" in lines1
         assert all(l.count("&") == 5 for l in lines1 if l.startswith("\\quad ")) and "--" not in t1 and "pm" not in t1.split("\\begin{tabular}")[1]
-        # a member alone comes from the run that adapts it (Large adapt under Own entropy: the large member of
-        # indep_large; the Duo-entropy row of the same name comes first, so the dict keeps the member-alone one)
-        row = {l.split("&")[0].strip(): [c.strip() for c in l.rstrip(" \\").split("&")[1:]] for l in lines1 if l.startswith("\\quad ")}
-        large = df[(df["mode"] == "indep_large") & (df["series"] == "large")]
-        want_clean = large[large["segment"] == CLEAN]["accuracy"].mean() * 100
-        want_avg = large[large["segment"] != CLEAN].groupby("seed")["accuracy"].mean().mean() * 100
-        assert row["\\quad Large adapt"][0] == f"{want_clean:.1f}" and row["\\quad Large adapt"][-1] == f"{want_avg:.1f}"
+        # the sections, in order, each with its rows: (what is scored, which entropy), then which models adapt
+        shown, section = [], None
+        for l in lines1:
+            if l.startswith("\\multicolumn{6}{l}{\\textit{"):
+                section = l[len("\\multicolumn{6}{l}{\\textit{"):-len("}} \\\\")]
+            elif l.startswith("\\quad "):
+                label, *cells = [c.strip() for c in l.rstrip(" \\").split("&")]
+                shown.append((section, label[len("\\quad "):], cells))
+        assert [(g, lab) for g, lab, _ in shown] == [(r.group.format(method="Tent"), r.label) for r in ROWS]
+        assert list(dict.fromkeys(g for g, _, _ in shown)) == [
+            "Frozen", "Single model, own entropy (Tent)", "Duo, own entropy", "Duo, duo entropy"]
+        assert [lab for g, lab, _ in shown if g == "Duo, duo entropy"] == ["Large adapts", "Small adapts", "Both adapt (Joint)"]
+        # every row reads its own (mode, prediction) of the data: a member alone comes from the run that adapts it
+        # (Large adapts, single model: the large member of indep_large), a duo row from the duo of its mode's run
+        for r, (_, _, cells) in zip(ROWS, shown):
+            d = df[(df["mode"] == r.mode) & (df["series"] == r.series)]
+            want_clean = d[d["segment"] == CLEAN]["accuracy"].mean() * 100
+            want_avg = d[d["segment"] != CLEAN].groupby("seed")["accuracy"].mean().mean() * 100
+            assert abs(float(cells[0]) - want_clean) <= 0.051 and abs(float(cells[-1]) - want_avg) <= 0.051, r
+        assert t1.startswith("% Generated by test on 20") and t1.splitlines()[0].endswith(". Requires booktabs, graphicx.")
         assert f"$T_L = {temps.T_l:.2f}$" in t1 and "Mean over 2 seeds. Standard deviations are at most" in t1
-        assert "not part of Avg., the mean over the 3 corruptions" in t1
+        assert "It is not part of Avg., the mean over the 3 corruptions" in t1
         body2 = [l.strip() for l in t2.splitlines() if l.strip().endswith("\\\\") and "&" in l]
         assert len(body2) == 1 + len(names) and body2[0].startswith("Mode & Large acc.") and t2.count("\\midrule") == 3
         assert all(l.count("&") == 5 for l in body2) and "--" not in t2
@@ -511,21 +564,29 @@ if __name__ == "__main__":
         for side in ("LARGE", "SMALL"):
             shown = latex_escape(MODEL_NAMES.get(ctx.duo[side]["NAME"], ctx.duo[side]["NAME"]))
             assert f"{shown}: {_optim_text(ctx.duo[side]['OPTIM'])}" in t1 + t2
-        assert f"Hyperparameters of the adapting models: batch size {ctx.batch_size};" in t1 and "batch size 32" in t2
+        assert f"Hyperparameters of the adapting models: batch size {ctx.batch_size}. " in t1 and "batch size 32" in t2
         # the caption has to compile: no bare power of ten outside math mode
         caption = t1.split("\\caption{")[1].split("\n")[0]
         assert caption.count("$") % 2 == 0
 
         # the caption says how the frozen BatchNorm model is run (--bn); the tag keeps the two settings apart
-        assert "BatchNorm on the source statistics" in t1 and "test batch" not in t1.split("\\begin{tabular}")[0]
+        assert "with the source normalization statistics" in t1 and "test batch" not in t1.split("\\begin{tabular}")[0]
         bn_ctx = make_context(tmp, batch_size=32, base=tiny_models(0), bn=True)
-        assert "BatchNorm on the test batch's statistics" in render_corruption_table(df, label="x", **{**kw, "ctx": bn_ctx})
+        bn_t1 = render_corruption_table(df, label="x", **{**kw, "ctx": bn_ctx})
+        assert "it keeps its weights and uses the test batch's normalization statistics." in bn_t1
+        assert "BatchNorm on the source statistics" in t2 and "BatchNorm on the test batch's statistics" in \
+            render_summary_table(df, label="x", **{**kw, "ctx": bn_ctx})
         from types import SimpleNamespace as NS
         assert output_tag(NS(tta="tent", duo="d", bn=False), "d") == "tent" and output_tag(NS(tta="tent", duo="d", bn=True), "d") == "tent_bn"
         assert output_tag(NS(tta="tent", duo="e", bn=True), "d") == "tent__e_bn"
         sub = render_summary_table(df[df["mode"].isin(["joint", "indep_duo"])], label="x", **kw)
         assert "Large adapt" not in sub and "Joint" in sub, "only the modes present get a row"
-        assert "Large frozen" not in render_corruption_table(df[df["mode"].isin(["joint"])], label="x", **kw)
+        only_joint = render_corruption_table(df[df["mode"] == "joint"], label="x", **kw)
+        assert "Both adapt (Joint)" in only_joint and "Frozen" not in only_joint and "Section~" not in only_joint, \
+            "only the rows (and sections) present are listed, and the caption names no mode that is absent"
+        assert "Section~\\ref{sec:duo_tent}" in t1.split("\\begin{tabular}")[0]
+        eata = render_corruption_table(df, label="x", **{**kw, "tta": "eata"})
+        assert "Single model, own entropy (EATA)" in eata and "as in EATA" in eata and "Tent" not in eata.split("\\begin{tabular}")[0]
         if shutil.which("pdflatex"):
             doc = ("\\documentclass{article}\\usepackage{booktabs,multirow,graphicx}\\usepackage[landscape]{geometry}"
                    "\\begin{document}\n" + t1 + t2 + "\\end{document}\n")

@@ -134,7 +134,7 @@ class FileList(Dataset):
 class ShiftDataset(ABC):
     name: ClassVar[str]
     config_key: ClassVar[str]               # key under `paths:` in cfgs/global.yaml
-    already_224: ClassVar[bool] = False     # images are already 224x224 centre crops (ImageNet-C, CCC)
+    already_224: ClassVar[bool] = False     # images are already 224x224 centre crops (ImageNet-C, CCC): see input_transform
 
     num_classes: int = 1000                 # effective K after masking
     class_mask: list[int] | None = None     # indices into the 1000-way logits; None = all 1000
@@ -185,6 +185,13 @@ class ShiftDataset(ABC):
             self.torch_dataset(), batch_size=batch_size, shuffle=shuffle, workers=workers,
             pin_memory=pin_memory, num_samples=num_samples, seed=seed, collate_fn=collate_fn,
         )
+
+    def input_transform(self, preprocess):
+        """A model's `preprocess` as this dataset needs it. The images of ImageNet-C and CCC are already 224x224
+        centre crops, so they go to the model without its Resize (`native_224`), as in the Tent / EATA / SAR code;
+        every other dataset keeps the model's own transform."""
+        from src.utils.model import native_224
+        return native_224(preprocess) if self.already_224 else preprocess
 
     def apply_class_mask(self, logits: torch.Tensor) -> torch.Tensor:
         """(B, 1000) model logits -> (B, num_classes) scores aligned with this dataset's labels."""

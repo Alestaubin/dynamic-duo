@@ -106,7 +106,7 @@ def probe(g, n: int, device: str, bn: bool = False) -> None:
             correct = total = 0
             for imgs, labels in ds.loader(batch_size=50, num_samples=n, seed=0, workers=4):
                 with torch.no_grad():
-                    logits = model(_preprocess_batch(imgs, preprocess, device)).cpu()
+                    logits = model(_preprocess_batch(imgs, ds.input_transform(preprocess), device)).cpu()
                 correct += (ds.apply_class_mask(logits).argmax(1) == labels).sum().item()
                 total += len(labels)
             acc = correct / total

@@ -234,7 +234,7 @@ def render_table(df: pd.DataFrame, labels: StudyLabels, *, batch_sizes: Sequence
 
 MODEL_NAMES = {"vit_b_16": "ViT-B/16", "vit_l_16": "ViT-L/16", "vit_s_16": "ViT-S/16", "resnet50": "ResNet-50",
                "resnet50_v1": "ResNet-50 (V1)", "vit_b_16_augreg": "ViT-B/16 (AugReg)",
-               "vit_b_16_augreg2": "ViT-B/16 (AugReg2)"}
+               "vit_b_16_augreg2": "ViT-B/16 (AugReg2)", "vit_b_16_sar": "ViT-B/16 (SAR)"}
 
 
 def add_study_args(ap) -> None:

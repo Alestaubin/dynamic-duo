@@ -7,7 +7,7 @@ batch_size: 64
 OPTIM:
   METHOD: SGD
   STEPS: 1
-  LR: 0.001
+  LR: 0.0005
   MOMENTUM: 0.0
   DAMPENING: 0.0
   WD: 0.0
@@ -19,6 +19,6 @@ tuned_on:
   - spatter/s5
   - saturate/s5
   seed: 0
-macro_accuracy: 0.50958
-frozen_macro_accuracy: 0.47037
+macro_accuracy: 0.51231
+frozen_macro_accuracy: 0.48794
 written_by: scripts/02_tune_tta.py

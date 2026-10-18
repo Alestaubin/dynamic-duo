@@ -34,6 +34,7 @@ import yaml
 from tqdm import tqdm
 
 from src.experiments.evaluate import StreamMetrics
+from src.experiments.specs import INPUTS_TAG
 from src.tta.methods import build_tta_method
 from src.utils.datasets.base import ShiftDataset
 
@@ -130,7 +131,8 @@ def run_stream(runner: SingleModel, dataset: ShiftDataset, *, batch_size: int, w
     runner.reset()
     metrics = StreamMetrics(ece_bins)
     loader = dataset.loader(batch_size=batch_size, num_samples=num_samples, seed=seed, workers=workers,
-                            pin_memory=runner.device.type == "cuda", collate_fn=SingleCollate(runner.preprocess))
+                            pin_memory=runner.device.type == "cuda",
+                            collate_fn=SingleCollate(dataset.input_transform(runner.preprocess)))
     for x, y in tqdm(loader, desc=desc, leave=False):
         metrics.update(runner.step(x), y)
     out = metrics.result()
@@ -160,7 +162,7 @@ def trial_key(trial: Trial, *, model: str, tta: str, norm: str, stream_labels: S
               seed: int, num_samples: int | None, bn: bool = False) -> str:
     """File name of a trial's stored result: the trial's name plus a hash of everything that determines it."""
     payload = {"model": model, "tta": tta, "norm": norm, "optim": trial.optim, "streams": list(stream_labels),
-               "batch_size": batch_size, "seed": seed, "num_samples": num_samples}
+               "batch_size": batch_size, "seed": seed, "num_samples": num_samples, "inputs": INPUTS_TAG}
     if trial.optim is None and norm == "BN" and not bn:
         # Only the frozen reference of a BatchNorm model depends on --bn. Stored results from before the flag
         # existed used test-batch statistics (bn=True), so that case keeps its old key.

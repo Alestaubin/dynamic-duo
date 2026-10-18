@@ -414,6 +414,28 @@ if __name__ == "__main__":
             a = MemberRunner(DUO, mode="large_indep", device="cpu", models=copy.deepcopy(base), bn=flag)
             assert a.large.training is True and a.small.training is flag, "the adapting member is always in Tent's train mode"
 
+        # ---- 6e. images that are already 224x224 (ImageNet-C, CCC) skip the model's Resize; the others do not -------
+        from torchvision import transforms
+
+        class Native(FakeStream):
+            already_224 = True
+
+        resizing = transforms.Compose([transforms.Resize((16, 16)), transforms.CenterCrop(8), transforms.ToTensor()])
+        (tl, _), (ts_, _) = base
+        zooming = ((tl, resizing), (ts_, resizing))
+        def frozen_logits(ds):
+            r = MemberRunner(DUO, mode="no_adapt", device="cpu", models=copy.deepcopy(zooming), bn=True)
+            return torch.cat([z for z, _, _ in r.iter_batches(ds, batch_size=50, workers=0, seed=0, num_samples=None)])
+        plain, native = FakeStream(100, seed=5), Native(100, seed=5)
+        ref = copy.deepcopy(tl).eval()
+        loader_imgs = [im for b, _ in plain.loader(50, seed=0, workers=0) for im in b]       # the order iter_batches sees
+        with torch.no_grad():
+            want_native = ref(torch.stack([transforms.ToTensor()(im) for im in loader_imgs]))
+            want_plain = ref(torch.stack([resizing(im) for im in loader_imgs]))
+        assert torch.allclose(frozen_logits(native), want_native, atol=1e-5), "already_224: no resize, no crop"
+        assert torch.allclose(frozen_logits(plain), want_plain, atol=1e-5), "any other dataset: the model's own transform"
+        assert not torch.allclose(want_native, want_plain, atol=1e-3)
+
         # ---- 7. a 200-class dataset is gated on its 200 classes ---------------------------------------------
         nat = [Segment("fake200", FakeStream(150, seed=4, masked=True), True)]
         nspec = RunSpec("tiny", protocol="natural", protocol_args={"dataset": "fake200"})

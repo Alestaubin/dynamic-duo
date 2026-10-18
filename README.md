@@ -47,8 +47,11 @@ The model name decides which pretrained weights are loaded (`src/utils/model.py`
 | `vit_b_16` | torchvision ViT-B/16 (ImageNet-1k only). |
 | `vit_b_16_augreg` | timm `vit_base_patch16_224.augreg_in21k_ft_in1k` (ImageNet-21k pretrained). What a bare `vit_base_patch16_224` gave in timm 0.6.x, as used by SAR, EATA and COCA. |
 | `vit_b_16_augreg2` | timm `...augreg2_in21k_ft_in1k`. What a bare `vit_base_patch16_224` gives in timm 0.9 and later, including the timm pinned here. |
+| `vit_b_16_sar` | The ViT of SAR (`timm==0.6.11`, so the `augreg_in21k_ft_in1k` weights of `vit_b_16_augreg`), with SAR's input pipeline: ImageNet mean/std, although these weights were trained with 0.5/0.5. The mismatch is in SAR's published numbers (frozen on the 15 ImageNet-C corruptions at severity 5: 29.9% in SAR's paper, 31.4% here, but 51.5% with the weights' own normalization), so it is kept to stay comparable with SAR, EATA and DeYO. |
 
-The duos `vitb16aug_rn50v1` and `vitb16aug2_rn50v1` pair each timm ViT with `resnet50_v1`, to compare with COCA ("When Small Guides Large"). Weights are downloaded on first use and then cached (`$TORCH_HOME` for torchvision, `~/.cache/huggingface` for timm). Loading a new model once on the login node first is a good habit, so that a job array does not start many downloads at once; Hugging Face is reachable from the compute nodes, but I have not tested torchvision's download server from there.
+The duos `vitb16aug_rn50v1` and `vitb16aug2_rn50v1` pair each timm ViT with `resnet50_v1`, to compare with COCA ("When Small Guides Large"; its ViT is AugReg2 fed ImageNet mean/std). `vitb16sar_rn50v1` pairs `vit_b_16_sar` with `resnet50_v1` and SAR's optimizer settings: the duo to use to compare with SAR, EATA and DeYO. Weights are downloaded on first use and then cached (`$TORCH_HOME` for torchvision, `~/.cache/huggingface` for timm). Loading a new model once on the login node first is a good habit, so that a job array does not start many downloads at once; Hugging Face is reachable from the compute nodes, but I have not tested torchvision's download server from there.
+
+**Input pipeline.** ImageNet-C and CCC images are already 224x224 centre crops, so they go to the models without the models' own Resize(256) (`ShiftDataset.input_transform`, `native_224` in `src/utils/model.py`), as in the Tent, EATA and SAR code. Resizing them zooms in by 14% and costs Tent on ResNet-50 about 7 points of ImageNet-C accuracy (it reproduced COCA's published numbers only without the resize; frozen `resnet50_v1` with source BatchNorm statistics scores 18.2% on the 15 corruptions here, 18.0% in SAR's paper). Clean ImageNet images and the natural shifts keep the models' own transform. This is part of every cache key of an ImageNet-C or CCC stream (`INPUTS_TAG` in `src/experiments/specs.py`): caches and temperature checkpoints made before it are simply not found, and the trials stored by `02_tune_tta.py` are keyed by it too. `cfgs/tuned/*.yaml` carries no key, so files written before it were tuned on zoomed images: rerun `02_tune_tta.py` for a model before trusting its file.
 
 ## How the scripts work
 
@@ -137,9 +140,6 @@ The oracles use the labels and are fitted on the same data they are scored on, s
 sbatch slurm/job.sh scripts/01_tab_temperatures.py                       # Tent-adapted members, seed 0
 sbatch slurm/job.sh scripts/01_tab_temperatures.py --mode no_adapt       # frozen members instead
 sbatch slurm/job.sh scripts/01_tab_temperatures.py --report_only         # rebuild the table from the cache
-
-# The table in the paper is obtained with
-sbatch slurm/job.sh scripts/01_tab_temperatures.py --duo vitb16_rn50v1 --mode no_adapt --batch_sizes 16 64 128
 ```
 
 The first command adapts both models over the 20 streams and caches their logits. Expect roughly 1 to 1.5 hours per seed on one GPU. Run the table step as a job too: the fits go over all 20 streams' logits and are slow on a CPU login node. The default is seed 0 only. `--seeds 0 1 2` adds the mean ± std over seeds, and makes the work three jobs (one per seed), which `--shard auto` can spread over a job array (see above).
@@ -205,7 +205,13 @@ sbatch slurm/job.sh scripts/03_tab_adaptation_modes.py --report_only            
 Every run also visits the clean validation images (the 50,000 images ImageNet-C is rendered from), like one more corruption. A cache from before this existed only computes that one stream per run, since the corruption caches keep their keys.
 
 **Output.**
-- `out/paper/tab_adaptation_modes__<tag>.tex`: accuracy per corruption, grouped as in the ImageNet-C paper, with the group of each row (Duo entropy / Own entropy / Reference) as a heading and no standard deviations in the cells (the caption gives their maximum). Besides the duo under each mode it has rows for the members alone: *Large / Small adapt* under Own entropy (the large model of the Independent large run, the small model of the Independent small run, each scored without the duo) and *Large / Small frozen* under Reference. A *Clean* column holds the accuracy on the clean validation images; it is not part of *Avg.*, which is the mean over the 15 corruptions.
+- `out/paper/tab_adaptation_modes__<tag>.tex`: accuracy per corruption, grouped as in the ImageNet-C paper, with no standard deviations in the cells (the caption gives their maximum). Four sections, each named by what is scored and the entropy the adapting models minimize, with one row per choice of which models adapt:
+  - *Frozen*: Large, Small, Duo (the No adaptation run).
+  - *Single model, own entropy (Tent)*: Large adapts, Small adapts (the large model of the Independent large run, the small model of the Independent small run, each scored without the duo).
+  - *Duo, own entropy*: Large adapts, Small adapts, Both adapt (Independent) (the duo of the Independent large / small / both runs).
+  - *Duo, duo entropy*: Large adapts, Small adapts, Both adapt (Joint) (the duo of the Large adapt / Small adapt / Joint runs).
+
+  A *Clean* column holds the accuracy on the clean validation images; it is not part of *Avg.*, which is the mean over the 15 corruptions.
 - `out/paper/tab_adaptation_modes_summary__<tag>.tex`: one row per mode with each model's accuracy under that mode, then the duo's accuracy, ECE and NLL, averaged over the 15 corruptions.
 - `out/results/tab_adaptation_modes/<tag>.csv`: the numbers behind both tables (clean stream included, as segment `clean`).
 - Both tables' captions list the hyperparameters of the adapting models: the batch size and each model's optimizer with all its parameters, read from the duo config after `cfgs/tuned/` is applied (the values the cached logits were made with).
@@ -290,4 +296,26 @@ python -m src.experiments.runner             # the engine, end to end on tiny mo
 python -m src.experiments.tuning             # the tuner (script 02)
 python -m src.experiments.adaptation_modes   # the adaptation modes (script 03)
 python -m src.utils.config                   # config loading
+```
+
+## Reproducing Paper Tables 
+*Optimal Temperatures and Oracles table:*
+```bash
+sbatch slurm/job.sh scripts/01_tab_temperatures.py --duo vitb16_rn50v1 --mode no_adapt --batch_sizes 16 64 128 --bn
+```
+This runs the frozen Vit-B + ResNet50 duo on all 15 test corruptions of ImageNet-C, as well as the 4 heldout corruptions and the clean ImageNet validation set. Two baselines (Fixed TS fitted on clean and Fixed TS fitted on the 4 heldout shifts) are compared to the individual members as well as 3 temperature oracles (Corruption-wise temperatures, batch-wise temperatures, and per-sample temperatures). With the `--bn` flag, ResNet50 uses test batch statistics.
+
+*Tent HP tuning:*
+```bash
+sbatch --array=0-15 slurm/job.sh scripts/02_tune_tta.py --model vit_b_16 --shard auto
+sbatch --array=0-15 slurm/job.sh scripts/02_tune_tta.py --model resnet50_v1 --bn --shard auto
+# once done, run these
+sbatch slurm/job_cpu.sh scripts/02_tune_tta.py --model vit_b_16 --report_only
+sbatch slurm/job_cpu.sh scripts/02_tune_tta.py --model resnet50_v1 --bn --report_only
+```
+
+*Adaptation modes:*
+This script uses the hyperparameters found above
+```bash
+sbatch --array=0-20 slurm/job.sh scripts/03_tab_adaptation_modes.py --duo vitb16_rn50v1 --shard auto --bn
 ```

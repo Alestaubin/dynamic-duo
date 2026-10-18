@@ -106,8 +106,9 @@ class MemberRunner:
 
     def step(self, imgs, dataset: ShiftDataset) -> tuple[torch.Tensor, torch.Tensor]:
         """`step_tensors` on a list of PIL images (preprocessed here, in the calling process)."""
-        return self.step_tensors(_preprocess_batch(imgs, self.large_preprocess, self.device),
-                                 _preprocess_batch(imgs, self.small_preprocess, self.device), dataset)
+        return self.step_tensors(_preprocess_batch(imgs, dataset.input_transform(self.large_preprocess), self.device),
+                                 _preprocess_batch(imgs, dataset.input_transform(self.small_preprocess), self.device),
+                                 dataset)
 
     def step_tensors(self, x_l: torch.Tensor, x_s: torch.Tensor, dataset: ShiftDataset
                      ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -136,7 +137,8 @@ class MemberRunner:
         labels on CPU). The caller decides about resets: this method never resets."""
         loader = dataset.loader(batch_size=batch_size, num_samples=num_samples, seed=seed, workers=workers,
                                 pin_memory=self.device.type == "cuda",
-                                collate_fn=PairCollate(self.large_preprocess, self.small_preprocess))
+                                collate_fn=PairCollate(dataset.input_transform(self.large_preprocess),
+                                                       dataset.input_transform(self.small_preprocess)))
         for x_l, x_s, labels in loader:
             z_l, z_s = self.step_tensors(x_l, x_s, dataset)
             yield z_l, z_s, labels
