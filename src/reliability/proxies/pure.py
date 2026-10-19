@@ -10,7 +10,9 @@ logits are masked). p = softmax(z / T); the author decided that every proxy runs
 nuclear norm always did, so the evaluator never passes a temperature; the argument stays for a tempered variant. The
 stateful proxies read `source_stats`, a dict made by `fit_source_stats` from the member's logits on the held-out clean slice
 of the training images, never from validation images. Nothing here touches a model or the gate; `PROXIES` is the table the
-evaluator iterates over, and the registry classes of src/reliability/proxies/ (used by the live gate) are untouched.
+evaluator iterates over AND the one library the live gate scores through (JointProxyWeighted -> ProxyStats.score, see stats.py).
+The only proxies outside it are `prototype` and `oracle` (stats.py's registry), which need penultimate features / labels that a
+logits-only function cannot take. `LEGACY_KINDS` maps the kind names older configs use (`nuclear_norm`, `ac_mc`) onto it.
 
 | name               | definition                                                                              | stateful |
 | nnn                | ||P||_* / sqrt(b min(b, K)), the repo's nuclear_norm_score on the raw softmax            | no  |
@@ -38,8 +40,8 @@ For a one-hot target e_k and a softmax row c the L1 distance is 2 (1 - c_k), so 
 over the optimal matching of rows to labels; with equal weights the optimum is an assignment, solved exactly by the Hungarian
 algorithm (scipy's `linear_sum_assignment`), which is what POT's emd2 returns for these marginals. Here the prior is uniform
 over the K classes, the remainder is drawn by a generator seeded with `seed` (so a bucket's score is reproducible; the same
-seed for every bucket), and the score is 1 - estimate, the estimated ACCURACY, in [0, 1]. The repo's older cot.py scores the
-negated cost with labels sampled from a fitted marginal; it is not used here. COT needs b of the order of K or more: with
+seed for every bucket), and the score is 1 - estimate, the estimated ACCURACY, in [0, 1]. (The repo's former registry `cot`
+scored the negated cost, <= 0, with labels sampled from a fitted marginal; it is gone, and `cot` is this one.) COT needs b of the order of K or more: with
 b << K most random labels name classes no row is confident about, and the score collapses toward 0 whatever the model does.
 """
 
@@ -52,9 +54,18 @@ from typing import Callable
 import torch
 from scipy.optimize import linear_sum_assignment
 
-from src.reliability.proxies.nuclear_norm import nuclear_norm_score
-
 _TINY = 1e-12
+
+
+@torch.no_grad()
+def nuclear_norm_score(logits: torch.Tensor) -> float:
+    """Confidence + dispersity via the nuclear norm of the softmax matrix, ||P||_* / sqrt(b min(b, K)).
+    https://github.com/cuishuhao/BNM/blob/2d23c61f864af489d84fe5f8b66bc0a5ca51cda9/UODR/train_loader.py#L197
+    https://arxiv.org/pdf/2302.01094"""
+    p = torch.softmax(logits, dim=1)
+    n, c = p.shape
+    nuc = torch.linalg.matrix_norm(p, ord="nuc")
+    return float(nuc / (n * min(n, c)) ** 0.5)
 
 
 def _unit(x: float) -> float:
@@ -230,8 +241,22 @@ PROXIES: dict[str, ProxyDef] = {d.name: d for d in (
 )}
 
 
+# Kind names the configs / scripts used when these proxies were registry classes (src/reliability/proxies/{nuclear_norm,
+# ac_mc,atc,cot}.py, retired): kept so `proxy_kind: nuclear_norm` in cfgs/ and every cache key / run name built from it
+# stay as they were. `cot` kept its name (its definition changed, see above). `atc` is deliberately NOT aliased: the registry
+# class was the negative-entropy ATC, i.e. `atc_negent`, but `atc` is a real entry here (max-confidence ATC, what the paper's
+# evaluator and PureProxyGate score), so the name keeps meaning that; ask for `atc_negent` to get the old registry proxy.
+LEGACY_KINDS: dict[str, str] = {"nuclear_norm": "nnn", "ac_mc": "msp"}
+
+
+def canonical(name: str) -> str:
+    """The `PROXIES` key for `name`, which may be a legacy kind name."""
+    return LEGACY_KINDS.get(name, name)
+
+
 def score(name: str, z: torch.Tensor, T: float | None = None, source_stats: dict | None = None, **kw) -> float:
-    """One proxy on one batch; `kw` carries `duo_logits` (agree_duo) or `seed` (cot)."""
+    """One proxy on one batch; `kw` carries `duo_logits` (agree_duo) or `seed` (cot). Legacy kind names are accepted."""
+    name = canonical(name)
     if name not in PROXIES:
         raise ValueError(f"unknown proxy {name!r}: {sorted(PROXIES)}")
     return PROXIES[name].fn(z, T, source_stats, **kw)
@@ -334,6 +359,11 @@ if __name__ == "__main__":
     assert msp(z) == msp(z, T=1.0) and nnn(z) == nnn(z, T=1.0)
     assert msp(z, T=3.0) < msp(z) < msp(z, T=0.5)
     assert score("nnn", z) == nnn(z)
+    #    the legacy kind names resolve to the same functions, and every target is a real entry
+    assert score("nuclear_norm", z) == nnn(z) and score("ac_mc", z) == msp(z) and canonical("cot") == "cot"
+    assert score("atc", z_src, source_stats=stats) == atc(z_src, source_stats=stats) and canonical("atc") == "atc"
+    assert all(v in PROXIES for v in LEGACY_KINDS.values()) and not set(LEGACY_KINDS) & set(PROXIES), \
+        "an alias must never shadow a real proxy name (one once remapped `atc` onto `atc_negent` inside the live gate)"
     try:
         score("nope", z)
         raise AssertionError("an unknown proxy must raise")

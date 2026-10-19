@@ -21,9 +21,7 @@ proxy_batch_size=1 (the default) means the bucket is full after every
 SINGLE sample -- there is no implicit floor at "one adaptation batch".
 
 Each proxy batch:
-  1. Raw proxy scores r_l, r_s (Section 2 — any src.reliability.proxies kind
-     except "agreement", which scores the pair rather than a single model
-     and so has no r_l/r_s split; see proxies/agreement.py).
+  1. Raw proxy scores r_l, r_s (Section 2 — any src.reliability.proxies kind).
   2. Calibrate each raw score onto a common predicted-accuracy scale via the
      attached CalibrationMaps (Section 3), then to log-odds (eq. 8,
      src.reliability.calibration.logit.to_logit).
@@ -66,6 +64,7 @@ import torch.nn.functional as F
 
 from src.calibrators.base import BaseJointCalibrator, _NoOpModule
 from src.calibrators.joint_fixed_TS import JointFixedTS
+from src.reliability.proxies import pure
 from src.reliability.proxies.stats import ProxyStats, FeatureExtractor, PROXY_KINDS
 from src.reliability.calibration.logit import to_logit
 from src.reliability.filters.base import ScoreFilter
@@ -74,7 +73,7 @@ from src.reliability.filters.running_mean import RunningMean
 from src.reliability.filters.ema import EMA
 from src.reliability.filters.kalman import Kalman
 
-_PROXY_KINDS = PROXY_KINDS  # "agreement" is intentionally excluded (pair-level, no r_l/r_s split)
+_PROXY_KINDS = PROXY_KINDS
 _FILTER_KINDS = {"none", "running_mean", "ema", "kalman"}
 _POOL_KINDS = {"log", "linear"}
 
@@ -118,10 +117,13 @@ class JointProxyWeighted(BaseJointCalibrator):
 
     Parameters
     ----------
-    proxy_kind : any src.reliability.proxies.stats.PROXY_KINDS member
-        ("nuclear_norm" | "atc" | "prototype" | "ac_mc" | "cot" | "oracle").
-        "oracle" is a cheat (uses ground-truth labels as the score) meant only
-        as an upper-bound reference — never a real deployment signal.
+    proxy_kind : any src.reliability.proxies.stats.PROXY_KINDS member: a
+        pure.py proxy (src.reliability.proxies.pure.PROXIES, e.g. "nnn", "msp",
+        "energy", "cot", "agree_duo"), one of its legacy names ("nuclear_norm"
+        | "ac_mc"), or "prototype" / "oracle". The stateful ones need
+        cfg_l/cfg_s.source_stats (ProxyStats.fit_source). "oracle" is a cheat
+        (uses ground-truth labels as the score) meant only as an upper-bound
+        reference — never a real deployment signal.
     cfg_l, cfg_s : ProxyStats for large and small model, with a
         CalibrationMaps for this proxy_kind attached to .calib (see
         src.reliability.calibration.maps).
@@ -340,8 +342,15 @@ class JointProxyWeighted(BaseJointCalibrator):
     ) -> tuple[float, float]:
         # Only the cheating OracleProxy (proxy_kind="oracle") actually uses
         # labels; every other proxy ignores the kwarg.
-        return (self.cfg_l.score(self.proxy_kind, z_l, f_l, labels=labels),
-                self.cfg_s.score(self.proxy_kind, z_s, f_s, labels=labels))
+        kw = {}
+        name = pure.canonical(self.proxy_kind)
+        if name in pure.PROXIES and pure.PROXIES[name].needs_duo:
+            # agree_duo scores a member against the fixed-combination duo (beta = 0, equal weights, base_ts temperatures)
+            T_l = float(self.base_ts.Tl.item()) if self.base_ts is not None else 1.0
+            T_s = float(self.base_ts.Ts.item()) if self.base_ts is not None else 1.0
+            kw["duo_logits"] = 0.5 * (z_l / T_l) + 0.5 * (z_s / T_s)
+        return (self.cfg_l.score(self.proxy_kind, z_l, f_l, labels=labels, **kw),
+                self.cfg_s.score(self.proxy_kind, z_s, f_s, labels=labels, **kw))
 
     def _gate(self, r_l: float, r_s: float) -> tuple[float, float, float, float, float]:
         """Sections 3-4: calibrate -> logit -> filter -> gate.

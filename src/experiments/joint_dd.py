@@ -3,9 +3,10 @@ joint_dd.py
 ===========
 Live gate and Joint DD runner for the Dynamic Duos proxies of src/reliability/proxies/pure.py (Phase 3, Stage C).
 
-`PureProxyGate` is `JointProxyWeighted` with the proxy computed by the pure-function library instead of the registry classes
-of src/reliability/proxies/: the bucket logic, the gate formula, the clip eps, the log pool and the prior weight of 0.5 are the
-live gate's own, untouched, so it is the reference the offline evaluator (dd_eval.py) must reproduce exactly. In Vanilla DD it
+`PureProxyGate` is `JointProxyWeighted` configured the way the paper's evaluator does (filter none, log pool, prior weight 0.5,
+source statistics handed in, any `pure.PROXIES` kind): the bucket logic, the gate formula and the clip eps are the live gate's
+own, and so are the proxies (JointProxyWeighted scores through pure.py), so it is the reference the offline evaluator
+(dd_eval.py) must reproduce exactly. In Vanilla DD it
 sits outside the adaptation loop (the members never see it); in **Joint DD** it sits INSIDE it: `run_joint_dd` adapts both
 members on the entropy of the gated prediction, with the weight a constant of each step, as the brief defines it.
 
@@ -43,20 +44,10 @@ class PureProxyGate(JointProxyWeighted):
         ts = JointFixedTS(Tl=T_l, Ts=T_s, verbose=False)
         for prm in ts.parameters():
             prm.requires_grad_(False)
-        super().__init__(proxy_kind="nuclear_norm", cfg_l=ProxyStats("large", num_classes),
-                         cfg_s=ProxyStats("small", num_classes), beta=beta, filter_kind="none", prior_l=0.0, prior_s=0.0,
-                         base_ts=ts, eps=eps, proxy_batch_size=b_t, pool="log", verbose=False)
-        self.proxy_kind = proxy                       # after the parent's check, which only knows the registry classes
-        self._stats = (stats_l, stats_s)
-        self._T = (T_l, T_s)
-
-    @torch.no_grad()
-    def _proxy_scores(self, z_l, z_s, f_l, f_s, labels):
-        kw = {}
-        if pure.PROXIES[self.proxy_kind].needs_duo:
-            kw["duo_logits"] = 0.5 * (z_l / self._T[0]) + 0.5 * (z_s / self._T[1])     # the fixed combination (beta = 0)
-        return (pure.score(self.proxy_kind, z_l, None, self._stats[0], **kw),
-                pure.score(self.proxy_kind, z_s, None, self._stats[1], **kw))
+        cfg_l, cfg_s = ProxyStats("large", num_classes), ProxyStats("small", num_classes)
+        cfg_l.source_stats, cfg_s.source_stats = stats_l, stats_s
+        super().__init__(proxy_kind=proxy, cfg_l=cfg_l, cfg_s=cfg_s, beta=beta, filter_kind="none", prior_l=0.0,
+                         prior_s=0.0, base_ts=ts, eps=eps, proxy_batch_size=b_t, pool="log", verbose=False)
 
 
 class RecordingCalibrator:

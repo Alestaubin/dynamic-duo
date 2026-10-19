@@ -20,13 +20,14 @@ import math
 import torch
 import torch.nn.functional as F
 
-from src.reliability.proxies.stats import build_proxy_stats, ProxyStats
+from src.reliability.proxies.stats import build_proxy_stats, needs_source_fit, ProxyStats
 from src.reliability.calibration.maps import load_calibration_maps
 
-# Proxy kinds that need a source-data pass to fit state before scoring:
-# atc (threshold), prototype (class means), cot (source label marginal).
-# nuclear_norm and ac_mc are stateless.
-_SOURCE_FIT_KINDS = {"atc", "prototype", "cot"}
+# Proxy kinds that get a source-data pass to fit state before scoring: those that need one (needs_source_fit: prototype's
+# class means, the stateful pure.py proxies' source statistics -- atc included) plus cot, which is stateless in pure.py
+# but is fitted anyway so ProxyStats.raw_proxies() keeps reporting it (stats._RAW_AFTER_FIT) for the calibration-map fits.
+# nuclear_norm, ac_mc and the other stateless proxies are free.
+_SOURCE_FIT_KINDS = {"cot"}
 
 
 def _build_proxy_stats(
@@ -43,7 +44,7 @@ def _build_proxy_stats(
 
     proto_metric ("cosine" | "mahalanobis") selects the prototype-proxy distance.
     """
-    if proxy_kind in _SOURCE_FIT_KINDS:
+    if proxy_kind in _SOURCE_FIT_KINDS or needs_source_fit(proxy_kind):
         from torch.utils.data import DataLoader
         from torchvision import datasets
         from src.utils.data import _pil_collate_fn
@@ -165,12 +166,6 @@ def build_proxy_weighted_calibrator(
     """
     from src.calibrators.joint_proxy_weighted import JointProxyWeighted
     from src.reliability.calibration.logit import to_logit
-
-    assert proxy_kind != "agreement", (
-        "proxy_kind='agreement' scores the model pair, not a single model, "
-        "and cannot drive JointProxyWeighted's gate; see "
-        "src/reliability/proxies/agreement.py."
-    )
 
     cfg_l, cfg_s = _build_proxy_stats(
         proxy_kind, config,

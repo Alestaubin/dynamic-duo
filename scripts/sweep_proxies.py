@@ -131,7 +131,7 @@ change what gets collected.
 Usage
 -----
     python scripts/sweep_proxies.py --config cfgs/dynamic_duo_config.yaml \
-        --proxy_kinds nuclear_norm atc prototype ac_mc cot \
+        --proxy_kinds nuclear_norm atc_negent prototype ac_mc cot \
         --calib_methods identity linear isotonic \
         --proxy_batch_sizes 32 128 512 \
         --csv_path out/proxy_sweep.csv
@@ -140,7 +140,7 @@ Usage
     # calibrator — see "Adaptation mode" above), instead of no_adapt:
     python scripts/sweep_proxies.py --config cfgs/dynamic_duo_config.yaml \
         --mode both_duo --steps 1 \
-        --proxy_kinds nuclear_norm atc ac_mc \
+        --proxy_kinds nuclear_norm atc_negent ac_mc \
         --calib_methods identity isotonic \
         --csv_path out/proxy_sweep_both_duo.csv
 """
@@ -171,9 +171,9 @@ from scripts._cli import (
     add_proto_metric_arg, add_wandb_project_group_args, add_tta_args, tta_tag,
 )
 
-_ALL_PROXY_KINDS = ["nuclear_norm", "atc", "prototype", "ac_mc", "cot"]
+_ALL_PROXY_KINDS = ["nuclear_norm", "atc_negent", "prototype", "ac_mc", "cot"]
 _ALL_CALIB_METHODS = ["identity", "linear", "platt", "beta", "isotonic"]
-_SOURCE_FIT_KINDS = {"atc", "prototype", "cot"}
+_SOURCE_FIT_KINDS = {"atc_negent", "prototype", "cot"}
 
 _TABLE_COLUMNS = [
     "proxy_kind", "calib_method", "proxy_batch_size", "n",
@@ -340,7 +340,7 @@ def _records_from_raw(cfg_l, cfg_s, z_l, z_s, f_l, f_s, labels, batch_size, corr
 
     This is the actually-expensive step, NOT the sklearn fits in
     fit_calibration_maps: make_record -> raw_proxies() scores EVERY fitted
-    proxy on cfg_l/cfg_s (see ProxyStats.proxies = build_all()), regardless of
+    proxy on cfg_l/cfg_s (see ProxyStats.raw_proxies), regardless of
     which proxy_kinds the caller asked for — so if cot/atc/prototype were
     source-fitted, every chunk here pays cot's O(batch_size^3) Hungarian
     assignment and nuclear_norm's SVD. tqdm makes that visible instead of a

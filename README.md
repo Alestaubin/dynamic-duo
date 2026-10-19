@@ -139,6 +139,7 @@ python scripts/08_select_proxy.py --duo vitb16_rn50v1 --algos tent eta --seed 0 
 | Column | Meaning |
 |---|---|
 | `T_L*`, `T_S*` | The temperatures that minimize the duo's NLL on that stream (this uses the labels). |
+| `T_L*/T_S*` | Their ratio. The Average row is the mean of the 15 per-stream ratios, not the ratio of the two averaged columns. |
 | Large, Small | Each model's own accuracy. |
 | Clean TS | Accuracy with temperatures fitted on clean data. |
 | Held-out TS | Accuracy with temperatures fitted on the 4 held-out corruptions. This is the paper's Fixed TS. |

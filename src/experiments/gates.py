@@ -33,10 +33,8 @@ from src.calibrators.joint_fixed_TS import JointFixedTS
 from src.calibrators.joint_proxy_weighted import JointProxyWeighted
 from src.experiments.specs import GateSpec
 from src.reliability.calibration.logit import to_logit
-from src.reliability.proxies.stats import ProxyStats
+from src.reliability.proxies.stats import ProxyStats, needs_source_fit
 from src.utils.config import REPO_ROOT
-
-_SOURCE_FIT_PROXIES = {"atc", "prototype", "cot"}
 
 
 class MemberOnly(BaseJointCalibrator):
@@ -87,7 +85,7 @@ def build_calibrator(spec: GateSpec, *, num_classes: int = 1000, member_names: t
         return ts
 
     if spec.kind == "proxy_weighted":
-        if spec.proxy in _SOURCE_FIT_PROXIES:
+        if needs_source_fit(spec.proxy):
             raise NotImplementedError(
                 f"proxy {spec.proxy!r} needs a source-data fit (clean train slice); not wired into the "
                 f"replay engine yet (plan.md Phase 3)."

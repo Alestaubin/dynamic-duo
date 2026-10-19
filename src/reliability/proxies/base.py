@@ -1,17 +1,20 @@
 """
 base.py
 =======
-Shared parent class for reliability proxies, plus a name -> class registry.
+Shared parent class for the proxies that are NOT pure functions of one member's
+logits, plus a name -> class registry. Every proxy that is one (nnn, msp, atc,
+cot, ...) lives in pure.py; what remains here is `prototype` (reads penultimate
+features, fits class means on clean source data via fit_source()) and `oracle`
+(reads ground-truth labels, a cheating upper bound).
 
 A proxy scores how reliable a model's prediction is on one batch (higher =
-more reliable). Some proxies need no source-data fitting (nuclear_norm);
-others fit scalar or tensor state on clean source data first (atc,
-prototype) via fit_source().
+more reliable).
 
-To add a new proxy: create a Proxy subclass in its own file under
-src/proxies/, decorate it with @register, and import that module from
-proxies.py. It then appears automatically in PROXY_KINDS and in every
-ProxyStats via build_all().
+To add a new proxy that needs features or labels: create a Proxy subclass in its
+own file under src/reliability/proxies/, decorate it with @register, and import
+that module from stats.py. It then appears automatically in PROXY_KINDS and in
+every ProxyStats via build_all(). A proxy of logits alone is a function in
+pure.py instead.
 """
 
 from __future__ import annotations

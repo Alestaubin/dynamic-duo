@@ -5,6 +5,7 @@ Optimal temperatures per stream, what each way of choosing them is worth, and th
 For clean validation, the 4 held-out corruptions and the 15 ImageNet-C test corruptions (severity 5), one row:
 
     T_L*  T_S*     the NLL-optimal temperatures of the duo on that stream (labels used)
+    T_L*/T_S*      their ratio (the Average row averages the per-stream ratios)
     Large  Small   each member's own accuracy
     Clean TS       accuracy with the temperatures fitted on clean data
     Held-out TS    accuracy with the temperatures fitted on the 4 held-out corruptions pooled ("Fixed TS")

@@ -146,6 +146,7 @@ def study_rows(src: LogitSource, labels: StudyLabels, *, batch_sizes: Sequence[i
 
         tl, ts, _ = O.fit_temperatures(s.z_l, s.z_s, s.y)
         row["T_l_opt"], row["T_s_opt"] = float(tl), float(ts)
+        row["T_ratio_opt"] = row["T_l_opt"] / row["T_s_opt"]
         row["acc_corruption"], row["nll_corruption"] = O.acc_nll(s.z_l, s.z_s, s.y, float(tl), float(ts))
 
         for b in batch_sizes:
@@ -186,18 +187,18 @@ def render_table(df: pd.DataFrame, labels: StudyLabels, *, batch_sizes: Sequence
     ref = {k: tuple(float(df[f"{k}_T_{m}"].mean()) for m in "ls") for k in ("clean", "heldout")}
     num = [c for c in df.columns if c.startswith(("acc_", "nll_", "T_"))]
     df = pd.concat([df, _per_seed_mean(df, labels.test, num)], ignore_index=True)
-    cols = [("T_l_opt", False, 2), ("T_s_opt", False, 2), ("acc_large", True, 1), ("acc_small", True, 1),
+    cols = [("T_l_opt", False, 2), ("T_s_opt", False, 2), ("T_ratio_opt", False, 2), ("acc_large", True, 1), ("acc_small", True, 1),
             ("acc_clean_ts", True, 1), ("acc_heldout_ts", True, 1), ("acc_corruption", True, 1),
             *[(f"acc_batch{b}", True, 1) for b in batch_sizes], ("acc_per_sample", True, 1)]
 
     # header: groups / the batch-wise columns' common title / one name per column
-    first_batch = 9                                                # 1-based: after Stream, 2 T*, 2 members, 2 fixed, Corr.-wise
+    first_batch = 10                                               # 1-based: after Stream, 3 T*, 2 members, 2 fixed, Corr.-wise
     head = [
-        "& \\multicolumn{2}{c|}{Optimal temps.} & \\multicolumn{2}{c|}{Members} & \\multicolumn{2}{c|}{Fixed temperatures} "
+        "& \\multicolumn{3}{c|}{Optimal temps.} & \\multicolumn{2}{c|}{Members} & \\multicolumn{2}{c|}{Fixed temperatures} "
         f"& \\multicolumn{{{nb + 2}}}{{c}}{{Oracles (labels used)}} \\\\",
-        " & ".join([""] * 8 + [f"\\multicolumn{{{nb}}}{{c}}{{Batch-wise TS}}", ""]) + " \\\\",
+        " & ".join([""] * 9 + [f"\\multicolumn{{{nb}}}{{c}}{{Batch-wise TS}}", ""]) + " \\\\",
         f"\\cmidrule(lr){{{first_batch}-{first_batch + nb - 1}}}",
-        " & ".join(["Stream", "$T_L^*$", "$T_S^*$", "Large", "Small", "Clean TS", "Held-out TS", "Corr.-wise",
+        " & ".join(["Stream", "$T_L^*$", "$T_S^*$", "$T_L^*/T_S^*$", "Large", "Small", "Clean TS", "Held-out TS", "Corr.-wise",
                     *[f"$B{{=}}{b}$" for b in batch_sizes], "Per-sample"]) + " \\\\",
         "\\midrule",
     ]
@@ -218,7 +219,8 @@ def render_table(df: pd.DataFrame, labels: StudyLabels, *, batch_sizes: Sequence
     caption = (
         f"Temperatures and top-1 accuracy (\\%) of {'the frozen duo' if frozen else 'the duo'} at severity {severity}. "
         f"Large / Small: {models[0]} / {models[1]} {regime}. $T_L^*, T_S^*$: the temperatures minimizing the NLL of the duo "
-        f"on each stream (labels used), which define the corruption-wise oracle. \\emph{{Fixed temperatures}}, fitted without "
+        f"on each stream (labels used), which define the corruption-wise oracle, and $T_L^*/T_S^*$ their ratio (the last row "
+        f"averages the per-stream ratios). \\emph{{Fixed temperatures}}, fitted without "
         f"test labels: Clean TS on {clean_desc} ($T_L = {ref['clean'][0]:.2f}$, $T_S = {ref['clean'][1]:.2f}$), and Held-out TS "
         f"on the four held-out corruptions ($^\\dagger$) pooled ($T_L = {ref['heldout'][0]:.2f}$, $T_S = {ref['heldout'][1]:.2f}$, "
         f"in-sample on those four rows). \\emph{{Oracles}}, all using labels and evaluated in-sample: corruption-wise TS fits the "
@@ -226,7 +228,7 @@ def render_table(df: pd.DataFrame, labels: StudyLabels, *, batch_sizes: Sequence
         f"sample by gradient descent. The last row averages the 15 test corruptions."
         + (f" Mean $\\pm$ std over {n_seeds} seeds." if n_seeds > 1 else "")
     )
-    return table_env(body, "l|cc|cc|cc|" + "c" * (nb + 2), caption, table_labels[0], star=True, resize=False,
+    return table_env(body, "l|ccc|cc|cc|" + "c" * (nb + 2), caption, table_labels[0], star=True, resize=False,
                      source=source, tabcolsep=4.5, extra_labels=table_labels[1:])
 
 
@@ -338,6 +340,7 @@ if __name__ == "__main__":
     for r in rows:
         assert all(v is not None and v == v for v in r.values()), r                # no NaN anywhere: the table has no "--"
         assert 0.05 <= r["T_l_opt"] <= 50 and 0.05 <= r["T_s_opt"] <= 50
+        assert abs(r["T_ratio_opt"] - r["T_l_opt"] / r["T_s_opt"]) < 1e-9
         assert r["nll_corruption"] <= r["nll_clean_ts"] + eps and r["nll_corruption"] <= r["nll_heldout_ts"] + eps
         assert r["nll_batch128"] <= r["nll_corruption"] + eps, r
         assert r["nll_batch16"] <= r["nll_batch128"] + eps, "16 divides 128, so its batches nest inside the 128-batches"
@@ -361,17 +364,17 @@ if __name__ == "__main__":
     t = render_table(df, labels, batch_sizes=(16, 128), **kw)
     body = [l.strip() for l in t.splitlines() if l.strip().endswith("\\\\") and "&" in l]
     assert len(body) == 3 + 1 + 4 + 15 + 1, len(body)                      # 3 header rows (groups, batch title, names)
-    assert body[0].count("&") == 4 and body[1].count("&") == 9 and all(l.count("&") == 10 for l in body[2:])   # 11 columns
+    assert body[0].count("&") == 4 and body[1].count("&") == 10 and all(l.count("&") == 11 for l in body[2:])   # 12 columns
     assert body[2].startswith("Stream") and "$B{=}128$ & $B{=}16$ & Per-sample" in body[2], "largest B first"
     assert body[3].startswith("Clean (val)") and body[4].startswith("Speckle noise$^\\dagger$") and "pm" in body[-1]
     assert body[-1].startswith("Average (15 test)") and "--" not in t
-    assert t.count("\\midrule") == 4 and "\\cmidrule(lr){9-10}" in t and "\\multicolumn{2}{c}{Batch-wise TS}" in t
-    assert "\\label{tab:temperatures:tent}" in t and "\\label{tab:oracles:tent}" in t and "{tabular}{l|cc|cc|cc|cccc}" in t
+    assert t.count("\\midrule") == 4 and "\\cmidrule(lr){10-11}" in t and "\\multicolumn{2}{c}{Batch-wise TS}" in t
+    assert "\\label{tab:temperatures:tent}" in t and "\\label{tab:oracles:tent}" in t and "{tabular}{l|ccc|cc|cc|cccc}" in t
     assert "$B \\in \\{128, 16\\}$" in t and "\\begin{table*}[t]" in t and "tabcolsep}{4.5pt}" in t
     t1 = render_table(pd.DataFrame(with_seed(rows, 0, 0.0)), labels, batch_sizes=(16,), **{**kw, "frozen": True})
     body1 = [l.strip() for l in t1.splitlines() if l.strip().endswith("\\\\") and "&" in l]
-    assert body1[0].count("&") == 4 and all(l.count("&") == 9 for l in body1[1:]) and "every batch of 16 consecutive samples" in t1
-    assert "{tabular}{l|cc|cc|cc|ccc}" in t1 and "the frozen duo" in t1 and "\\multicolumn{1}{c}{Batch-wise TS}" in t1
+    assert body1[0].count("&") == 4 and all(l.count("&") == 10 for l in body1[1:]) and "every batch of 16 consecutive samples" in t1
+    assert "{tabular}{l|ccc|cc|cc|ccc}" in t1 and "the frozen duo" in t1 and "\\multicolumn{1}{c}{Batch-wise TS}" in t1
 
     # the frozen regime is named by --bn: the two settings give different numbers, so different files and captions
     from types import SimpleNamespace as NS

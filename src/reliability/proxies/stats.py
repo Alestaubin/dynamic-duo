@@ -3,14 +3,25 @@ stats.py
 ========
 Per-batch reliability proxies for heterogeneous model pairs.
 
-Each proxy (nuclear_norm, atc, prototype, ac_mc, cot) is a Proxy subclass
-living in its own file under src/reliability/proxies/ (see base.py). This
-module provides ProxyStats, the dataclass that holds per-model SOURCE-FITTED
-proxy state, FeatureExtractor for hook-based penultimate feature capture, and
+Two layers feed one scoring entry point, ProxyStats.score:
+  * pure.py — every proxy that is a function of one member's logits (nnn, msp,
+    energy, atc, doc, cot, ...; `PROXIES`). This is the one library: the paper's
+    evaluator (dd_eval.py) and the live gate (JointProxyWeighted) both use it.
+    The old kind names (`nuclear_norm`, `ac_mc`) resolve to it through
+    pure.LEGACY_KINDS, so configs written against them still work. (The old
+    registry `atc` was the negative-entropy ATC: ask for `atc_negent`; `atc`
+    is pure.py's max-confidence ATC.)
+  * the Proxy registry (base.py; prototype.py, oracle.py) — only the two proxies
+    a logits-only function cannot express: `prototype` reads penultimate
+    features, `oracle` reads ground-truth labels.
+This module provides ProxyStats, the dataclass that holds per-model SOURCE-FITTED
+state (the registry proxies' state + `source_stats`, the dict the stateful pure
+proxies read), FeatureExtractor for hook-based penultimate feature capture, and
 build_proxy_stats for building both ProxyStats from a source dataloader.
 
-Adding a new proxy: create a Proxy subclass in its own file, decorate it with
-@register, and import that module below — it then appears automatically in
+Adding a proxy of logits alone: a function in pure.py plus its `PROXIES` entry.
+Adding one that needs features or labels: a Proxy subclass in its own file,
+decorated with @register, imported below — it then appears automatically in
 PROXY_KINDS and in every ProxyStats.
 
 Persistence: stats live in their own directory (DEFAULT_PROXY_DIR) and
@@ -31,9 +42,8 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from src.reliability.proxies import pure
 from src.reliability.proxies.base import Proxy, build_all, registered_names
-from src.reliability.proxies.nuclear_norm import NuclearNormProxy, nuclear_norm_score
-from src.reliability.proxies.atc import ATCProxy, atc_score, fit_atc_threshold
 from src.reliability.proxies.prototype import (
     PrototypeProxy,
     prototype_score,
@@ -42,8 +52,6 @@ from src.reliability.proxies.prototype import (
     build_class_means,
     build_tied_precision,
 )
-from src.reliability.proxies.ac_mc import AcMcProxy, ac_mc_score
-from src.reliability.proxies.cot import CotProxy, cot_score
 from src.reliability.proxies.oracle import OracleProxy, oracle_score
 from src.reliability.calibration.base import CalibrationMap
 
@@ -57,12 +65,9 @@ __all__ = [
     "list_proxy_stats",
     "DEFAULT_PROXY_DIR",
     "PROXY_STATS_SUFFIX",
-    "NuclearNormProxy", "nuclear_norm_score",
-    "ATCProxy", "atc_score", "fit_atc_threshold",
+    "needs_source_fit",
     "PrototypeProxy", "prototype_score", "mahalanobis_score",
     "build_prototypes", "build_class_means", "build_tied_precision",
-    "AcMcProxy", "ac_mc_score",
-    "CotProxy", "cot_score",
     "OracleProxy", "oracle_score",
 ]
 
@@ -71,8 +76,21 @@ __all__ = [
 DEFAULT_PROXY_DIR = Path("data/proxy_stats")
 PROXY_STATS_SUFFIX = ".proxystats.pt"
 
-# Every registered proxy name (nuclear_norm, atc, prototype, ...).
-PROXY_KINDS = frozenset(registered_names())
+# Every kind ProxyStats.score accepts: the registry's (prototype, oracle), pure.py's (nnn, msp, energy, cot, ...) and the
+# legacy names that resolve to pure.py's (nuclear_norm, ac_mc).
+PROXY_KINDS = frozenset(registered_names()) | frozenset(pure.PROXIES) | frozenset(pure.LEGACY_KINDS)
+
+# raw_proxies() reports the kinds the registry used to, so calibration-map fitting and the sweeps see the same columns: the
+# two stateless ones always, the two that used to be fitted on source data once `source_stats` exists.
+_RAW_ALWAYS = ("nuclear_norm", "ac_mc")
+_RAW_AFTER_FIT = ("atc_negent", "cot")
+
+
+def needs_source_fit(kind: str) -> bool:
+    """Whether scoring `kind` needs ProxyStats.fit_source first: prototype (class means) or a stateful pure proxy
+    (energy, atc, atc_negent, doc: their source statistics)."""
+    name = pure.canonical(kind)
+    return kind == "prototype" or (name in pure.PROXIES and pure.PROXIES[name].stateful)
 
 
 # ─── Per-model proxy stats ───────────────────────────────────────────
@@ -81,13 +99,16 @@ PROXY_KINDS = frozenset(registered_names())
 class ProxyStats:
     """Source-fitted state for computing reliability proxies on ONE model.
 
-    Holds one Proxy instance per registered proxy kind (see base.py). Built
-    offline from clean source data via fit_source(); raw_proxies() then scores
-    a batch under every fitted proxy.
+    Holds one Proxy instance per REGISTRY proxy kind (prototype, oracle; see
+    base.py) and `source_stats`, the dict of source-slice statistics pure.py's
+    stateful proxies read. Built offline from clean source data via
+    fit_source(); raw_proxies() then scores a batch under every fitted proxy.
     """
     name: str
     num_classes: int
     proxies: dict[str, Proxy] = field(default_factory=build_all)
+    # pure.fit_source_stats of this model's logits on the clean source slice; None until fit_source().
+    source_stats: dict | None = None
     # raw proxy → predicted accuracy. Populated at runtime by
     # calibration.maps.CalibrationMaps.attach(); NOT persisted with these stats.
     calib: dict[str, CalibrationMap] = field(default_factory=dict)
@@ -98,21 +119,29 @@ class ProxyStats:
     ) -> None:
         for proxy in self.proxies.values():
             proxy.fit_source(logits, features, labels, num_classes)
+        self.source_stats = pure.fit_source_stats(logits, labels)
 
     def raw_proxies(
         self, logits: torch.Tensor, features: torch.Tensor, labels: torch.Tensor | None = None,
     ) -> dict[str, float]:
-        return {
+        out = {
             name: proxy.score(logits, features, labels=labels)
             for name, proxy in self.proxies.items()
             if proxy.is_fitted and not (proxy.requires_labels and labels is None)
         }
+        for name in _RAW_ALWAYS + (_RAW_AFTER_FIT if self.source_stats is not None else ()):
+            out[name] = self.score(name, logits, features)
+        return out
 
     def score(
         self, proxy_name: str, logits: torch.Tensor, features: torch.Tensor | None,
-        labels: torch.Tensor | None = None,
+        labels: torch.Tensor | None = None, **kw,
     ) -> float:
-        return self.proxies[proxy_name].score(logits, features, labels=labels)
+        """One kind on one batch: a registry proxy (prototype, oracle) if it is one, else pure.py's. `kw` reaches
+        the pure function (`duo_logits` for agree_duo, `seed` for cot)."""
+        if proxy_name in self.proxies:
+            return self.proxies[proxy_name].score(logits, features, labels=labels)
+        return pure.score(proxy_name, logits, None, self.source_stats, **kw)
 
     def predicted_acc(self, proxy_name: str, raw_value: float) -> float:
         if proxy_name in self.calib:
@@ -225,6 +254,8 @@ def save_proxy_stats(
         "num_classes": cfg_l.num_classes,
         "proxies_l":   {n: p.state_dict() for n, p in cfg_l.proxies.items()},
         "proxies_s":   {n: p.state_dict() for n, p in cfg_s.proxies.items()},
+        "source_stats_l": cfg_l.source_stats,
+        "source_stats_s": cfg_s.source_stats,
     }, path)
     print(f"[proxy stats] saved → {path} (proxies={sorted(cfg_l.proxies)})")
     return path
@@ -244,6 +275,8 @@ def load_proxy_stats(
         for proxy_name, state in data[key].items():
             if proxy_name in cfg.proxies:
                 cfg.proxies[proxy_name].load_state_dict(state)
+    # absent in files written before the registry's atc/cot/nuclear_norm/ac_mc were retired (build_proxy_stats warns)
+    cfg_l.source_stats, cfg_s.source_stats = data.get("source_stats_l"), data.get("source_stats_s")
     print(f"[proxy stats] loaded ← {path} (proxies={sorted(data['proxies_l'])})")
     return cfg_l, cfg_s
 
@@ -289,6 +322,11 @@ def build_proxy_stats(
     """
     if cache_path is not None and _resolve_path(cache_path, cache_dir).exists():
         cfg_l, cfg_s = load_proxy_stats(cache_path, cache_dir)
+        if cfg_l.source_stats is None:
+            warnings.warn(
+                f"cached proxy stats {cache_path!r} predate pure.py's source statistics: the source-fitted kinds "
+                f"(atc, cot, energy, doc, ...) cannot be scored from it. Use a different --proxy_cache name to rebuild."
+            )
         cached_proto = cfg_l.proxies["prototype"]
         cached_metric = cached_proto.metric if isinstance(cached_proto, PrototypeProxy) else "cosine"
         if cached_metric != proto_metric:
