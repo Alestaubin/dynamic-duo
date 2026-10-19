@@ -7,7 +7,7 @@ batch_size: 64
 OPTIM:
   METHOD: SGD
   STEPS: 1
-  LR: 0.0005
+  LR: 0.00025
   MOMENTUM: 0.9
   DAMPENING: 0.0
   WD: 0.0

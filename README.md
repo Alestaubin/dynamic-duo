@@ -109,8 +109,17 @@ On this cluster the login node kills processes above 5 GB of memory, so run anyt
 | `02_tune_tta.py --model NAME` | Tunes Tent's optimizer settings for one model on the 4 held-out corruptions, and writes `cfgs/tuned/`. |
 | `03_tab_adaptation_modes.py` | Six ways of adapting the duo (joint, one model adapting, independent), all scored with the same Fixed TS. |
 | `setup_check.py` | Checks the dataset paths and the config. |
+| `cache_logits.py` | Adapts a duo's two members (they never see each other) and stores their logits **per member**, under a key made of that member's own settings, in `cache/logits/`. `--grid` runs the learning-rate sweep (run i uses the i-th value of each model's grid), `--streams` picks held-out / test / clean / the clean training slice / a natural shift. Any large member can be paired with any small one afterwards. A support script: it produces no table. |
+| `eval_duo_grid.py` | Reads a stored pair and evaluates Vanilla Dynamic Duos offline: every proxy x beta x proxy-batch size, the members alone, the fixed combinations, the oracles and the proxy diagnostics, from the cached logits alone (no model). Also a support script. |
 
 Later scripts (`08` onwards, the main results) are planned in `plan.md`.
+
+The two support scripts, in the order they are used (the design is in `docs/design_section45.md`; launch arrays only after checking `plan.md`, Phase 3):
+
+```bash
+python scripts/cache_logits.py --duo vitb16_rn50v1 --streams heldout clean_train_slice --grid --seeds 0 --shard auto   # as a SLURM array
+python scripts/eval_duo_grid.py --duo vitb16_rn50v1 --seeds 0 --grid_large 3 --grid_small 2                           # offline, one pair
+```
 
 **Run order.** Run `02_tune_tta.py` first, once for each model of the duo (for the default duo: `--model vit_b_16` and `--model resnet50`). Its result in `cfgs/tuned/` changes the learning rates that every other script uses, and the learning rates are part of the cache fingerprint. Logits cached before tuning are therefore not found any more, and `01` and `03` start from the tuned settings. After that, run `01` and `03` in any order.
 

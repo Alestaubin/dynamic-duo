@@ -97,3 +97,13 @@ repos:
       the frost textures from here, so the textures are taken from this checkout instead.
     sparse: [ImageNet-C/create_c]
     used_by: [scripts/ccc_generate.py]
+
+  COCA:
+    url: https://github.com/ycarobot/COCA
+    commit: e13f75f3f8f3fd8fd33009d692ae38965d4007c9
+    license: none found (the repository has no LICENSE file); ask the authors before copying code into src/
+    purpose: >
+      Official COCA ("When Small Guides Large"): the coupled small/large duo method with its own
+      objective. Pinned 2026-10-18 for the Dynamic Duos comparison (Phase 3, Stage D); it is a duo
+      method with its own run, not a cached base algorithm.
+    used_by: [src/tta/methods/coca.py]
