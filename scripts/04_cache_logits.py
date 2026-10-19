@@ -14,9 +14,9 @@ made of its own settings, and the best large member of one run can be paired wit
     --lr_large LR --lr_small LR [--momentum M]   one explicit run (SGD) instead of the tuned settings
     without --grid / --lr_*: the duo's settings as cfgs/duos + cfgs/tuned give them
 
-    python scripts/cache_logits.py --duo vitb16_rn50v1 --streams heldout --grid --seeds 0 --shard auto   # a SLURM array
-    python scripts/cache_logits.py --duo vitb16_rn50v1 --streams test clean --seeds 0 1 2 --lr_large 5e-4 --lr_small 2.5e-4
-    python scripts/cache_logits.py ... --report_only        # never runs a model: lists what is missing, verifies the rest
+    python scripts/04_cache_logits.py --duo vitb16_rn50v1 --streams heldout --grid --seeds 0 --shard auto   # a SLURM array
+    python scripts/04_cache_logits.py --duo vitb16_rn50v1 --streams test clean --seeds 0 1 2 --lr_large 5e-4 --lr_small 2.5e-4
+    python scripts/04_cache_logits.py ... --report_only        # never runs a model: lists what is missing, verifies the rest
 
 Each stream is staged in $SLURM_TMPDIR (when set), copied to the store, its sha256 compared, and only then recorded, so a
 job that dies loses at most the stream in flight and a rerun continues. The run manifest (config, git hash, seed, sha256

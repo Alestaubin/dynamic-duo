@@ -6,7 +6,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:30:00
 #SBATCH --account=aip-evanesce
 
 # Like slurm/job.sh (runs any repo script inside a SLURM job, submit from the repo root) but WITHOUT a GPU, for

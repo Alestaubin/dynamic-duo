@@ -2,7 +2,7 @@
 """
 Evaluate Vanilla Dynamic Duos offline on a stored pair of members (Phase 3, Stage C; src/experiments/dd_eval.py).
 
-A support script, not a paper table: it reads the members' logits that scripts/cache_logits.py stored, never runs a model, and
+A support script, not a paper table: it reads the members' logits that scripts/04_cache_logits.py stored, never runs a model, and
 writes what proxy selection (Stage E) and the tables are built from: for every proxy x beta x b_t the accuracy, ECE and NLL on
 each stream, the members alone, the fixed combinations (clean TS and held-out TS), the oracles, the proxy diagnostics and
 the per-bucket records. The temperature sets are fitted here, per pair, on the held-out streams pooled (held-out TS) and on the
@@ -15,8 +15,8 @@ clean held-out slice of the TRAINING images (clean TS, and the source statistics
     --extra NAME [...]     further stored streams to evaluate (e.g. clean), reported separately
     --proxies / --betas / --b_ts   restrict the grid (default: the brief's: 14 proxies, 7 betas, 6 bucket sizes)
 
-    python scripts/eval_duo_grid.py --duo vitb16_rn50v1 --seeds 0 --grid_large 3 --grid_small 2
-    python scripts/eval_duo_grid.py ... --test --extra clean            # with every choice frozen, on the test streams
+    python scripts/07_eval_duo_grid.py --duo vitb16_rn50v1 --seeds 0 --grid_large 3 --grid_small 2
+    python scripts/07_eval_duo_grid.py ... --test --extra clean            # with every choice frozen, on the test streams
 
 Output (under <out>, default <paths.out>/results/eval_duo_grid): <run>.rows.csv, .diag.csv, .records.npz, .temps.json.
 Needs a GPU for the full grid on 50,000-image streams (a job); the small smoke streams run anywhere.
@@ -87,7 +87,7 @@ def main() -> int:
         need = [*held, *test, *extra, *([clean] if clean else [])]
         if missing := [s for s in need if s not in have]:
             print(f"seed {seed}: streams missing from the store for large {ml.key} / small {ms.key}: {missing} "
-                  f"(scripts/cache_logits.py fills them)")
+                  f"(scripts/04_cache_logits.py fills them)")
             status = 1
             continue
         res = run_pair(pair, held, test, cfg, clean_stem=clean, extra=extra, device=args.device)

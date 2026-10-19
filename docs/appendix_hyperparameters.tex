@@ -1,0 +1,37 @@
+% Appendix section: how the base algorithms' hyperparameters were set. Needs booktabs. Every number is from the held-out runs of
+% docs/stage_d_run_table.md (sections 7 to 9) and from the official code (third_party/: SAR, EATA, COCA, test-time-adaptation).
+\section{Hyperparameters of the base algorithms}\label{app:hparams}
+
+All five algorithms (Tent, ETA, EATA, SAR, COCA) adapt the affine parameters of the normalization layers with SGD (momentum $0.9$) at batch size $64$.
+We tuned only the learning rate, separately for each model, on the four held-out corruptions (speckle noise, Gaussian blur, spatter, saturate; severity~5,
+all $50{,}000$ images of each, models reset before each stream, one seed) and never on a test corruption.
+The grids were $\{5{\cdot}10^{-5}, 10^{-4}, 2.5{\cdot}10^{-4}, 5{\cdot}10^{-4}, 10^{-3}\}$ for ResNet-50 and $\{10^{-4}, 2.5{\cdot}10^{-4}, 5{\cdot}10^{-4}, 10^{-3}, 2.5{\cdot}10^{-3}\}$ for ViT-B/16.
+The two models adapt independently, so run~$i$ uses the $i$-th value of both grids, and each model keeps the value with the best standalone mean accuracy over the held-out streams.
+Where the best value was the end of a grid we added one point: $5{\cdot}10^{-5}$ for the ViT under Tent, and $5{\cdot}10^{-3}$ (ViT) and $2{\cdot}10^{-3}$ (ResNet-50) under SAR; for SAR's ViT the gain from the last step was only $0.5$ points, so its optimum may lie slightly beyond.
+COCA couples the two models, so it was tuned by pairs of learning rates, and also run at its published pair.
+Everything else is the official setting and was not tuned: entropy margin $0.4\ln K$, redundancy threshold $0.05$ (ETA, EATA), Fisher weight $2000$ estimated on $2000$ clean images (EATA; taken from a held-out slice of the ImageNet training set, not from the validation images ImageNet-C is rendered from), SAM radius $0.05$, no model recovery, and, as in its code, no adaptation of the normalization parameters of the last ResNet stage and of the last three ViT blocks (SAR, as a base algorithm), and $10$ temperature steps per batch (COCA, as in its code).
+Table~\ref{tab:hparams} gives the values and the learning rates of the official code for each architecture.
+For ResNet-50 they agree for Tent and ETA and differ by a factor $2$ to $4$ for EATA, SAR and COCA; on the held-out streams the official value is within $0.3$ points of ours for EATA and COCA and about $2$ points lower for SAR.
+For ViT-B/16 ours are lower than the official $10^{-3}$ for Tent ($20\times$; at $10^{-3}$ Tent falls to $44.5\%$ on the held-out streams, below the unadapted $48.8\%$), ETA and EATA ($2\times$), higher for SAR ($5\times$; $10^{-3}$ scores $57.9\%$ against $59.9\%$), and equal for COCA.
+Our ViT-B/16 is torchvision's ImageNet-1k model rather than the AugReg model of those papers, so its optimum need not carry over, while our ResNet-50 uses the original weights the papers use.
+
+\begin{table}[t]
+    \centering
+    \small
+    \caption{Learning rates (SGD, momentum $0.9$, batch size $64$) used in our experiments and in the official code (the SAR and COCA code bases set $2.5{\cdot}10^{-4}$ for ResNet-50 and $10^{-3}$ for ViT-B/16 at this batch size).
+    For Tent's ResNet-50 we use the value of the Tent paper although the held-out optimum, $5{\cdot}10^{-4}$, is $1.1$ points better. COCA's pair is the best of its grid.}
+    \label{tab:hparams}
+    \begin{tabular}{lcccc}
+        \toprule
+        & \multicolumn{2}{c}{ViT-B/16} & \multicolumn{2}{c}{ResNet-50} \\
+        \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+        Algorithm & ours & official & ours & official \\
+        \midrule
+        Tent & $5{\cdot}10^{-5}$ & $10^{-3}$ & $2.5{\cdot}10^{-4}$ & $2.5{\cdot}10^{-4}$ \\
+        ETA  & $5{\cdot}10^{-4}$ & $10^{-3}$ & $2.5{\cdot}10^{-4}$ & $2.5{\cdot}10^{-4}$ \\
+        EATA & $5{\cdot}10^{-4}$ & $10^{-3}$ & $5{\cdot}10^{-4}$   & $2.5{\cdot}10^{-4}$ \\
+        SAR  & $5{\cdot}10^{-3}$ & $10^{-3}$ & $10^{-3}$           & $2.5{\cdot}10^{-4}$ \\
+        COCA & $10^{-3}$         & $10^{-3}$ & $5{\cdot}10^{-4}$   & $2.5{\cdot}10^{-4}$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}

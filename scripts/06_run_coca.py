@@ -10,7 +10,7 @@ the runs themselves.
 
     --streams heldout|test|clean|<natural dataset>      (default heldout; 1000-class streams only)
     --grid [i ...]                                      grid points (default: all five); or --lr_large LR --lr_small LR
-    python scripts/run_coca.py --duo vitb16_rn50v1 --streams heldout --grid --seeds 0 --shard auto   # a SLURM array
+    python scripts/06_run_coca.py --duo vitb16_rn50v1 --streams heldout --grid --seeds 0 --shard auto   # a SLURM array
 
 Writes <out>/coca__<duo>__seed<seed>__lrL<lr>_lrS<lr>.rows.csv (accuracy, ECE, NLL of the combination and of each member, per stream)
 and .tau.json (the temperature after every batch). Launch arrays only with the author's approval (plan.md, Phase 3).

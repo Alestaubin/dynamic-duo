@@ -22,7 +22,7 @@ members, so its 5 runs cannot be composed; its learning rate is chosen per run.
 ## 2. The run table
 
 One run = both members over 4 streams x 50,000 images = 200,000 images, on one L40S. One array per algorithm, 5 tasks,
-`scripts/cache_logits.py --streams heldout --grid --shard auto` (COCA through its own driver).
+`scripts/04_cache_logits.py --streams heldout --grid --shard auto` (COCA through its own driver).
 
 | Algorithm | Runs | Minutes per run | GPU-hours | Basis |
 |---|---|---|---|---|
@@ -122,9 +122,97 @@ approved. Each task takes 19 to 36 minutes. Contingency (D): +0.3 h per Tent-cla
 lands on 1e-4.
 
 **Parity and the CLIs on real models.** Tent through the new [0, 1] path equals the existing path (largest logit difference 1.5e-5,
-identical accuracy on 2000 images). `cache_logits.py --tta sar --grid`, `select_member_lr.py` and `--report_only` ran end to end.
+identical accuracy on 2000 images). `04_cache_logits.py --tta sar --grid`, `05_select_member_lr.py` and `--report_only` ran end to end.
 COCA's temperature rose from 1.1 to 2.1 over a stream, and on the first 5000 speckle-noise images COCA scored 57.1% against 55.1% for the
 large member alone (Tent-like settings, one learning-rate pair: a functional check, not a result).
 
-**Launched.** Only the ETA array (job 6424535, tasks 0 to 4 = grid points 0 to 4), as the first of the five so that a problem shows
-early. Waiting for your explicit go: the Tent single run, EATA, SAR and COCA (about 6.7 of the 8.3 hours).
+**Launched.** The ETA array (job 6424535, tasks 0 to 4 = grid points 0 to 4) first, so that a problem would show early; it finished cleanly
+(17.6 to 18.0 minutes per task, every checksum verified). On your instruction to launch the rest if all was good, 2026-10-19: job 6425539
+(Tent, one run), 6425540 (EATA), 6425541 (SAR), 6425542 (COCA), 16 tasks, about 6.7 of the 8.3 hours.
+
+## 7. Results of the tuning runs (2026-10-19)
+
+All 16 tasks finished with exit 0; every stored file's sha256 verifies. Standalone accuracy of each member on the four held-out streams,
+macro mean (worst stream), %, seed 0, SGD momentum 0.9, run i = i-th value of each model's grid:
+
+| ViT-B/16 lr | 1e-4 | 2.5e-4 | 5e-4 | 1e-3 | 2.5e-3 |
+|---|---|---|---|---|---|
+| ETA | 57.5 (42.8) | 59.6 (45.5) | **60.3 (45.9)** | 59.5 (43.3) | 54.5 (30.4) |
+| EATA | 57.3 (42.7) | 59.5 (45.5) | **60.3 (46.0)** | 60.0 (44.8) | 57.1 (38.3) |
+| SAR | 52.1 (34.8) | 54.3 (39.0) | 56.1 (41.8) | 57.9 (44.2) | **59.4 (45.8)** (top of the grid) |
+| Tent (the `02` runs) | **50.9 (35.0)** (bottom of the grid) | 46.2 | 45.1 | 44.5 | 43.9 |
+| COCA, its ViT member | 56.5 (40.7) | 58.8 (43.8) | 60.0 (45.3) | **60.5 (45.6)** | 56.0 (28.4) |
+
+| ResNet-50 V1 lr | 5e-5 | 1e-4 | 2.5e-4 | 5e-4 | 1e-3 |
+|---|---|---|---|---|---|
+| ETA | 45.2 (23.7) | 47.4 (26.6) | **48.5 (26.4)** | 48.3 (24.5) | 41.8 (2.3) |
+| EATA | 45.0 (23.3) | 47.1 (26.5) | 48.8 (28.2) | **48.9 (26.4)** | 47.7 (22.4) |
+| SAR | 39.7 (17.1) | 42.0 (19.6) | 44.5 (21.1) | 46.5 (24.1) | **46.5 (20.6)** (top of the grid) |
+| Tent (the `02` runs) | 39.6 | 41.8 | 44.5 (21.8) | **45.6** | 44.7 |
+| COCA, its ResNet member | 43.8 (22.3) | 46.5 (26.6) | 49.6 (31.0) | **51.3 (33.5)** | 50.4 (27.9) |
+
+(Tent's ViT and ResNet grids in the `02` ranking are the momentum-0.9 rows. The frozen models score 48.8 (ViT) and 34.8 (ResNet).)
+
+COCA's prediction is the combination of its two members, so its grid is read by pair (run i = ViT grid i with ResNet grid i), macro mean
+(worst stream) of the combined prediction: 58.7 (41.8), 60.5 (44.7), 61.6 (46.1), **62.1 (46.5)**, 57.5 (29.3), with NLL 1.91, 1.81, 1.77, 1.79,
+2.57. The best is run 3 (ViT 1e-3, ResNet 5e-4), interior, and there the combination beats COCA's own ViT member by 1.6 points and its ResNet
+by 10.8. COCA's temperature ends a stream at about 2.1 to 2.6, and near 6.5 to 6.9 on Gaussian blur.
+
+**Cross-checks.** The stored Tent run (ViT 1e-4, ResNet 2.5e-4) reproduces the `02` tuner's per-stream accuracies exactly. ETA and EATA are
+within 0.1 point of each other on the ViT, and EATA's ResNet gains 0.3 over ETA (its 2.5e-4 and 5e-4 are a tie, 48.82 against 48.85).
+
+**What needs your decision.**
+1. **SAR's winners are at the top of the grid** for both members, and the ViT is still rising by about 1.5 points per step. The brief fixes the
+   grids, and decision D covered only the lowest edge. One more run, ViT 5e-3 with ResNet 2e-3 (both next points at the grid's own spacing),
+   costs about 0.6 L40S-hours and would show whether SAR peaks beyond. The ResNet is nearly flat from 5e-4 to 1e-3 (worst stream falls), so its
+   grid is probably adequate. Without it, SAR is reported at ViT 2.5e-3 and ResNet 1e-3 with the edge noted.
+2. **Tent's ResNet learning rate.** The `02` ranking's winner is 5e-4 (45.58), but `cfgs/tuned/tent__resnet50_v1.yaml` says 2.5e-4 (44.52 on
+   these runs), with the 5e-4 trial's score still in it, and its header says not to edit it by hand, so it looks like a deliberate edit to
+   Tent's published setting. The single Tent run I launched followed the file, as instructed. If `02`'s winner is meant, the ResNet member at
+   5e-4 is already being produced by the extra run below, so nothing more is needed but your choice.
+3. **COCA's published pair** (ViT 1e-3, ResNet 2.5e-4) is not a grid point, because the runs pair index i of both grids. One extra run (0.3 h) puts
+   the paper's own setting next to the best grid point (62.1).
+
+**Launched under approved decisions.** Clean-slice runs for ETA (6426793) and EATA (6426794) at their chosen pairs, and for Tent the extra ViT
+point of decision D (lr 5e-5, with the ResNet at 5e-4: job 6426795), after which the Tent ViT lr is chosen between 5e-5 and 1e-4.
+Tuned files written for ETA and EATA (interior winners, no ambiguity). Not yet written: SAR (decision 1), Tent (decision 2 and the 5e-5 point).
+
+## 8. Answers to section 7 and the follow-up runs (2026-10-19)
+
+1 and 2: yes, both extra runs were added: SAR at ViT 5e-3 with ResNet 2e-3 (job 6440009) and COCA at its published pair, ViT 1e-3 with
+ResNet 2.5e-4 (job 6440010). 3: Tent's ResNet lr 2.5e-4 is deliberate (the best lr reported in the Tent paper), so `cfgs/tuned/tent__resnet50_v1.yaml`
+stays as it is; its `macro_accuracy` (0.45581) and `frozen_macro_accuracy` fields describe the 5e-4 trial of the `02` ranking, not the 2.5e-4 setting
+(44.52 on these streams).
+
+**Tent's extra ViT point (decision D), job 6426795:** ViT lr 5e-5 scores 51.18 macro with 32.2 on its worst stream (Gaussian blur), against 50.94 and
+35.0 at the `02` choice 1e-4. By the stated criterion (best macro) 5e-5 wins, by 0.24 points that one seed cannot separate from noise, at the price of
+the worst stream losing 2.8 points, and the curve is flat across the two (the best is at the lowest point tried again). The pair for the Tent
+runs of Stages E and F is therefore either (ViT 1e-4, ResNet 2.5e-4), the file as it stands, or (ViT 5e-5, ResNet 2.5e-4), and both are
+already stored member by member, so either needs only a clean-slice run for its ViT member.
+
+## 9. The SAR extension and COCA's published pair (2026-10-19)
+
+Both jobs finished with exit 0 and verify (SAR extension 34 min, COCA 17 min).
+
+**SAR, the two points beyond the grid (run: ViT 5e-3 with ResNet 2e-3), macro mean (worst stream), %:**
+
+| ViT-B/16 lr | 1e-4 | 2.5e-4 | 5e-4 | 1e-3 | 2.5e-3 | **5e-3** |
+|---|---|---|---|---|---|---|
+| SAR | 52.1 (34.8) | 54.3 (39.0) | 56.1 (41.8) | 57.9 (44.2) | 59.4 (45.8) | **59.9 (45.9)** |
+
+| ResNet-50 V1 lr | 5e-5 | 1e-4 | 2.5e-4 | 5e-4 | 1e-3 | 2e-3 |
+|---|---|---|---|---|---|---|
+| SAR | 39.7 (17.1) | 42.0 (19.6) | 44.5 (21.1) | 46.5 (24.1) | **46.5 (20.6)** | 42.7 (3.0) |
+
+The ResNet now peaks inside the grid: 2e-3 collapses (a worst stream of 3%), 1e-3 is its best, and 5e-4 is a tie (46.49 against 46.53). The ViT is
+still best at the highest point tried, but the gain from 2.5e-3 to 5e-3 is 0.5 point against 1.5 to 2 for each earlier step, so the curve is
+flattening: another point would add little. I stopped there, as the author approved one extra point. SAR is chosen at ViT 5e-3 and ResNet
+1e-3 (tuned files written), and the report should say that the ViT's optimum may lie slightly beyond 5e-3. Its clean-slice run is job 6444625.
+
+**COCA, the published pair (ViT 1e-3, ResNet 2.5e-4):** combined 61.88 (worst stream 46.35), NLL 1.815, ECE 0.118, with its ViT member at 60.41
+and its ResNet member at 49.51; against the best grid pair (ViT 1e-3, ResNet 5e-4) at 62.11 (46.53), NLL 1.794, ECE 0.116, members 60.54 and
+51.29. The two are within 0.23 point on the combination, so the published setting is essentially as good as the best grid pair, which the
+protocol (best held-out macro) keeps.
+
+**Learning rates chosen for the main pair (ViT-B/16, ResNet-50 V1), SGD momentum 0.9:** Tent 1e-4 (or 5e-5, see section 8) and 2.5e-4 (the paper's
+value, by the author); ETA 5e-4 and 2.5e-4; EATA 5e-4 and 5e-4; SAR 5e-3 and 1e-3; COCA 1e-3 and 5e-4 as a pair.

@@ -1,5 +1,5 @@
 # Written by scripts/02_tune_tta.py on the held-out corruptions; read by src/utils/config.py::load_duo.
-# Do not edit by hand: rerun the tuner.
+# The learning rate was then set to 5e-5 by the author (see `note`); rerunning the tuner would restore 02's own winner.
 model: vit_b_16
 tta: tent
 NORM: LN
@@ -7,7 +7,7 @@ batch_size: 64
 OPTIM:
   METHOD: SGD
   STEPS: 1
-  LR: 0.0001
+  LR: 5.0e-05
   MOMENTUM: 0.9
   DAMPENING: 0.0
   WD: 0.0
@@ -19,6 +19,17 @@ tuned_on:
   - spatter/s5
   - saturate/s5
   seed: 0
-macro_accuracy: 0.50945
+macro_accuracy: 0.5118
 frozen_macro_accuracy: 0.48794
-written_by: scripts/02_tune_tta.py
+written_by: scripts/02_tune_tta.py, lr edited by hand (the author's decision of 2026-10-19)
+worst_stream_accuracy: 0.3222
+lrs_tried:
+- 5.0e-05
+- 0.0001
+- 0.00025
+- 0.0005
+- 0.001
+- 0.0025
+note: 02's grid (1e-4 .. 2.5e-3) extended with 5e-5 because its winner, 1e-4, was
+  the lowest point; 5e-5 scores 51.18 against 50.94 (worst stream 32.2 against 35.0).
+  02's own winner was 1e-4; the author picked 5e-5 on 2026-10-19.

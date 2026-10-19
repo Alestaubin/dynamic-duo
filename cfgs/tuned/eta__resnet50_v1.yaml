@@ -1,0 +1,30 @@
+# Written by scripts/05_select_member_lr.py on the held-out corruptions; read by src/utils/config.py::load_duo.
+# Do not edit by hand: rerun the selection.
+model: resnet50_v1
+tta: eta
+NORM: BN
+batch_size: 64
+OPTIM:
+  METHOD: SGD
+  STEPS: 1
+  LR: 0.00025
+  MOMENTUM: 0.9
+  DAMPENING: 0.0
+  WD: 0.0
+  NESTEROV: false
+tuned_on:
+  streams:
+  - speckle_noise__s5
+  - gaussian_blur__s5
+  - spatter__s5
+  - saturate__s5
+  seed: 0
+macro_accuracy: 0.48535
+worst_stream_accuracy: 0.26432
+lrs_tried:
+- 5.0e-05
+- 0.0001
+- 0.00025
+- 0.0005
+- 0.001
+written_by: scripts/05_select_member_lr.py

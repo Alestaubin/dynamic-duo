@@ -40,6 +40,7 @@ SLURM shards that race to write it all end up with the first writer's values.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from dataclasses import dataclass, replace
@@ -414,12 +415,40 @@ def add_args(ap) -> None:
     ap.add_argument("--temps_only", action="store_true",
                     help="fit and store the temperatures, then stop (run this once before a --shard array so "
                          "that no two shards fit them at the same time)")
+    ap.add_argument("--lr_large", type=float, default=None, metavar="LR",
+                    help="replace the large member's learning rate (the rest of its tuned OPTIM stays). The learning "
+                         "rates are part of every cache key and of the temperatures' checkpoint name, so a run with "
+                         "other rates fits its own temperatures and shares no cache with the tuned ones")
+    ap.add_argument("--lr_small", type=float, default=None, metavar="LR", help="the same for the small member")
 
 
-def output_tag(args, default_duo: str) -> str:
+def with_learning_rates(ctx: Context, lr_large: float | None, lr_small: float | None) -> Context:
+    """A copy of `ctx` whose members use the given learning rates (None keeps the tuned one)."""
+    duo = copy.deepcopy(ctx.duo)
+    for side, lr in (("LARGE", lr_large), ("SMALL", lr_small)):
+        if lr is not None:
+            if lr <= 0:
+                raise ValueError(f"learning rate of the {side.lower()} member must be positive, got {lr}")
+            duo[side]["OPTIM"] = {**duo[side]["OPTIM"], "LR": lr}       # a new dict: the two sides may share one
+    return replace(ctx, duo=duo)
+
+
+def _lr_text(lr: float) -> str:
+    return f"{lr:g}".replace(".", "p")          # no dot: the tag ends up in file names and LaTeX labels
+
+
+def output_tag(args, default_duo: str, stamp: str | None = None) -> str:
     """File-name tag: the TTA method, `__<duo>` unless it is the default duo, `_bn` with --bn (the frozen members'
-    BatchNorm statistics change the numbers, so the two settings must not overwrite each other)."""
-    return args.tta + ("" if args.duo == default_duo else f"__{args.duo}") + bn_tag(args)
+    BatchNorm statistics change the numbers, so the two settings must not overwrite each other). With --lr_large /
+    --lr_small it adds `_lrL<large>_S<small>` (the rates given) and `_<stamp>`, so that a run with other learning
+    rates never overwrites a table of the tuned ones, nor an earlier run of its own."""
+    tag = args.tta + ("" if args.duo == default_duo else f"__{args.duo}") + bn_tag(args)
+    lrs = [(k, v) for k, v in (("L", getattr(args, "lr_large", None)), ("S", getattr(args, "lr_small", None)))
+           if v is not None]
+    if not lrs:
+        return tag
+    tag += "_lr" + "_".join(f"{k}{_lr_text(v)}" for k, v in lrs)
+    return tag + (f"_{stamp}" if stamp else "")
 
 
 if __name__ == "__main__":
@@ -579,6 +608,33 @@ if __name__ == "__main__":
         from types import SimpleNamespace as NS
         assert output_tag(NS(tta="tent", duo="d", bn=False), "d") == "tent" and output_tag(NS(tta="tent", duo="d", bn=True), "d") == "tent_bn"
         assert output_tag(NS(tta="tent", duo="e", bn=True), "d") == "tent__e_bn"
+        # learning-rate overrides: tagged with the rates and the stamp; absent flags leave every name as it was
+        lr = dict(tta="tent", duo="d", bn=True)
+        assert output_tag(NS(**lr, lr_large=None, lr_small=None), "d", "S") == "tent_bn", "no override: no stamp either"
+        assert output_tag(NS(**lr, lr_large=5e-4, lr_small=1e-3), "d", "20261019-153012") == \
+            "tent_bn_lrL0p0005_S0p001_20261019-153012"
+        assert output_tag(NS(**lr, lr_large=None, lr_small=2.5e-3), "d") == "tent_bn_lrS0p0025"
+        assert "." not in output_tag(NS(**lr, lr_large=2.5e-4, lr_small=1e-5), "d", "x"), "the tag goes into file names"
+        tuned_ctx = with_learning_rates(ctx, None, None)
+        assert tuned_ctx.duo == ctx.duo and tuned_ctx.duo is not ctx.duo
+        fast = with_learning_rates(ctx, 5e-4, None)
+        assert fast.duo["LARGE"]["OPTIM"]["LR"] == 5e-4 and fast.duo["SMALL"]["OPTIM"] == ctx.duo["SMALL"]["OPTIM"]
+        assert {k: v for k, v in fast.duo["LARGE"]["OPTIM"].items() if k != "LR"} == \
+            {k: v for k, v in ctx.duo["LARGE"]["OPTIM"].items() if k != "LR"}, "only the rate changes"
+        assert ctx.duo["LARGE"]["OPTIM"]["LR"] != 5e-4, "the original context is untouched"
+        try:
+            with_learning_rates(ctx, 0.0, None)
+            raise AssertionError("a non-positive learning rate must raise")
+        except ValueError:
+            pass
+        # the rates are part of the cache key (so of the temperatures' checkpoint too); the other side's alone is enough
+        fp = lambda c, mode: RunSpec("tiny", mode=mode, loop_ts=(1.0, 1.0) if mode in DUO_MODES else None     # noqa: E731
+                                     ).fingerprint(c.duo, 32, "masked")
+        both = with_learning_rates(ctx, 5e-4, 1e-3)
+        assert all(len({fp(ctx, m), fp(fast, m), fp(both, m), fp(with_learning_rates(ctx, None, 1e-3), m)}) == 4
+                   for m in ("both_duo", "both_indep", "no_adapt")), "a changed rate must change every run's key"
+        assert "learning rate $5 \\times 10^{-4}$" in render_summary_table(df, label="x", **{**kw, "ctx": fast}), \
+            "the caption states the rates the run used"
         sub = render_summary_table(df[df["mode"].isin(["joint", "indep_duo"])], label="x", **kw)
         assert "Large adapt" not in sub and "Joint" in sub, "only the modes present get a row"
         only_joint = render_corruption_table(df[df["mode"] == "joint"], label="x", **kw)

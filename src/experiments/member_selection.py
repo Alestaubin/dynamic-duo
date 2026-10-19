@@ -3,7 +3,7 @@ member_selection.py
 ===================
 Choose each member's learning rate from the stored logits of a sweep (Phase 3, Stage D), offline, with no model.
 
-The members adapt independently, so run i of a sweep (scripts/cache_logits.py --grid) holds the i-th value of EACH model's grid, and
+The members adapt independently, so run i of a sweep (scripts/04_cache_logits.py --grid) holds the i-th value of EACH model's grid, and
 a member's quality can be read off its own logits: the criterion is its STANDALONE mean accuracy over the held-out streams (the
 same criterion scripts/02_tune_tta.py uses for Tent), computed per stream and averaged, with the worst held-out stream reported
 next to it. Ties go to the smaller learning rate. When the best value is the first or the last of the values tried, the optimum
@@ -67,7 +67,7 @@ def select(store: LogitStore, ctx, spec: RunSpec, lrs: dict[str, Sequence[float]
 
 def write_tuned(path: Path, record: dict) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# Written by scripts/select_member_lr.py on the held-out corruptions; read by src/utils/config.py::load_duo.\n"
+    path.write_text("# Written by scripts/05_select_member_lr.py on the held-out corruptions; read by src/utils/config.py::load_duo.\n"
                     "# Do not edit by hand: rerun the selection.\n" + yaml.safe_dump(record, sort_keys=False))
     return path
 
@@ -78,7 +78,7 @@ def tuned_record(choice: dict, *, model: str, algorithm: str, norm: str, batch_s
             "OPTIM": sgd_optim(choice["best_lr"], momentum),
             "tuned_on": {"streams": list(stems), "seed": seed},
             "macro_accuracy": round(choice["best_macro"], 5), "worst_stream_accuracy": round(choice["best_worst"], 5),
-            "lrs_tried": sorted(r["lr"] for r in choice["rows"]), "written_by": "scripts/select_member_lr.py"}
+            "lrs_tried": sorted(r["lr"] for r in choice["rows"]), "written_by": "scripts/05_select_member_lr.py"}
 
 
 if __name__ == "__main__":

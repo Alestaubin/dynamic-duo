@@ -23,7 +23,7 @@ Dataset locations, output folders and the protocol constants (severity 5, batch 
 
 | Folder | What is in it |
 |---|---|
-| `scripts/` | One numbered script per result (`01_...`, `02_...`), in order of appearance in the paper. Older scripts without a number are being retired. |
+| `scripts/` | Numbered scripts (`01_...`, `02_...`), in the order they are run for the experiments of the paper; `04` to `10` are the shared pipeline (cache, tune, select), `11` onwards the paper's tables and figures. Older scripts without a number are being retired. |
 | `src/experiments/` | The engine every script shares: it runs the models, caches their logits, scores combinations of them, and builds the tables. |
 | `src/tta/`, `src/calibrators/`, `src/reliability/` | TTA methods (Tent, ...), the ways of combining the two models' logits, and the proxies behind the gate. |
 | `src/utils/` | Config loading, one class per dataset, LaTeX table writer, ... |
@@ -108,20 +108,25 @@ On this cluster the login node kills processes above 5 GB of memory, so run anyt
 | `01_tab_temperatures.py` | Which temperatures Fixed TS should use, and how much better temperature scaling could possibly be. |
 | `02_tune_tta.py --model NAME` | Tunes Tent's optimizer settings for one model on the 4 held-out corruptions, and writes `cfgs/tuned/`. |
 | `03_tab_adaptation_modes.py` | Six ways of adapting the duo (joint, one model adapting, independent), all scored with the same Fixed TS. |
-| `setup_check.py` | Checks the dataset paths and the config. |
-| `cache_logits.py` | Adapts a duo's two members (they never see each other) and stores their logits **per member**, under a key made of that member's own settings, in `cache/logits/`. `--grid` runs the learning-rate sweep (run i uses the i-th value of each model's grid), `--streams` picks held-out / test / clean / the clean training slice / a natural shift. Any large member can be paired with any small one afterwards. A support script: it produces no table. |
-| `eval_duo_grid.py` | Reads a stored pair and evaluates Vanilla Dynamic Duos offline: every proxy x beta x proxy-batch size, the members alone, the fixed combinations, the oracles and the proxy diagnostics, from the cached logits alone (no model). Also a support script. |
+| `04_cache_logits.py` | Adapts a duo's two members (they never see each other) and stores their logits **per member**, under a key made of that member's own settings, in `cache/logits/`. `--grid` runs the learning-rate sweep (run i uses the i-th value of each model's grid), `--streams` picks held-out / test / clean / the clean training slice / a natural shift. Any large member can be paired with any small one afterwards. Produces no table. |
+| `05_select_member_lr.py` | Reads the sweep that `04` stored for ETA, EATA or SAR and picks each member's learning rate on the held-out streams (the counterpart of `02` for the other algorithms); `--write_tuned` writes `cfgs/tuned/`. |
+| `06_run_coca.py` | COCA through its official code, run live (its temperature is refitted every batch, so it cannot be replayed from logits); the same learning-rate grid, one pair of learning rates per run. |
+| `07_eval_duo_grid.py` | Reads a stored pair and evaluates Vanilla Dynamic Duos offline: every proxy x beta x proxy-batch size, the members alone, the fixed combinations, the oracles and the proxy diagnostics, from the cached logits alone (no model). |
+| `08_select_proxy.py` | Chooses the proxy, beta and proxy-batch size of Vanilla Dynamic Duos on the held-out streams, per base algorithm, and writes `results/selection_section45.json`. |
+| `09_run_joint_dd.py` | Live Joint Dynamic Duos runs on the held-out streams (the gate sits inside the adaptation loop), one run per (proxy, b_t, beta). |
+| `10_select_joint_dd_beta.py` | Picks Joint DD's beta from the runs of `09` and records it in the selection JSON. |
+| `setup_check.py` | Checks the dataset paths and the config. Not numbered: run it first. |
 
-Later scripts (`08` onwards, the main results) are planned in `plan.md`.
+Later scripts (`11` onwards, the paper's tables and figures) are planned in `plan.md`.
 
-The two support scripts, in the order they are used (the design is in `docs/design_section45.md`; launch arrays only after checking `plan.md`, Phase 3):
+**Run order.** `setup_check.py`; then `02_tune_tta.py` once for each model of the duo (for the default duo: `--model vit_b_16` and `--model resnet50`), because its result in `cfgs/tuned/` changes the learning rates every other script uses, and the learning rates are part of the cache fingerprint (logits cached before tuning are not found any more); then `01`, `03`, `04`, ... in numerical order. `04` to `06` and `09` run models, so launch them as jobs (never on the CPU); `07`, `08` and `10` only read saved results. The design is in `docs/design_section45.md`; launch arrays only after checking `plan.md`, Phase 3.
 
 ```bash
-python scripts/cache_logits.py --duo vitb16_rn50v1 --streams heldout clean_train_slice --grid --seeds 0 --shard auto   # as a SLURM array
-python scripts/eval_duo_grid.py --duo vitb16_rn50v1 --seeds 0 --grid_large 3 --grid_small 2                           # offline, one pair
+python scripts/04_cache_logits.py --duo vitb16_rn50v1 --streams heldout clean_train_slice --grid --seeds 0 --shard auto   # as a SLURM array
+python scripts/05_select_member_lr.py --duo vitb16_rn50v1 --tta sar --seeds 0 --write_tuned                                 # offline, per algorithm
+python scripts/07_eval_duo_grid.py --duo vitb16_rn50v1 --seeds 0 --grid_large 3 --grid_small 2                              # offline, one pair
+python scripts/08_select_proxy.py --duo vitb16_rn50v1 --algos tent eta --seed 0                                             # writes the selection JSON
 ```
-
-**Run order.** Run `02_tune_tta.py` first, once for each model of the duo (for the default duo: `--model vit_b_16` and `--model resnet50`). Its result in `cfgs/tuned/` changes the learning rates that every other script uses, and the learning rates are part of the cache fingerprint. Logits cached before tuning are therefore not found any more, and `01` and `03` start from the tuned settings. After that, run `01` and `03` in any order.
 
 ## Script 01: temperature study
 

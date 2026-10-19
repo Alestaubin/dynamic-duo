@@ -2,12 +2,12 @@
 """
 Choose each member's learning rate from stored sweep logits, offline (Phase 3, Stage D; src/experiments/member_selection.py).
 
-Reads the logits that `scripts/cache_logits.py --grid` stored for an algorithm and picks, for the large and the small member
+Reads the logits that `scripts/04_cache_logits.py --grid` stored for an algorithm and picks, for the large and the small member
 separately, the learning rate with the best STANDALONE mean accuracy over the held-out streams (ties: the smaller one), reporting the
 worst held-out stream next to it and warning when the best value is the first or last one tried (the optimum may lie outside the grid).
 
-    python scripts/select_member_lr.py --duo vitb16_rn50v1 --tta sar --seeds 0
-    python scripts/select_member_lr.py --duo vitb16_rn50v1 --tta sar --lrs_large 5e-5 1e-4 2.5e-4 5e-4 1e-3 2.5e-3   # an extended grid
+    python scripts/05_select_member_lr.py --duo vitb16_rn50v1 --tta sar --seeds 0
+    python scripts/05_select_member_lr.py --duo vitb16_rn50v1 --tta sar --lrs_large 5e-5 1e-4 2.5e-4 5e-4 1e-3 2.5e-3   # an extended grid
     ... --write_tuned      also write cfgs/tuned/<tta>__<model>.yaml, which every later run of that algorithm reads
 
 Writes <out>/select_member_lr__<duo>__<tta>__seed<seed>.json with every number.

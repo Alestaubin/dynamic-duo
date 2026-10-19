@@ -24,6 +24,12 @@ cached, so a repeat only replays (and a cache from before the clean stream exist
     python scripts/03_tab_adaptation_modes.py --report_only                               # tables from the cache
     python scripts/03_tab_adaptation_modes.py --modes joint indep_duo --seeds 0 --num_samples 2000   # smoke test
 
+Other learning rates (--lr_large LR --lr_small LR, either or both; the rest of each member's tuned OPTIM stays) are a
+separate experiment: the rates are part of every cache key, so nothing is shared with the tuned run, and the temperatures
+are fitted again on members adapted at the new rates (--temps_only first, as above; --temps_checkpoint DIR keeps another
+pair instead). The CSV and both tables are then named <tag>_lrL<large>_S<small>_<YYYYmmdd-HHMMSS> (the time of the
+rendering run; a shard never renders), so they never replace the tuned run's files in the paper folder nor each other.
+
 Writes <paths.paper>/tab_adaptation_modes__<tag>.tex (accuracy per corruption: the duo under each mode, and each
 member alone adapting on its own entropy / frozen; a Clean column that is not part of Avg.),
 tab_adaptation_modes_summary__<tag>.tex (members' accuracy under each mode, duo accuracy / ECE / NLL, averaged over
@@ -35,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -52,6 +59,9 @@ def main() -> int:
     AM.add_args(ap)
     args = ap.parse_args()
     ctx, seeds, out = setup(args, "tab_adaptation_modes")
+    ctx = AM.with_learning_rates(ctx, args.lr_large, args.lr_small)
+    print("learning rates: " + ", ".join(f"{side.lower()} {ctx.duo[side]['NAME']} {ctx.duo[side]['OPTIM']['LR']:g}"
+                                         for side in ("LARGE", "SMALL")))
 
     temps = AM.resolve_temperatures(ctx, AM.temperature_spec(args.duo, args.tta, args.tta_kwargs, args.num_samples),
                                     args.temps_checkpoint, report_only=args.report_only)
@@ -68,9 +78,11 @@ def main() -> int:
             print(f"{label}: member logits missing for {len(streams)} streams (e.g. {streams[:3]}); "
                   f"run without --report_only to compute them")
         return 0 if args.shard or args.only else 1      # a shard only fills the cache; the full run renders
+    if args.shard:
+        return 0        # (a shard that finds the cache complete must not render too: with --lr_* the names carry a stamp)
 
     df = pd.DataFrame(AM.duo_rows(jobs, ctx, temps))
-    tag = AM.output_tag(args, ap.get_default("duo"))
+    tag = AM.output_tag(args, ap.get_default("duo"), stamp=time.strftime("%Y%m%d-%H%M%S"))
     save_rows(out / f"{tag}.csv", df)
     corruptions, clean = AM.split_clean(df)
     mean_acc = lambda d: (per_seed_average(d.assign(series=d["mode"] + "/" + d["series"]))     # noqa: E731
