@@ -26,14 +26,20 @@ from torchvision import transforms
 _NORMALIZER_NAMES = ("ImageNormalizer", "Normalize", "NormalizeLayer", "Normalization")
 
 
+def _identity(mean, std) -> bool:
+    """mean 0 and std 1 leave a batch as it is: not a normalization (the [0, 1] pipeline of the ported algorithms keeps such a
+    step where a torchvision `Weights.transforms()` object cannot drop its Normalize)."""
+    return all(float(m) == 0.0 for m in mean) and all(float(s) == 1.0 for s in std)
+
+
 def count_normalizations(preprocess, model: nn.Module | None = None) -> int:
     """Normalization steps in `preprocess` (a transforms.Compose, or a torchvision `Weights.transforms()` object, which
     normalizes with its mean and std) plus the normalization modules inside `model`."""
     n = 0
     if isinstance(preprocess, transforms.Compose):
-        n += sum(isinstance(t, transforms.Normalize) for t in preprocess.transforms)
+        n += sum(isinstance(t, transforms.Normalize) and not _identity(t.mean, t.std) for t in preprocess.transforms)
     elif all(hasattr(preprocess, a) for a in ("mean", "std")):
-        n += 1
+        n += 0 if _identity(preprocess.mean, preprocess.std) else 1
     if model is not None:
         n += sum(type(m).__name__ in _NORMALIZER_NAMES for m in model.modules())
     return n
@@ -96,6 +102,8 @@ if __name__ == "__main__":
     unit = transforms.Compose([transforms.ToTensor()])
     assert count_normalizations(unit, wrapped) == 1
     assert_normalized_once(unit, wrapped)
+    ident = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.0, 0.0, 0.0), (1.0, 1.0, 1.0))])
+    assert count_normalizations(ident, wrapped) == 1 and count_normalizations(ident, bare) == 0, "identity is not a normalization"
     # the two ways to get it wrong
     for pre, model, kind in ((ours, wrapped, "double"), (unit, bare, "none")):
         try:

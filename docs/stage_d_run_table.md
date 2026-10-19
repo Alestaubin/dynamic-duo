@@ -37,7 +37,7 @@ One run = both members over 4 streams x 50,000 images = 200,000 images, on one L
 | **Stage D total** | **35 jobs** | | **9.5** | |
 
 Every task fits well inside `slurm/job.sh`'s default 3 h (the longest, SAR, is about 33 minutes); I would pass `-t 01:00:00`
-so that the jobs backfill sooner. **Memory needs measuring**: the script 03 tasks peaked at 19, 27 and 32 GB (MaxRSS 18.7, 26.6 and 31.7 GB) of the 32 GB they requested, which is uncomfortably close to a kill. The new path holds one stream's logits at a time (about 0.4 GB in float32 for both members, plus the fp16 copy), so it should be far below that, but the smoke job reports the real peak and I will ask for more (`--mem=48G`) if it is not. Storage: 5 runs x 4
+so that the jobs backfill sooner. Memory: the script 03 tasks peaked at 19, 27 and 32 GB (MaxRSS) of the 32 GB they requested, but the new path holds one stream's logits at a time and the smoke job measured a **peak RSS of 4.9 GB** and 6.5 to 11.5 GB of GPU memory (section 6), so the default 32 GB is ample. Storage: 5 runs x 4
 streams x 200 MB = 4 GB per algorithm, 20 GB for the four cached ones, plus 20 MB per clean slice.
 
 Contingencies, **not** in the total:
@@ -69,9 +69,9 @@ For orientation only (it is Stage F, with its own approval): the test runs of th
 
 ## 4. Work before any GPU job (no GPU needed)
 
-1. **ETA/EATA.** Diff the repo's `eata` method against `third_party/EATA/eata.py` and the benchmark's `methods/eata.py`. If the
-   repo's is ETA (the plan says it has no Fisher term), ETA stays on the existing path and costs nothing to port; EATA is
-   ported with the Fisher term (weight 2000, 2000 clean images from the training slice, margins 0.4 ln K and 0.05).
+1. **ETA/EATA.** Diff the repo's `eata` method against `third_party/EATA/eata.py` and the benchmark's `methods/eata.py`. (Done:
+   the repo's `eata` differs from upstream ETA, see section 6, so ETA and EATA both run on the port, with the Fisher term for EATA:
+   weight 2000, 2000 clean images from the training slice, margins 0.4 ln K and 0.05.)
 2. **SAR.** Port with SAM (rho 0.05), margin 0.4 ln K, a recovery switch (0.2 on a decay-0.9 average; off here, on for the
    standalone row), scoring the first pass.
 3. **The member adapter** with [0, 1] inputs and a `Normalize` wrapper per member (decision 10), and the parity check: a ported
@@ -91,3 +91,40 @@ For orientation only (it is Stage F, with its own approval): the test runs of th
 | E | Logs: `slurm/job.sh` writes `logs/%j_%x`, which gives one file per array, so the tasks of an array share a log (the four failed tasks of 6413974 left no separable error). `logs/%A_%a_%x` gives one file per task. | Change the two `#SBATCH --output/--error` lines. It is the one existing file I would touch, so only with your OK. |
 
 When you approve, the order is: items 1 to 5 above, then the five smoke jobs (the SAR measurement may move the total), then the five arrays, one algorithm at a time so that a problem shows up on the first.
+
+## 6. Update after the answers and the smoke job (2026-10-19)
+
+**Decisions applied.** A: Tent is one run at the settings `cfgs/tuned/` holds (ViT 1e-4, ResNet 2.5e-4, momentum 0.9). B: COCA runs in
+place from the checkout, nothing copied. C: COCA's 10 temperature steps. D: a 5e-5 point for the ViT if a winner lands on 1e-4.
+E: `slurm/job.sh` gives every array task its own log files.
+
+**What the work found** (details in `plan.md`, Stage D as built): the repo's older `eata` is not upstream ETA (it steps the optimizer on a
+fully filtered batch, so momentum keeps moving the weights), so **ETA runs on the port**; SAR's skip-the-top-layers rule had to be mapped
+onto torchvision's ViT names; COCA's released code never assigns `tryT` and `halfcombine`.
+
+**Measured in one GPU job (6424163, L40S, 9 min 49 s),** ViT-B/16 lr 5e-4 + ResNet-50 V1 lr 2.5e-4, steady state on the second of two
+5000-image streams (so each rate includes a per-stream file listing: conservative):
+
+| | Setup | Images/s | Peak RSS | Peak GPU | Per run of 200,000 images (with the 1.5 min overhead) | The table assumed |
+|---|---|---|---|---|---|---|
+| Tent | 2.8 s | 171 | 3.8 GB | 11.5 GB | 21.0 min | 17.1 |
+| ETA | 1.7 s | 187 | 4.6 GB | 6.5 GB | 19.4 min | 17.1 |
+| EATA | 14.2 s (Fisher) | 169 | 4.7 GB | 6.5 GB | 21.4 min | 17.9 |
+| SAR (recovery off) | 1.7 s | 97.5 | 4.7 GB | 6.5 GB | 35.7 min | 32.7 |
+| COCA | 1.8 s | 190 | 4.7 GB | 11.5 GB | 19.1 min | 18.7 |
+
+SAR is 1.75 x Tent, not the 2 x assumed. The rates here are 12 to 21% under the 216 images/s of the script 03 array, because they include
+the per-stream listing of 50,000 file names, which is amortized over a 50,000-image stream; I keep these as the conservative figures.
+
+**Revised budget** (conservative), with Tent as one run: ETA 1.61 h + EATA 1.79 h + SAR 2.98 h + COCA 1.59 h + Tent 0.35 h = **8.3 L40S-hours
+for the tuning runs**, plus 0.2 h for the five clean-slice runs and the smoke job already spent (0.16 h): **8.7 h in all**, against 8.3 h
+approved. Each task takes 19 to 36 minutes. Contingency (D): +0.3 h per Tent-class algorithm, +0.55 h for SAR, only where a ViT winner
+lands on 1e-4.
+
+**Parity and the CLIs on real models.** Tent through the new [0, 1] path equals the existing path (largest logit difference 1.5e-5,
+identical accuracy on 2000 images). `cache_logits.py --tta sar --grid`, `select_member_lr.py` and `--report_only` ran end to end.
+COCA's temperature rose from 1.1 to 2.1 over a stream, and on the first 5000 speckle-noise images COCA scored 57.1% against 55.1% for the
+large member alone (Tent-like settings, one learning-rate pair: a functional check, not a result).
+
+**Launched.** Only the ETA array (job 6424535, tasks 0 to 4 = grid points 0 to 4), as the first of the five so that a problem shows
+early. Waiting for your explicit go: the Tent single run, EATA, SAR and COCA (about 6.7 of the 8.3 hours).

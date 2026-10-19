@@ -32,7 +32,9 @@ paths:
   # --- outputs ---------------------------------------------------------------------------------
   out: out                      # git-ignored scratch/results (CSV caches etc.)
   paper: out/paper              # final tables and figures (tracked)
-  cache: cache                  # member-logit caches, train-slice file lists
+  cache: /scratch/alxstaub/dynamic-duos/cache   # member-logit caches (members/, logits/), train-slice file lists; on /scratch
+                                # (moved from cache/ on 2026-10-18: 56 GB of caches off /project, and the ~3,500 files of the
+                                # per-member logit store stay off it too: /project is at 83% of its file-count quota)
   checkpoints: checkpoints      # fitted temperatures, proxy source statistics
   tuned: cfgs/tuned             # tuning-script outputs read by every experiment script
 

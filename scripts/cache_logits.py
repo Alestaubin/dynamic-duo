@@ -6,6 +6,7 @@ A support script, not a paper result: it fills the cache that the offline evalua
 tables are replayed from. The members never see each other (--mode both_indep), so every member is stored under a key
 made of its own settings, and the best large member of one run can be paired with the best small member of another.
 
+    --tta tent|eta|eata|sar    the base algorithm (src/experiments/algorithms.py); SAR's recovery: --tta_kwargs '{"recovery": true}'
     --streams heldout|test|clean|clean_train_slice|<natural dataset>   which streams (default heldout: the 4 held-out
                          corruptions; clean_train_slice: the held-out clean slice of the training images)
     --grid [i ...]       a learning-rate sweep: run i uses the i-th value of EACH model's grid (SGD, momentum 0.9;
@@ -31,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.experiments import cli
+from src.experiments.algorithms import ALGORITHMS
 from src.experiments.grids import lr_grid, sgd_optim
 from src.experiments.logit_runs import ensure_logits, run_id, run_member_specs, stream_segments, with_optim
 from src.experiments.logit_store import LogitStore
@@ -54,6 +56,8 @@ def main() -> int:
     if (args.lr_large is None) != (args.lr_small is None) and args.mode == "both_indep":
         ap.error("--lr_large and --lr_small go together")
 
+    if args.tta not in ALGORITHMS and args.mode != "no_adapt":
+        ap.error(f"--tta must be one of {ALGORITHMS} (tent, eta, eata, sar; hyperparameters through --tta_kwargs)")
     ctx, seeds, out = cli.setup(args, "cache_logits")
     segments = stream_segments(args.streams, ctx.g)
     store = LogitStore.from_context(ctx, None if args.staging == "none" else args.staging)

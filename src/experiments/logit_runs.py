@@ -36,11 +36,12 @@ import torch
 from torch.utils.data import Subset
 from tqdm import tqdm
 
+from src.experiments.algorithms import make_runner, resolve_spec
 from src.experiments.input_checks import assert_normalized_once, check_batch_diversity
 from src.experiments.logit_store import LogitStore, MemberSpec, StoreError, dataset_labels, stream_order
 from src.experiments.members import PairCollate
 from src.experiments.protocols import Segment, build_segments
-from src.experiments.runner import Context, _runner
+from src.experiments.runner import Context
 from src.experiments.specs import RunSpec
 from src.utils.config import GlobalConfig
 from src.utils.datasets import ImageNetC, ImageNetTrainSlice, ImageNetVal, get_dataset
@@ -85,6 +86,7 @@ def with_optim(ctx: Context, large: dict | None = None, small: dict | None = Non
 
 
 def run_member_specs(spec: RunSpec, ctx: Context) -> tuple[MemberSpec, MemberSpec]:
+    spec = resolve_spec(spec)           # the algorithm's default hyperparameters are part of the key
     kw = dict(batch_size=ctx.batch_size, objective_logits=ctx.objective_logits, bn=ctx.bn)
     return (MemberSpec.from_run(spec, ctx.duo, "large", **kw), MemberSpec.from_run(spec, ctx.duo, "small", **kw))
 
@@ -130,10 +132,12 @@ def adapt_stream(runner, seg: Segment, spec: RunSpec, ctx: Context) -> dict:
 
 
 def ensure_logits(spec: RunSpec, ctx: Context, segments: Sequence[Segment] | None = None,
-                  store: LogitStore | None = None, *, compute: bool = True, check_normalization: bool = True) -> dict:
+                  store: LogitStore | None = None, *, compute: bool = True, check_normalization: bool = True,
+                  fisher_source=None) -> dict:
     """Adapt the members over `segments` (default: the spec's protocol) and store what is missing, per member and
     stream. Returns the run manifest (also written under `_runs/`). `compute=False` never touches a model: it raises
     FileNotFoundError, listing what is missing, if the store is incomplete (the --report_only behaviour)."""
+    spec = resolve_spec(spec)
     segments = list(segments or build_segments(spec, ctx.g))
     store = store or LogitStore.from_context(ctx)
     ml, ms = run_member_specs(spec, ctx)
@@ -146,7 +150,7 @@ def ensure_logits(spec: RunSpec, ctx: Context, segments: Sequence[Segment] | Non
 
     t0, written, n_images = time.time(), 0, 0
     if todo:
-        runner = _runner(spec, ctx)
+        runner = make_runner(spec, ctx, fisher_source)
         if check_normalization:
             for side, model, pre in (("large", runner.large, runner.large_preprocess),
                                      ("small", runner.small, runner.small_preprocess)):
@@ -167,7 +171,7 @@ def ensure_logits(spec: RunSpec, ctx: Context, segments: Sequence[Segment] | Non
         recs = {side: store.record(m, seg.file_stem) for side, m in members.items()}
         streams[seg.file_stem] = {"label": seg.label, **recs}
     manifest = {
-        "duo": spec.duo, "tta": spec.tta, "mode": spec.mode, "seed": spec.seed, "num_samples": spec.num_samples,
+        "duo": spec.duo, "tta": spec.tta, "tta_kwargs": spec.tta_kwargs, "mode": spec.mode, "seed": spec.seed, "num_samples": spec.num_samples,
         "batch_size": ctx.batch_size, "objective_logits": ctx.objective_logits, "bn": ctx.bn,
         "members": {side: {"key": m.key, "dir": str(m.relpath), **m.describe()} for side, m in members.items()},
         "streams": streams, "seconds": round(time.time() - t0, 1), "streams_computed": len(todo),

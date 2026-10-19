@@ -22,6 +22,13 @@
 # the shared folder, which has a file-count quota); scripts also stage lazily on first use, so STAGE is only
 # an up-front convenience that keeps the extraction time out of the script's own timings.
 
+# An array's tasks all expand `logs/%j_%x` to the same file, so one task's error was lost among the others'. Inside an array,
+# send this task's output to its own files, logs/<array id>_<task>_<name>.out/.err (the shared file keeps only this preamble).
+if [ -n "${SLURM_ARRAY_TASK_ID:-}" ]; then
+    exec >> "logs/${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}_${SLURM_JOB_NAME}.out" \
+         2>> "logs/${SLURM_ARRAY_JOB_ID}_${SLURM_ARRAY_TASK_ID}_${SLURM_JOB_NAME}.err"
+fi
+
 module load python/3.11.5
 module load cuda/12.6
 module load gcc arrow/22.0.0

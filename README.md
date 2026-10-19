@@ -33,7 +33,7 @@ Dataset locations, output folders and the protocol constants (severity 5, batch 
 | `slurm/job.sh`, `slurm/job_cpu.sh` | The launchers for running a script as a SLURM job: with one GPU, and without a GPU (for steps that run no model). |
 | `out/paper/` | The final tables and figures (tracked by git). |
 | `out/results/<script>/` | Each script's CSV files (git-ignored). |
-| `cache/` | The cached model outputs, about 3 GB per full run (git-ignored). |
+| `paths.cache` (`/scratch/alxstaub/dynamic-duos/cache`) | The cached model outputs, about 3 GB per full run (outside the repo, on scratch: set in `cfgs/global.yaml`). |
 | `checkpoints/` | Fitted temperatures and other fitted values (git-ignored). |
 
 ## Models and weights
