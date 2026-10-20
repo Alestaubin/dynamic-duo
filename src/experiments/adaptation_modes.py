@@ -631,8 +631,9 @@ if __name__ == "__main__":
         fp = lambda c, mode: RunSpec("tiny", mode=mode, loop_ts=(1.0, 1.0) if mode in DUO_MODES else None     # noqa: E731
                                      ).fingerprint(c.duo, 32, "masked")
         both = with_learning_rates(ctx, 5e-4, 1e-3)
-        assert all(len({fp(ctx, m), fp(fast, m), fp(both, m), fp(with_learning_rates(ctx, None, 1e-3), m)}) == 4
-                   for m in ("both_duo", "both_indep", "no_adapt")), "a changed rate must change every run's key"
+        variants = lambda m: {fp(ctx, m), fp(fast, m), fp(both, m), fp(with_learning_rates(ctx, None, 1e-3), m)}   # noqa: E731
+        assert all(len(variants(m)) == 4 for m in ("both_duo", "both_indep")), "a changed rate must change an adapting run's key"
+        assert len(variants("no_adapt")) == 1, "a frozen run has no optimizer: every rate shares its cache"
         assert "learning rate $5 \\times 10^{-4}$" in render_summary_table(df, label="x", **{**kw, "ctx": fast}), \
             "the caption states the rates the run used"
         sub = render_summary_table(df[df["mode"].isin(["joint", "indep_duo"])], label="x", **kw)

@@ -6,7 +6,8 @@ produced it.
 
 RunSpec  -- everything that determines the MEMBERS' logits: duo, TTA method + hyperparameters, protocol,
             seed, sample cap. Its fingerprint keys the member-logit cache, so changing a learning rate or
-            the objective-logits mode can never silently reuse stale logits.
+            the objective-logits mode can never silently reuse stale logits. (A member that does not adapt
+            has no learning rate in the key: see `RunSpec.fingerprint`.)
 GateSpec -- how the two members' logits are combined into one prediction. Gate settings never change the
             members' logits (they are adapted independently), so one cache serves every GateSpec.
 """
@@ -84,17 +85,27 @@ class RunSpec:
         """Cache directory name: shared by every independent-segment protocol, per stream otherwise."""
         return "independent" if self.independent else self.protocol_tag
 
+    @property
+    def adapts(self) -> dict[str, bool]:
+        """{"LARGE": bool, "SMALL": bool}: which members adapt in this mode."""
+        return dict(zip(("LARGE", "SMALL"), MODE_SIDES[self.mode]))
+
     def frozen_bn_matters(self, duo_cfg: dict) -> bool:
         """True if the --bn flag changes this run's logits: a member that does not adapt uses BatchNorm (NORM: BN).
         Adapting members always use batch statistics, and LayerNorm models have none."""
-        adapt = dict(zip(("LARGE", "SMALL"), MODE_SIDES[self.mode]))
+        adapt = self.adapts
         return any(not adapt[side] and duo_cfg[side].get("NORM") == "BN" for side in adapt)
 
     def fingerprint(self, duo_cfg: dict, batch_size: int, objective_logits: str, bn: bool = False) -> str:
         """12 hex chars identifying every input that affects the members' logits. `bn`: the --bn flag (frozen
-        BatchNorm members on the test batch's statistics, instead of eval() with the source ones)."""
+        BatchNorm members on the test batch's statistics, instead of eval() with the source ones).
+        A member that does not adapt in this mode enters the key without its OPTIM block: its optimizer is never built,
+        so retuning a learning rate must not orphan the frozen logits (a frozen run's key is the same whatever
+        cfgs/tuned holds). An adapting member keeps it."""
+        adapt = self.adapts
         payload: dict[str, Any] = {
-            "models": {side: duo_cfg[side] for side in ("LARGE", "SMALL")},
+            "models": {side: duo_cfg[side] if adapt[side] else {k: v for k, v in duo_cfg[side].items() if k != "OPTIM"}
+                       for side in ("LARGE", "SMALL")},
             "tta": [self.tta, self.tta_kwargs],
             "mode": self.mode,
             "protocol": ["independent"] if self.independent else [self.protocol, self.protocol_args],

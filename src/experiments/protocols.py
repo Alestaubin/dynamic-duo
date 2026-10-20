@@ -150,6 +150,18 @@ if __name__ == "__main__":
     assert fp("both_indep", False) == fp("both_indep", True), "nothing frozen: the flag is irrelevant"
     assert fp("small_indep", False) == fp("small_indep", True), "the frozen member is LayerNorm: irrelevant"
     assert fp("large_indep", False) != fp("large_indep", True) and fp("no_adapt", False) != fp("no_adapt", True)
-    assert RunSpec("d", mode="no_adapt").fingerprint(duo_bn, 64, "masked", True) == "f609c5ff6bf6", \
-        "bn=True must stay the pre-flag key of frozen runs"
+    assert RunSpec("d", mode="no_adapt").fingerprint(duo_bn, 64, "masked", True) == "acaf911e89ab", \
+        "the key of a frozen run is pinned (it was f609c5ff6bf6 until a non-adapting member lost its OPTIM block)"
+    # a member that does not adapt has no optimizer: its OPTIM block is not in the key, an adapting member's is
+    lr = lambda l, s: {"LARGE": {**duo_bn["LARGE"], "OPTIM": {"LR": l}}, "SMALL": {**duo_bn["SMALL"], "OPTIM": {"LR": s}}}   # noqa: E731
+    key = lambda mode, d: RunSpec("d", mode=mode).fingerprint(d, 64, "masked", True)    # noqa: E731
+    assert key("no_adapt", lr(1e-4, 1e-3)) == key("no_adapt", lr(5e-5, 7e-3)), "frozen: no learning rate in the key"
+    assert key("large_indep", lr(1e-4, 1e-3)) == key("large_indep", lr(1e-4, 7e-3)), "the frozen SMALL side's LR is ignored"
+    assert key("large_indep", lr(1e-4, 1e-3)) != key("large_indep", lr(5e-5, 1e-3)), "the adapting LARGE side's LR counts"
+    assert key("small_indep", lr(1e-4, 1e-3)) == key("small_indep", lr(5e-5, 1e-3)) != key("small_indep", lr(1e-4, 7e-3))
+    assert key("both_indep", lr(1e-4, 1e-3)) != key("both_indep", lr(1e-4, 7e-3)) and \
+        key("both_indep", lr(1e-4, 1e-3)) != key("both_indep", lr(5e-5, 1e-3)), "both adapt: both LRs count"
+    assert key("no_adapt", lr(1e-4, 1e-3)) != key("both_indep", lr(1e-4, 1e-3)), "the mode is still in the key"
+    assert key("no_adapt", {**lr(1e-4, 1e-3), "SMALL": {**lr(1e-4, 1e-3)["SMALL"], "NAME": "c"}}) != key("no_adapt", lr(1e-4, 1e-3)), \
+        "a frozen member's identity still counts"
     print("protocols self-test passed")

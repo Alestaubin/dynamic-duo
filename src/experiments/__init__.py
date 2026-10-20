@@ -12,6 +12,7 @@
   cli        the flags every script takes
   adaptation_modes  scripts/03: the six ways of adapting a duo, the shared temperatures, the two tables
   tuning     scripts/02: one-model Tent tuning on the held-out corruptions, written to cfgs/tuned/
+  joint_lr_tuning  scripts/02b: the two members' learning rates tuned together for the Joint mode (a grid over pairs)
 
 Why this shape: the paper adapts the two members independently, so the gate never feeds back into
 adaptation. One live run per (TTA method, duo, stream, seed) therefore yields both members' logits, and

@@ -57,7 +57,7 @@ The duos `vitb16aug_rn50v1` and `vitb16aug2_rn50v1` pair each timm ViT with `res
 
 **Adapt once, combine many times.** Adapting the models is the expensive part, and it does not depend on how the two models are combined afterwards. So a script adapts the models once per (TTA method, duo, stream, seed) and saves both models' logits in `cache/`. Every way of combining them is then a cheap replay on those saved logits, with no model and no dataset needed.
 
-**The cache can't go stale.** Its name includes a fingerprint of everything that changes the logits: the models, their learning rates, the TTA method, the seed, the batch size. Change a learning rate and the old cache is simply not found, so you never read outdated logits by accident.
+**The cache can't go stale.** Its name includes a fingerprint of everything that changes the logits: the models, their learning rates, the TTA method, the seed, the batch size. Change a learning rate and the old cache is simply not found, so you never read outdated logits by accident. A member that does not adapt (a frozen run, or the frozen side of `large_indep`/`small_indep`) has no learning rate in the fingerprint, since its optimizer is never built: retuning does not orphan frozen logits.
 
 **Resumable.** Each ImageNet-C corruption is saved as soon as it finishes. If a job is killed or runs out of walltime, run the same command again: streams already saved are skipped and only the missing ones run. (`02_tune_tta.py` works the same way with one file per trial.)
 
@@ -107,6 +107,7 @@ On this cluster the login node kills processes above 5 GB of memory, so run anyt
 |---|---|
 | `01_tab_temperatures.py` | Which temperatures Fixed TS should use, and how much better temperature scaling could possibly be. |
 | `02_tune_tta.py --model NAME` | Tunes Tent's optimizer settings for one model on the 4 held-out corruptions, and writes `cfgs/tuned/`. |
+| `02b_tune_joint_lr.py` | Tunes the two members' learning rates **together** for the Joint mode (both adapt on the duo entropy) on the 4 held-out corruptions: a grid over pairs, scored by the duo's accuracy. Does not write `cfgs/tuned/`; prints the script-03 command that evaluates the winner. |
 | `03_tab_adaptation_modes.py` | Six ways of adapting the duo (joint, one model adapting, independent), all scored with the same Fixed TS. |
 | `04_cache_logits.py` | Adapts a duo's two members (they never see each other) and stores their logits **per member**, under a key made of that member's own settings, in `cache/logits/`. `--grid` runs the learning-rate sweep (run i uses the i-th value of each model's grid), `--streams` picks held-out / test / clean / the clean training slice / a natural shift. Any large member can be paired with any small one afterwards. Produces no table. |
 | `05_select_member_lr.py` | Reads the sweep that `04` stored for ETA, EATA or SAR and picks each member's learning rate on the held-out streams (the counterpart of `02` for the other algorithms); `--write_tuned` writes `cfgs/tuned/`. |
@@ -188,6 +189,35 @@ Each trial runs 4 × 50,000 images, so for the large models use the array. A fin
 - `cfgs/tuned/tent__<model>.yaml`: the winning optimizer settings, plus its score and the frozen model's score. Every other script reads it: for that model and `--tta tent`, it replaces the optimizer settings in `cfgs/duos/*.yaml`. Delete the file to go back to the defaults in the duo file. The script writes it only if the winner beats the frozen model, and only from a full run.
 - `out/results/tune_tta/<model>__tent/ranking.csv`: every trial, best first, with its accuracy on each stream.
 - `out/results/tune_tta/<model>__tent/trials/`: one JSON file per trial (this is what makes the run resumable).
+
+## Script 02b: tune the learning rates of the Joint mode
+
+`02b_tune_joint_lr.py` asks: when both models adapt on the duo entropy (the Joint mode of script 03), **which pair of learning rates is best?** Script 02 tunes one model alone, on its own entropy. The duo entropy is a steadier signal (a model that starts to collapse is held up by its partner), so Joint may tolerate larger rates, and the two rates interact, so the grid is over **pairs** `(lr_large, lr_small)`.
+
+**The grid.** By default 1, 2, 4, 8 and 16 times each model's *current* learning rate (the tuned one in `cfgs/tuned/<tta>__<model>.yaml`, else the duo file's): 25 pairs. Only the learning rate changes; momentum and the rest of each `OPTIM` stay. `--mults` changes the multiples, `--lrs_large` / `--lrs_small` give explicit rates. Finished points are reused, so extending a grid only runs the new pairs.
+
+**What one run is.** One Joint run over the 4 held-out streams (severity 5, all 50,000 images each), both models reset to source weights before every stream. The score is the mean over the 4 streams of the accuracy of the static duo `(z_L / T_L + z_S / T_S) / 2`, the same prediction script 03's Joint row scores. The worst stream and each model's own accuracy are reported next to it. Two references run as well: the frozen duo, and Independent both at the current rates (already cached: the temperatures' fit needs it). The report then says what the duo signal buys at *equal* rates (the Joint run at the current rates against Independent both) and what *larger* rates buy on top (the best pair against that run).
+
+**The temperatures** T_L, T_S are fixed for the whole grid, because a pair per point would change the objective being compared. They are script 03's Fixed TS (fitted on these 4 corruptions on independently adapted models at the current rates), or `--temps_checkpoint DIR`.
+
+**Divergence.** A learning rate so large that the logits become non-finite cannot be cached. Such a run is recorded as *diverged* (a `diverged.json` next to its cache), counts as finished, and ranks last.
+
+**Running it.** One task per grid point; the references fall onto the first tasks. About 17 minutes per point on an L40S (a held-out-only run at Tent's speed, from the rate in `plan.md`; not measured for this script), so ask for a tight limit:
+
+```bash
+sbatch slurm/job.sh scripts/02b_tune_joint_lr.py --duo vitb16_rn50v1 --bn --temps_only          # once: fit and save T_L, T_S
+sbatch -t 00:40:00 --array=0-24 slurm/job.sh scripts/02b_tune_joint_lr.py --duo vitb16_rn50v1 --bn --shard auto
+sbatch slurm/job_cpu.sh scripts/02b_tune_joint_lr.py --duo vitb16_rn50v1 --bn --report_only     # rank (no model runs)
+```
+
+All tasks and the ranking run must be given the same grid flags. `--bn` only affects the frozen reference.
+
+**Output**, in `out/results/tune_joint_lr/<duo>__<tta>[_bn]/` (a capped `--num_samples` run has its own folder):
+- `ranking.csv`: one row per run (references and diverged points included), the ranked grid points first; accuracies are fractions.
+- `results.json`: the same rows plus the temperatures, optimizers, grid and the winner.
+- The printout: the grid of duo accuracies and of worst-stream accuracies, the top of the ranking, the comparisons above, and a warning when a model's best rate is the smallest or largest tried (the optimum may lie outside the grid).
+
+**It does not write `cfgs/tuned/`**: that file also sets the rates of the independent modes, and these rates belong to the Joint mode alone. Instead the last line printed is the command that scores the winning pair on the 15 test corruptions: script 03 with `--modes joint --lr_large X --lr_small Y --temps_checkpoint <the same temperatures>`.
 
 ## Script 03: ways of adapting the duo
 
@@ -280,6 +310,20 @@ A trial is one combination of optimizer settings: Adam is learning rate × beta,
 | `--seed N` | Seed of the stream order. | `0` |
 
 Two cautions. All shards of an array, and the final ranking run, must be given the **same grid flags**: the list of trials comes from the flags, and a trial outside the list is neither run nor ranked. And `--report_only` writes the tuned file from the best trial *in the grid you pass*, so a report with a smaller grid can overwrite it with a different winner.
+
+### Script 02b: `02b_tune_joint_lr.py`
+
+Takes the shared flags `--duo`, `--tta`, `--tta_kwargs`, `--seeds` (default `0`), `--num_samples`, `--bn`, `--report_only`, `--shard`, `--only` (labels like `joint/L5e-05_S0.00025/seed0`, `frozen/seed0`), `--out`, `--global` and `--device`.
+
+| Argument | Meaning | Default |
+|---|---|---|
+| `--mults X [...]` | The grid of each model: these multiples of its current learning rate. | `1 2 4 8 16` |
+| `--lrs_large LR [...]` | Explicit learning rates of the large model (replaces `--mults` for it). | from `--mults` |
+| `--lrs_small LR [...]` | The same for the small model. | from `--mults` |
+| `--temps_checkpoint DIR` | Use the temperatures saved in a `JointFixedTS` checkpoint instead of fitting them on the held-out corruptions. | fit on the held-out corruptions |
+| `--temps_only` | Fit and save the temperatures, then stop. Run it once before a `--shard` array. | off |
+
+The number of array tasks is the number of grid points times the number of seeds (the two references wrap around onto the first tasks).
 
 ### Script 03: `03_tab_adaptation_modes.py`
 

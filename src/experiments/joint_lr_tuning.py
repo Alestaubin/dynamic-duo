@@ -1,0 +1,475 @@
+"""
+joint_lr_tuning.py
+==================
+The logic behind scripts/02b_tune_joint_lr.py: choose the two members' learning rates TOGETHER for the Joint mode of
+src/experiments/adaptation_modes.py (both members minimize the entropy of the static duo's combined prediction).
+
+Why a tuner of its own. scripts/02_tune_tta.py tunes ONE model on ITS OWN entropy, and what it writes to cfgs/tuned/ is
+what the independent modes run with. In the Joint mode the loss is the duo's entropy, a steadier signal than either
+member's own (a member that starts to collapse is held up by its partner), so the best rates may be larger. They also
+interact: how far one member can move depends on how far the other does. So the grid is over PAIRS (lr_large, lr_small),
+around each member's current (tuned) rate; by default 1, 2, 4, 8 and 16 times it.
+
+A grid point is one Joint run (RunSpec mode both_duo, protocol "tuning": the 4 held-out corruptions, each from source
+weights) at that pair of rates. Its score is the MACRO accuracy (the mean over the 4 streams, so no stream weighs more
+because it has more images) of the static duo (z_L / T_L + z_S / T_S) / 2, the prediction script 03's Joint row scores,
+with the worst stream and each member's own accuracy next to it. Two reference runs ride along: the frozen models, and
+Independent both at the current rates (the run the temperatures' fit needs anyway, so it is cached). The report then
+says what the Joint signal buys at the SAME rates (grid point x1,x1 against Independent both) and what larger rates buy
+on top of it (the best point against x1,x1).
+
+Temperatures. The duo entropy depends on T_L and T_S, so they are fixed before the grid and shared by every point (a
+pair per point would change the objective being compared): script 03's Fixed TS, fitted on the 4 held-out corruptions on
+independently adapted members at the current rates, or any JointFixedTS checkpoint. The same pair scores every point.
+
+A learning rate that is too large can make the logits non-finite, which the member cache refuses to store. Such a run is
+recorded as DIVERGED (a marker next to its cache), counts as complete, and ranks below every finite one.
+
+Everything is resumable and shardable: the member logits of each (point, stream) are cached under a key that holds both
+learning rates and the temperatures, so a killed job resumes at its first missing stream and a SLURM array takes one
+point per task.
+"""
+
+from __future__ import annotations
+
+import json
+import shlex
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Sequence
+
+import pandas as pd
+
+from src.experiments import adaptation_modes as AM
+from src.experiments.cache import MemberCache
+from src.experiments.protocols import Segment, build_segments
+from src.experiments.runner import Context, ensure_members, evaluate, run_dir
+from src.experiments.specs import GateSpec, RunSpec
+
+ENGINE_MODE = {"joint": "both_duo", "indep": "both_indep", "frozen": "no_adapt"}
+DIVERGED = "diverged.json"            # written next to a run's cache when its logits went non-finite
+DEFAULT_MULTS = (1, 2, 4, 8, 16)
+
+
+# ---------------------------------------------------------------------------------------------------------- grid
+
+def lr_axis(base_lr: float, mults: Sequence[float], explicit: Sequence[float] | None = None) -> list[float]:
+    """The learning rates tried for one member, ascending and without duplicates: `explicit` if given, else `mults`
+    times the member's current rate. Rounded to 6 significant digits, so that 5e-5 * 4 is 0.0002 and not 0.00019999."""
+    values = list(explicit) if explicit else [base_lr * m for m in mults]
+    axis = sorted({float(f"{v:.6g}") for v in values})
+    if not axis or axis[0] <= 0:
+        raise ValueError(f"learning rates must be positive and there must be at least one, got {values}")
+    return axis
+
+
+@dataclass(frozen=True)
+class Job:
+    """One run: a Joint run at (lr_large, lr_small), or a reference ("indep": Independent both at the current rates,
+    "frozen": no adaptation), for one stream-order seed."""
+    kind: str
+    seed: int
+    lr_large: float | None = None
+    lr_small: float | None = None
+
+    def __post_init__(self):
+        if self.kind not in ENGINE_MODE or (self.kind == "joint") != (self.lr_large is not None and self.lr_small is not None):
+            raise ValueError(f"bad job {self}: only a joint job has learning rates, and it needs both")
+
+    @property
+    def label(self) -> str:                  # the --only / --shard label
+        head = f"joint/L{self.lr_large:g}_S{self.lr_small:g}" if self.kind == "joint" else self.kind
+        return f"{head}/seed{self.seed}"
+
+    @property
+    def point(self) -> tuple:                # what the seeds of one grid point share
+        return (self.kind, self.lr_large, self.lr_small)
+
+
+def build_jobs(lrs_large: Sequence[float], lrs_small: Sequence[float], seeds: Sequence[int]) -> list[Job]:
+    """The grid points first, so that an array with one task per point gives each its own task, then the references
+    (which wrap around onto the first tasks: Independent both is cached already, the frozen run is forward-only)."""
+    jobs = [Job("joint", s, lr_l, lr_s) for s in seeds for lr_l in lrs_large for lr_s in lrs_small]
+    return jobs + [Job(kind, s) for s in seeds for kind in ("frozen", "indep")]
+
+
+# ------------------------------------------------------------------------------------------------------ running
+
+@dataclass
+class Tuner:
+    ctx: Context                         # at the CURRENT (tuned) learning rates: what the references run with
+    tta: str
+    tta_kwargs: dict | None
+    num_samples: int | None
+    temps: AM.Temps                      # T_L, T_S of the static duo: the loop's and the scoring one
+    segments: list[Segment] | None = None   # None = the protocol's 4 held-out corruptions (tests pass fake streams)
+
+    def spec(self, job: Job) -> RunSpec:
+        return RunSpec(self.ctx.duo["NAME"], tta=self.tta, tta_kwargs=self.tta_kwargs or {}, mode=ENGINE_MODE[job.kind],
+                       protocol="tuning", seed=job.seed, num_samples=self.num_samples,
+                       loop_ts=(self.temps.T_l, self.temps.T_s) if job.kind == "joint" else None)
+
+    def context(self, job: Job) -> Context:
+        return AM.with_learning_rates(self.ctx, job.lr_large, job.lr_small) if job.kind == "joint" else self.ctx
+
+    def _marker(self, job: Job) -> Path:
+        return run_dir(self.spec(job), self.context(job)) / DIVERGED
+
+    def compute(self, jobs: Sequence[Job]) -> None:
+        """Adapt the members of every job (a GPU job); streams already cached are skipped."""
+        for job in jobs:
+            if self._marker(job).is_file():
+                print(f"== {job.label}: recorded as diverged, skipped")
+                continue
+            print(f"== {job.label}")
+            try:
+                ensure_members(self.spec(job), self.context(job), self.segments)
+            except ValueError as e:
+                if "non-finite" not in str(e):
+                    raise
+                marker = self._marker(job)
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(json.dumps({"job": job.label, "error": str(e)}))
+                print(f"{job.label}: the logits went non-finite (learning rates too large): recorded as diverged")
+
+    def missing(self, jobs: Sequence[Job]) -> dict[str, list[str]]:
+        """{job label: streams not cached yet}, leaving out complete and diverged jobs."""
+        out = {}
+        for job in jobs:
+            if self._marker(job).is_file():
+                continue
+            cache = MemberCache(run_dir(self.spec(job), self.context(job)))
+            segments = self.segments or build_segments(self.spec(job), self.ctx.g)
+            if gaps := [s.label for s in segments if not cache.has(s.file_stem)]:
+                out[job.label] = gaps
+        return out
+
+    def score(self, jobs: Sequence[Job]) -> dict[tuple, dict]:
+        """{job.point: summary} from the cached logits, scored by the static duo; the seeds of a point are pooled. Needs
+        every job complete (FileNotFoundError naming the gaps otherwise)."""
+        gate = GateSpec("duo", kind="fixed_ts", fixed_ts=str(self.temps.folder))
+        rows: dict[tuple, list[dict]] = defaultdict(list)
+        diverged = set()
+        for job in jobs:
+            if self._marker(job).is_file():
+                diverged.add(job.point)
+                continue
+            rows[job.point] += evaluate(self.spec(job), self.context(job), [gate], report_only=True,
+                                        segments=self.segments).rows
+        return {**{p: summarize(r) for p, r in rows.items() if p not in diverged},
+                **{p: DIVERGED_SUMMARY for p in diverged}}
+
+
+# ------------------------------------------------------------------------------------------------------ scoring
+
+NAN = float("nan")
+DIVERGED_SUMMARY = {"diverged": True, "duo": NAN, "large": NAN, "small": NAN, "duo_ece": NAN, "duo_nll": NAN,
+                    "worst": NAN, "worst_stream": None, "streams": {}}
+
+
+def summarize(rows: Sequence[dict]) -> dict:
+    """One grid point from the rows of `evaluate` (series "duo", "large", "small"; one row per stream and seed).
+    Macro means: over the streams first, then over the seeds."""
+    df = pd.DataFrame(rows)
+    macro = df.groupby(["seed", "series"])[["accuracy", "ece", "nll"]].mean().groupby("series").mean()
+    duo_streams = df[df["series"] == "duo"].groupby("segment")["accuracy"].mean()
+    return {"diverged": False, "duo": float(macro.loc["duo", "accuracy"]), "large": float(macro.loc["large", "accuracy"]),
+            "small": float(macro.loc["small", "accuracy"]), "duo_ece": float(macro.loc["duo", "ece"]),
+            "duo_nll": float(macro.loc["duo", "nll"]), "worst": float(duo_streams.min()),
+            "worst_stream": str(duo_streams.idxmin()), "streams": {k: float(v) for k, v in duo_streams.items()}}
+
+
+def joint_points(summaries: dict[tuple, dict]) -> list[dict]:
+    """The grid points as flat dicts (learning rates + summary), in grid order."""
+    return [{"lr_large": p[1], "lr_small": p[2], **s} for p, s in summaries.items() if p[0] == "joint"]
+
+
+def rank(points: Sequence[dict]) -> list[dict]:
+    """Finite points, best duo accuracy first. A tie goes to the smaller pair of rates (the smaller product, then the
+    smaller large-member rate), the repo's convention of preferring the more conservative setting."""
+    finite = [p for p in points if not p["diverged"]]
+    return sorted(finite, key=lambda p: (-round(p["duo"], 12), p["lr_large"] * p["lr_small"], p["lr_large"]))
+
+
+def edge_warnings(best: dict, lrs_large: Sequence[float], lrs_small: Sequence[float]) -> list[str]:
+    """The winner sits at the end of a member's range: the optimum may lie outside the grid."""
+    out = []
+    for side, lrs, flag in (("large", lrs_large, "--lrs_large"), ("small", lrs_small, "--lrs_small")):
+        lr = best[f"lr_{side}"]
+        if len(lrs) > 1 and lr in (min(lrs), max(lrs)):
+            end = "smallest" if lr == min(lrs) else "largest"
+            out.append(f"the best {side}-member learning rate ({lr:g}) is the {end} one tried ({min(lrs):g}..{max(lrs):g}): "
+                       f"the optimum may lie beyond it; add values with {flag} (or --mults); finished points are reused")
+    return out
+
+
+# ------------------------------------------------------------------------------------------------------ reporting
+
+def _pct(x: float) -> str:
+    return "  div." if x != x else f"{100 * x:5.2f}"
+
+
+def grid_table(points: Sequence[dict], lrs_large: Sequence[float], lrs_small: Sequence[float], key: str = "duo",
+               mark: dict | None = None) -> str:
+    """Rows: the large member's rate; columns: the small member's. `key` is a summary field (a fraction, printed as
+    %). `mark` (a point) gets a trailing `*`. A missing or diverged cell prints as `div.`."""
+    cell = {(p["lr_large"], p["lr_small"]): p[key] for p in points}
+    corner = "large \\ small"
+    head = f"{corner:>14}" + "".join(f"{s:>10g}" for s in lrs_small)
+    lines = [head]
+    for lr_l in lrs_large:
+        cells = []
+        for lr_s in lrs_small:
+            star = "*" if mark and (lr_l, lr_s) == (mark["lr_large"], mark["lr_small"]) else " "
+            cells.append(f"{_pct(cell.get((lr_l, lr_s), NAN)):>9}{star}")
+        lines.append(f"{lr_l:>14g}" + "".join(cells))
+    return "\n".join(lines)
+
+
+def ranking_table(ranked: Sequence[dict], top: int = 8) -> str:
+    lines = [f"{'rank':>4} {'lr_large':>10} {'lr_small':>10} {'duo':>7} {'worst':>7} {'large':>7} {'small':>7} {'duo nll':>8}"]
+    for i, p in enumerate(ranked[:top], 1):
+        lines.append(f"{i:>4} {p['lr_large']:>10g} {p['lr_small']:>10g} {_pct(p['duo']):>7} {_pct(p['worst']):>7} "
+                     f"{_pct(p['large']):>7} {_pct(p['small']):>7} {p['duo_nll']:>8.3f}")
+    return "\n".join(lines)
+
+
+def comparisons(summaries: dict[tuple, dict], best: dict, base: tuple[float, float]) -> list[str]:
+    """The lines that answer the question: against the frozen duo, against Independent both at the current rates, and
+    (when the current rates are on the grid) against the Joint run at them."""
+    d = lambda a, b: f"{100 * (a - b):+.2f}"                                                      # noqa: E731
+    out = []
+    frozen, indep = summaries.get(("frozen", None, None)), summaries.get(("indep", None, None))
+    at_base = summaries.get(("joint", *base))
+    if frozen:
+        out.append(f"best joint {_pct(best['duo']).strip()} vs frozen duo {_pct(frozen['duo']).strip()} "
+                   f"({d(best['duo'], frozen['duo'])} points)")
+    if indep:
+        out.append(f"best joint {_pct(best['duo']).strip()} vs Independent both at the current rates "
+                   f"{_pct(indep['duo']).strip()} ({d(best['duo'], indep['duo'])} points)")
+    if at_base and not at_base["diverged"]:
+        out.append(f"Joint at the current rates (L {base[0]:g}, S {base[1]:g}): {_pct(at_base['duo']).strip()}"
+                   + (f", {d(at_base['duo'], indep['duo'])} vs Independent both: what the duo signal buys at equal rates"
+                      if indep else "")
+                   + f"; the best pair adds {d(best['duo'], at_base['duo'])} on top: what the larger rates buy")
+    return out
+
+
+def result_rows(summaries: dict[tuple, dict], ranked: Sequence[dict]) -> list[dict]:
+    """One flat row per run (references and diverged points included), ranked joint points first; fractions."""
+    place = {(p["lr_large"], p["lr_small"]): i for i, p in enumerate(ranked, 1)}
+    rows = []
+    for (kind, lr_l, lr_s), s in summaries.items():
+        rows.append({"rank": place.get((lr_l, lr_s)) if kind == "joint" else None, "kind": kind, "lr_large": lr_l,
+                     "lr_small": lr_s, "diverged": s["diverged"], "duo_acc": s["duo"], "worst_acc": s["worst"],
+                     "worst_stream": s["worst_stream"], "large_acc": s["large"], "small_acc": s["small"],
+                     "duo_ece": s["duo_ece"], "duo_nll": s["duo_nll"], **{f"acc/{k}": v for k, v in s["streams"].items()}})
+    return sorted(rows, key=lambda r: (r["kind"] != "joint", r["rank"] is None, r["rank"] or 0, r["lr_large"] or 0,
+                                       r["lr_small"] or 0, r["kind"]))
+
+
+def evaluate_command(*, duo: str, tta: str, tta_kwargs: dict | None, bn: bool, lr_large: float, lr_small: float,
+                     temps_folder: Path) -> str:
+    """The script-03 command that scores the chosen pair on the 15 test corruptions: the Joint mode only, with the
+    SAME temperatures as the tuning (03 would otherwise fit new ones on members adapted at the new rates)."""
+    parts = ["python", "scripts/03_tab_adaptation_modes.py", "--duo", duo, "--tta", tta]
+    if tta_kwargs:
+        parts += ["--tta_kwargs", json.dumps(tta_kwargs)]
+    parts += (["--bn"] if bn else []) + ["--modes", "joint", "--lr_large", f"{lr_large:g}", "--lr_small", f"{lr_small:g}",
+                                         "--temps_checkpoint", str(temps_folder)]
+    return shlex.join(parts)
+
+
+def optimizer_text(optim: dict) -> str:
+    extra = f"momentum {optim['MOMENTUM']:g}" if optim["METHOD"] == "SGD" else f"beta1 {optim['BETA']:g}"
+    return f"{optim['METHOD']} ({extra}, weight decay {optim['WD']:g}, {int(optim.get('STEPS', 1))} step per batch)"
+
+
+# ----------------------------------------------------------------------------------------------- script plumbing
+
+def add_args(ap) -> None:
+    ap.add_argument("--mults", type=float, nargs="+", default=list(DEFAULT_MULTS), metavar="X",
+                    help="the grid of each member: these multiples of its CURRENT learning rate (cfgs/tuned/<tta>__<model>.yaml, "
+                         "else the duo YAML's). Default: %(default)s")
+    ap.add_argument("--lrs_large", type=float, nargs="+", default=None, metavar="LR",
+                    help="explicit learning rates of the large member (replaces --mults for it)")
+    ap.add_argument("--lrs_small", type=float, nargs="+", default=None, metavar="LR",
+                    help="explicit learning rates of the small member (replaces --mults for it)")
+    ap.add_argument("--temps_checkpoint", default=None, metavar="DIR",
+                    help="JointFixedTS checkpoint (a folder with config.json) for the duo's temperatures; default: "
+                         "fitted on the 4 held-out corruptions, as in script 03")
+    ap.add_argument("--temps_only", action="store_true",
+                    help="fit and store the temperatures, then stop (run this once before a --shard array so that "
+                         "no two tasks fit them at the same time)")
+
+
+if __name__ == "__main__":
+    import math
+    import tempfile
+
+    import torch
+
+    from src.experiments._testing import FakeStream, make_context, tiny_models
+    from src.utils.config import load_global
+
+    torch.set_num_threads(2)
+    g = load_global()
+
+    # ---- the grid ------------------------------------------------------------------------------------------------
+    assert lr_axis(5e-5, (1, 2, 4)) == [5e-5, 1e-4, 2e-4], "5e-5 * 4 must be 2e-4, not 0.00019999999999999998"
+    assert lr_axis(5e-5, (4, 1, 2, 2)) == [5e-5, 1e-4, 2e-4], "sorted and without duplicates"
+    assert lr_axis(5e-5, (1, 2), explicit=[3e-4, 1e-4]) == [1e-4, 3e-4], "explicit rates replace the multiples"
+    for bad in (dict(base_lr=1e-3, mults=()), dict(base_lr=1e-3, mults=(0.0,)), dict(base_lr=1e-3, mults=(1,), explicit=[-1e-3])):
+        try:
+            lr_axis(**bad)
+            raise AssertionError(f"must raise: {bad}")
+        except ValueError:
+            pass
+    jobs = build_jobs([1e-3, 2e-3], [1e-4, 2e-4, 4e-4], [0, 1])
+    assert len(jobs) == 2 * (6 + 2) and len({j.label for j in jobs}) == len(jobs)
+    assert [j.kind for j in jobs[:6]] == ["joint"] * 6 and {j.kind for j in jobs[-4:]} == {"frozen", "indep"}, \
+        "points first, references last"
+    assert jobs[0].label == "joint/L0.001_S0.0001/seed0" and jobs[-1].label == "indep/seed1"
+    for bad in (dict(kind="joint", seed=0), dict(kind="indep", seed=0, lr_large=1e-3, lr_small=1e-3), dict(kind="x", seed=0)):
+        try:
+            Job(**bad)
+            raise AssertionError(f"must raise: {bad}")
+        except ValueError:
+            pass
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        base = tiny_models(0)
+        ctx = make_context(tmp, batch_size=32, base=base)
+        ctx.g.raw["paths"]["checkpoints"] = str(tmp / "checkpoints")
+        ctx.g.raw["runtime"]["workers"] = 0              # tiny in-memory streams: no DataLoader processes needed
+        held =[Segment(f"{c}/s5", FakeStream(150, seed=10 + i), True) for i, c in enumerate(g.tuning_corruptions)]
+        tspec = AM.temperature_spec("tiny", "tent", None, None)
+        temps = AM.resolve_temperatures(ctx, tspec, segments=held)
+        tuner = Tuner(ctx, "tent", None, None, temps, segments=held)
+        base_lr = ctx.duo["LARGE"]["OPTIM"]["LR"]
+        lrs_l, lrs_s = lr_axis(base_lr, (1, 4)), lr_axis(base_lr, (0.5, 1))
+        grid = build_jobs(lrs_l, lrs_s, [0])
+        base_pair = (float(f"{base_lr:.6g}"),) * 2
+
+        # ---- what each job is: mode, protocol, temperatures only where the loop needs them -----------------------
+        for job in grid:
+            s = tuner.spec(job)
+            assert s.protocol == "tuning" and s.mode == ENGINE_MODE[job.kind] and s.seed == 0
+            assert (s.loop_ts == (temps.T_l, temps.T_s)) == (job.kind == "joint")
+        assert len({tuner.spec(j).fingerprint(tuner.context(j).duo, 32, "masked") for j in grid}) == len(grid), \
+            "every job has its own cache: each learning rate and each mode is part of the key"
+        # the tuning point IS script 03's Joint run: same spec up to the stream list, so the same cache key space
+        j = Job("joint", 0, base_pair[0], base_pair[1])
+        mine = tuner.spec(j).fingerprint(tuner.context(j).duo, 32, "masked")
+        theirs = AM.mode_spec(AM.MODE_BY_KEY["joint"], "tiny", "tent", None, 0, None, temps).fingerprint(ctx.duo, 32, "masked")
+        assert mine == theirs, "the tuner's Joint run must be script 03's Joint run"
+        assert tuner.spec(Job("indep", 0)).fingerprint(ctx.duo, 32, "masked") == tspec.fingerprint(ctx.duo, 32, "masked"), \
+            "the Independent reference is the run the temperatures were fitted on (already cached)"
+
+        # ---- running: nothing is cached, then everything; a repeat recomputes nothing --------------------------------
+        assert set(tuner.missing(grid)) == {j.label for j in grid if j.kind != "indep"}, "the temperatures' fit cached 'indep'"
+        try:
+            tuner.score(grid)
+            raise AssertionError("scoring an incomplete grid must fail, not guess")
+        except FileNotFoundError as e:
+            assert "missing" in str(e)
+        tuner.compute(grid)
+        assert tuner.missing(grid) == {}
+        files = {p: p.stat().st_mtime_ns for j in grid for p in MemberCache(run_dir(tuner.spec(j), tuner.context(j))).dir.glob("*.pt")}
+        assert len(files) == len(grid) * len(held)
+        tuner.compute(grid)
+        assert files == {p: p.stat().st_mtime_ns for p in files}, "a finished job is not recomputed"
+
+        # ---- the score is the static duo's macro accuracy, read off the cached logits ---------------------------------
+        summaries = tuner.score(grid)
+        assert len(summaries) == len(lrs_l) * len(lrs_s) + 2
+        for job in grid:
+            cache = MemberCache(run_dir(tuner.spec(job), tuner.context(job)))
+            acc = {"duo": [], "large": [], "small": []}
+            for seg in held:
+                d = cache.read(seg.file_stem)
+                duo = 0.5 * d["z_l"] / temps.T_l + 0.5 * d["z_s"] / temps.T_s
+                for name, z in (("duo", duo), ("large", d["z_l"]), ("small", d["z_s"])):
+                    acc[name].append(float((z.argmax(1) == d["labels"]).float().mean()))
+            s = summaries[job.point]
+            assert not s["diverged"] and set(s["streams"]) == {x.label for x in held}
+            for name in acc:
+                assert abs(s[name] - sum(acc[name]) / 4) < 1e-9, (job.label, name)
+            assert abs(s["worst"] - min(acc["duo"])) < 1e-9 and s["streams"][s["worst_stream"]] == s["worst"]
+        pts = [j for j in grid if j.kind == "joint"]
+        a, b = (MemberCache(run_dir(tuner.spec(j), tuner.context(j))).read(held[0].file_stem) for j in (pts[0], pts[-1]))
+        assert not a["z_l"].equal(b["z_l"]), "other learning rates, other logits"
+        indep = MemberCache(run_dir(tuner.spec(Job("indep", 0)), ctx)).read(held[0].file_stem)
+        same = MemberCache(run_dir(tuner.spec(Job("joint", 0, *base_pair)), ctx)).read(held[0].file_stem)
+        assert not indep["z_l"].equal(same["z_l"]), "the duo's entropy is not the member's own: Joint differs from Independent"
+
+        # ---- a diverging run is recorded, counts as complete, ranks last, and is never recomputed ---------------------
+        boom = Job("joint", 0, 1e30, base_pair[1])
+        assert tuner.missing([boom]) != {}
+        tuner.compute([boom])
+        assert tuner.missing([boom]) == {} and tuner._marker(boom).is_file(), "non-finite logits: diverged, not a crash"
+        sc = tuner.score(grid + [boom])
+        assert sc[boom.point]["diverged"] and math.isnan(sc[boom.point]["duo"])
+        pts_all = joint_points(sc)
+        ranked = rank(pts_all)
+        assert len(ranked) == len(pts) and all(not p["diverged"] for p in ranked), "diverged runs are not ranked"
+        mtime = tuner._marker(boom).stat().st_mtime_ns
+        tuner.compute([boom])
+        assert tuner._marker(boom).stat().st_mtime_ns == mtime
+        assert "div." in grid_table(pts_all, lrs_l + [1e30], lrs_s) and "div." in ranking_table(ranked + [pts_all[-1]])
+        try:
+            tuner.compute([Job("joint", 0, -1.0, 1e-3)])
+            raise AssertionError("a negative learning rate must raise, not be recorded as divergence")
+        except ValueError as e:
+            assert "positive" in str(e)
+
+    # ---- ranking, ties, edges, tables on synthetic summaries -----------------------------------------------------
+    def fake(duo, **kw):
+        return {**DIVERGED_SUMMARY, "diverged": False, "duo": duo, "large": duo - .05, "small": duo - .1, "worst": duo - .02,
+                "worst_stream": "a", "duo_ece": .05, "duo_nll": 1.5, "streams": {"a": duo - .02, "b": duo + .02}, **kw}
+    L, S = [1e-4, 2e-4, 4e-4], [1e-3, 2e-3]
+    table = {("joint", l, s): fake(acc) for (l, s), acc in zip(((l, s) for l in L for s in S), (.50, .52, .55, .53, .55, .51))}
+    table[("frozen", None, None)], table[("indep", None, None)] = fake(.40), fake(.49)
+    pts = joint_points(table)
+    ranked = rank(pts)
+    assert [(p["lr_large"], p["lr_small"]) for p in ranked[:2]] == [(2e-4, 1e-3), (4e-4, 1e-3)], \
+        "tie at .55: the smaller product of rates wins"
+    assert [p["duo"] for p in ranked] == [.55, .55, .53, .52, .51, .50]
+    edge = edge_warnings(ranked[0], L, S)
+    assert len(edge) == 1 and "small-member learning rate (0.001) is the smallest" in edge[0] and "--lrs_small" in edge[0]
+    assert edge_warnings({"lr_large": 2e-4, "lr_small": 1e-3}, L, [5e-4, 1e-3, 2e-3]) == [], "an interior optimum: no warning"
+    both = edge_warnings({"lr_large": 4e-4, "lr_small": 2e-3}, L, S)
+    assert len(both) == 2 and "large-member" in both[0] and "largest" in both[0]
+    assert edge_warnings({"lr_large": 1e-4, "lr_small": 1e-3}, [1e-4], [1e-3]) == [], "one value tried: no edge"
+    gt = grid_table(pts, L, S, mark=ranked[0]).splitlines()
+    assert len(gt) == 1 + len(L) and gt[2].count("*") == 1 and "55.00*" in gt[2] and "0.002" in gt[0]
+    cmp = comparisons(table, ranked[0], (1e-4, 1e-3))
+    assert len(cmp) == 3 and "+15.00 points" in cmp[0] and "+6.00 points" in cmp[1]
+    assert "+1.00 vs Independent both" in cmp[2] and "adds +5.00 on top" in cmp[2], cmp
+    assert len(comparisons(table, ranked[0], (9e-9, 9e-9))) == 2, "no Joint run at the current rates on the grid: no third line"
+    rows = result_rows(table, ranked)
+    assert [r["kind"] for r in rows[-2:]] == ["frozen", "indep"] and rows[0]["rank"] == 1 and rows[0]["acc/a"] == ranked[0]["duo"] - .02
+    assert sorted(r["rank"] for r in rows if r["kind"] == "joint") == list(range(1, 7))
+    json.dumps(rows)
+
+    # ---- seeds: macro over the streams first, then over the seeds --------------------------------------------------
+    mk = lambda seed, seg, series, acc: {"seed": seed, "segment": seg, "series": series, "accuracy": acc, "ece": .1, "nll": 1.}   # noqa: E731
+    rr = [mk(sd, sg, sr, a) for sd, vals in ((0, {"s1": (.6, .5, .4), "s2": (.2, .3, .4)}), (1, {"s1": (.8, .5, .4), "s2": (.4, .3, .4)}))
+          for sg, accs in vals.items() for sr, a in zip(("duo", "large", "small"), accs)]
+    sm = summarize(rr)
+    assert abs(sm["duo"] - (((.6 + .2) / 2 + (.8 + .4) / 2) / 2)) < 1e-12 and sm["worst_stream"] == "s2"
+    assert abs(sm["worst"] - .3) < 1e-12 and abs(sm["small"] - .4) < 1e-12
+
+    # ---- the follow-up command: Joint only, the tuning's own temperatures ---------------------------------------------
+    cmd = evaluate_command(duo="vitb16_rn50v1", tta="tent", tta_kwargs=None, bn=True, lr_large=2e-4, lr_small=5e-4,
+                           temps_folder=Path("/x/heldout y"))
+    assert cmd == ("python scripts/03_tab_adaptation_modes.py --duo vitb16_rn50v1 --tta tent --bn --modes joint "
+                   "--lr_large 0.0002 --lr_small 0.0005 --temps_checkpoint '/x/heldout y'"), cmd
+    plain = evaluate_command(duo="d", tta="eata", tta_kwargs={"d_margin": 0.1}, bn=False, lr_large=1e-3, lr_small=1e-3,
+                             temps_folder=Path("t"))
+    assert "--tta_kwargs '{\"d_margin\": 0.1}'" in plain and "--bn" not in plain, plain
+    assert optimizer_text({"METHOD": "SGD", "MOMENTUM": 0.9, "WD": 0.0, "STEPS": 1}) == \
+        "SGD (momentum 0.9, weight decay 0, 1 step per batch)"
+    print("joint_lr_tuning self-test passed")

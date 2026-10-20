@@ -373,7 +373,7 @@ Stage A's findings in short (details and the 12 decisions: `docs/design_section4
 
 #### Stage E: proxy selection (offline)
 
-**Stage E status (2026-10-19).** Code: `src/experiments/proxy_selection.py` (the rule; tested), `scripts/08_select_proxy.py` (offline selection, writes `results/selection_section45.json`), `scripts/09_run_joint_dd.py` (the live Joint DD runs) and `scripts/10_select_joint_dd_beta.py` (its beta). Offline evaluations launched on the pairs Tent (ViT 5e-5, ResNet 2.5e-4: job 6445999, after the Tent slice run 6445997) and ETA (ViT 5e-4, ResNet 2.5e-4: job 6445998); both read only the held-out streams and the clean training slice.
+**Stage E status (2026-10-19).** Code: `src/experiments/proxy_selection.py` (the rule; tested), `scripts/08_select_proxy.py` (offline selection, writes `results/selection_section45.json`), `scripts/09_run_joint_dd.py` (the live Joint DD runs) and `scripts/10_select_joint_dd_beta.py` (its beta). Offline evaluations launched on the pairs Tent (ViT 5e-5, ResNet 2.5e-4: job 6445999, done, after the Tent slice run 6445997) and ETA (ViT 5e-4, ResNet 2.5e-4: job 6445998 died on a GPU ECC error on kn117; rerun as job 6467536 with `--exclude=kn117`); both read only the held-out streams and the clean training slice.
 
 Using the held-out caches with Tent as the base algorithm:
 - [ ] Pick the proxy, beta and b_t with the best mean held-out accuracy for Vanilla DD; break ties by ordering accuracy.
@@ -500,7 +500,7 @@ Every script takes `--duo --tta --seeds --report_only --only/--shard i/N`. Each 
 | 04 | `04_cache_logits.py` | 5.1 Tuning and calibration data | Adapts a duo's two members independently and stores each member's logits (per-member key, checksummed) for the held-out, test, clean and natural-shift streams; `--grid` is the learning-rate sweep | written; Stage B/D runs done for Tent, ETA, EATA, SAR (the SAR and Tent clean-slice runs are queued) |
 | 05 | `05_select_member_lr.py` | 5.1 Tuning and calibration data | Each member's learning rate from the stored sweep (the counterpart of `02` for ETA, EATA, SAR), writes `cfgs/tuned/` | written; run for ETA, EATA and SAR |
 | 06 | `06_run_coca.py` | 5.1 Tuning and calibration data | COCA through its official code (live, since its temperature is refitted each batch); learning-rate pairs on the held-out streams | written; grid run |
-| 07 | `07_eval_duo_grid.py` | 5.1 Tuning and calibration data | Vanilla Dynamic Duos offline on a stored pair: every proxy x beta x b_t, the members, fixed combinations, oracles, proxy diagnostics | written; ETA and Tent evaluations queued (jobs 6445998, 6445999) |
+| 07 | `07_eval_duo_grid.py` | 5.1 Tuning and calibration data | Vanilla Dynamic Duos offline on a stored pair: every proxy x beta x b_t, the members, fixed combinations, oracles, proxy diagnostics | written; Tent evaluation done (job 6445999); ETA evaluation resubmitted as job 6467536 after job 6445998 hit an uncorrectable ECC error on kn117 |
 | 08 | `08_select_proxy.py` | 5.1 Tuning and calibration data | Proxy, beta and b_t chosen on the held-out streams per base algorithm; writes `results/selection_section45.json` | written, self-tested; waits for `07` |
 | 09 | `09_run_joint_dd.py` | 5.1 Tuning and calibration data | Joint Dynamic Duos live on the held-out streams, one run per (proxy, b_t, beta) | written; not launched (needs a run table and approval) |
 | 10 | `10_select_joint_dd_beta.py` | 5.1 Tuning and calibration data | Joint DD's beta from the runs of `09`, recorded in the selection JSON | written; waits for `09` |
@@ -534,7 +534,6 @@ Not numbered (support the experiments, produce no result of their own):
 
 | File | Purpose | State |
 |---|---|---|
-| `cache_logits.py`, `eval_duo_grid.py` | Temporary symlinks to `04_cache_logits.py` and `07_eval_duo_grid.py`, kept only because queued jobs 6444625, 6445997, 6445998, 6445999 call the old paths; delete once those have started | temporary |
 | `setup_check.py` | Dataset paths and counts, disjoint tuning/test/CCC corruptions, duo configs, label probe | written |
 | `parity_old_vs_new.py` | Old engine vs new engine on real models (the Phase 5 gate at `--num_samples 50000`) | written, temporary (Phase 9) |
 | `ccc_generate.py` | SLURM-array wrapper around the CCC generator | planned (Phase 8) |
