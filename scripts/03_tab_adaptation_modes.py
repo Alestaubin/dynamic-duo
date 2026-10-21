@@ -24,11 +24,19 @@ cached, so a repeat only replays (and a cache from before the clean stream exist
     python scripts/03_tab_adaptation_modes.py --report_only                               # tables from the cache
     python scripts/03_tab_adaptation_modes.py --modes joint indep_duo --seeds 0 --num_samples 2000   # smoke test
 
-Other learning rates (--lr_large LR --lr_small LR, either or both; the rest of each member's tuned OPTIM stays) are a
-separate experiment: the rates are part of every cache key, so nothing is shared with the tuned run, and the temperatures
-are fitted again on members adapted at the new rates (--temps_only first, as above; --temps_checkpoint DIR keeps another
-pair instead). The CSV and both tables are then named <tag>_lrL<large>_S<small>_<YYYYmmdd-HHMMSS> (the time of the
-rendering run; a shard never renders), so they never replace the tuned run's files in the paper folder nor each other.
+Learning rates. The two kinds of mode adapt on different signals and each runs with its own rates (cfgs/duo_lrs/<duo>__<regime>.yaml):
+the modes that adapt on a member's OWN entropy (Independent large / small / both) with the indep regime's rates (tuned member by member,
+scripts/02_tune_tta.py), the modes that adapt on the DUO entropy (Joint, Large adapt, Small adapt) with the joint regime's pair (tuned
+by scripts/02b_tune_joint_lr.py, which records its winner there itself; Large / Small adapt use
+their adapting member's rate of that pair). A duo whose joint pair is not tuned yet makes the duo-entropy modes an ERROR
+(NotTuned), never a silent run at the indep rates; --joint_lr_large LR --joint_lr_small LR run them with rates given by hand (both are
+needed to skip the file; either one alone replaces just that member's). --lr_large / --lr_small replace the own-entropy modes' rates
+the same way (the rest of each member's OPTIM stays). Both tables' captions list both sets of rates and say which modes use which.
+The rates are part of every cache key, so nothing is shared between two settings, and the temperatures (one pair for every mode, fitted
+on members adapted at the own-entropy rates) are fitted again for other own-entropy rates (--temps_only first, as above;
+--temps_checkpoint DIR keeps another pair instead). With any of the four flags the CSV and both tables are named
+<tag>_lrL<large>_S<small>[_jlrL<large>_S<small>]_<YYYYmmdd-HHMMSS> (the time of the rendering run; a shard never renders), so they
+never replace the tuned run's files in the paper folder nor each other.
 
 Writes <paths.paper>/tab_adaptation_modes__<tag>.tex (accuracy per corruption: the duo under each mode, and each
 member alone adapting on its own entropy / frozen; a Clean column that is not part of Avg.),
@@ -54,14 +62,18 @@ from src.experiments.results import per_seed_average, save_rows
 from src.utils.tables import write_table
 
 
+def print_rates(what: str, ctx) -> None:
+    print(f"{what}: " + ", ".join(f"{side.lower()} {ctx.duo[side]['NAME']} {ctx.duo[side]['OPTIM']['LR']:g}"
+                                  for side in ("LARGE", "SMALL")))
+
+
 def main() -> int:
     ap = add_common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter))
     AM.add_args(ap)
     args = ap.parse_args()
     ctx, seeds, out = setup(args, "tab_adaptation_modes")
-    ctx = AM.with_learning_rates(ctx, args.lr_large, args.lr_small)
-    print("learning rates: " + ", ".join(f"{side.lower()} {ctx.duo[side]['NAME']} {ctx.duo[side]['OPTIM']['LR']:g}"
-                                         for side in ("LARGE", "SMALL")))
+    ctx = AM.with_learning_rates(ctx, args.lr_large, args.lr_small)       # the own-entropy modes' rates (indep regime)
+    print_rates("own-entropy learning rates", ctx)
 
     temps = AM.resolve_temperatures(ctx, AM.temperature_spec(args.duo, args.tta, args.tta_kwargs, args.num_samples),
                                     args.temps_checkpoint, report_only=args.report_only)
@@ -69,10 +81,15 @@ def main() -> int:
     if args.temps_only:
         return 0
 
+    duo_ctx = None            # the duo-entropy modes' rates (joint regime); only needed when one of those modes runs
+    if any(AM.MODE_BY_KEY[key].duo_entropy for key in args.modes):
+        duo_ctx = AM.joint_context(ctx, args.tta, args.joint_lr_large, args.joint_lr_small)
+        print_rates("duo-entropy learning rates", duo_ctx)
+
     jobs = AM.mode_jobs(args.duo, args.tta, args.tta_kwargs, seeds, args.num_samples, temps, args.modes)
     if not args.report_only:
-        AM.compute_members(ctx, select_jobs(jobs, AM.job_label, args.shard, args.only))
-    gaps = AM.missing(ctx, jobs)
+        AM.compute_members(ctx, select_jobs(jobs, AM.job_label, args.shard, args.only), duo_ctx=duo_ctx)
+    gaps = AM.missing(ctx, jobs, duo_ctx)
     if gaps:
         for label, streams in gaps.items():
             print(f"{label}: member logits missing for {len(streams)} streams (e.g. {streams[:3]}); "
@@ -81,7 +98,7 @@ def main() -> int:
     if args.shard:
         return 0        # (a shard that finds the cache complete must not render too: with --lr_* the names carry a stamp)
 
-    df = pd.DataFrame(AM.duo_rows(jobs, ctx, temps))
+    df = pd.DataFrame(AM.duo_rows(jobs, ctx, temps, duo_ctx=duo_ctx))
     tag = AM.output_tag(args, ap.get_default("duo"), stamp=time.strftime("%Y%m%d-%H%M%S"))
     save_rows(out / f"{tag}.csv", df)
     corruptions, clean = AM.split_clean(df)
@@ -92,9 +109,9 @@ def main() -> int:
     dest = out if args.num_samples else ctx.g.path("paper")       # a capped run (smoke test) must not overwrite the paper's
     source = "scripts/03_tab_adaptation_modes.py"
     write_table(dest / f"tab_adaptation_modes__{tag}.tex", AM.render_corruption_table(
-        df, ctx, args.tta, temps, label=f"tab:adaptation_modes:{tag}", source=source))
+        df, ctx, args.tta, temps, label=f"tab:adaptation_modes:{tag}", source=source, duo_ctx=duo_ctx))
     write_table(dest / f"tab_adaptation_modes_summary__{tag}.tex", AM.render_summary_table(
-        df, ctx, args.tta, temps, label=f"tab:adaptation_modes_summary:{tag}", source=source))
+        df, ctx, args.tta, temps, label=f"tab:adaptation_modes_summary:{tag}", source=source, duo_ctx=duo_ctx))
     return 0
 
 

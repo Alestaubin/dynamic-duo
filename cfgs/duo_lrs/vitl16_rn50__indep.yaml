@@ -1,0 +1,52 @@
+# Learning rates of duo `vitl16_rn50`, INDEP regime: each member adapts on its OWN entropy (engine mode both_indep; Vanilla DD).
+# The one place these numbers live (cfgs/duos/ only names the models). `methods`: what was tuned, per TTA method and per member,
+# recorded by scripts/02_tune_tta.py and 05_select_member_lr.py (src/utils/duo_lrs.py::record_tuned); `defaults`: what a member
+# runs with when nothing is tuned for the method.
+duo: vitl16_rn50
+regime: indep
+engine_mode: both_indep
+defaults:
+  large:
+    model: vit_l_16
+    norm: LN
+    OPTIM:
+      METHOD: Adam
+      STEPS: 1
+      LR: 0.0001
+      BETA: 0.9
+      WD: 0.0
+    source: pre-tuning default (the former OPTIM block of cfgs/duos/vitl16_rn50.yaml)
+  small:
+    model: resnet50
+    norm: BN
+    OPTIM:
+      METHOD: Adam
+      STEPS: 1
+      LR: 0.00025
+      BETA: 0.9
+      WD: 0.0
+    source: pre-tuning default (the former OPTIM block of cfgs/duos/vitl16_rn50.yaml)
+methods:
+  tent:
+    small:
+      model: resnet50
+      norm: BN
+      batch_size: 64
+      OPTIM:
+        METHOD: Adam
+        STEPS: 1
+        LR: 0.001
+        BETA: 0.9
+        WD: 0.0
+      source: scripts/02_tune_tta.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seed: 0
+      macro_accuracy: 0.45715
+      frozen_macro_accuracy: 0.37962
+      frozen_bn_batch_stats: true
+      stale: tuned with the ResNet-50 V2 weights on the old (zoomed-input) pipeline, before plan.md decision 16; retune before
+        relying on it

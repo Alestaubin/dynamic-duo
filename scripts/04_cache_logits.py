@@ -12,7 +12,7 @@ made of its own settings, and the best large member of one run can be paired wit
     --grid [i ...]       a learning-rate sweep: run i uses the i-th value of EACH model's grid (SGD, momentum 0.9;
                          src/experiments/grids.py); with no index, all five. One job per (seed, grid point).
     --lr_large LR --lr_small LR [--momentum M]   one explicit run (SGD) instead of the tuned settings
-    without --grid / --lr_*: the duo's settings as cfgs/duos + cfgs/tuned give them
+    without --grid / --lr_*: the duo's settings as cfgs/duo_lrs gives them (the indep regime)
 
     python scripts/04_cache_logits.py --duo vitb16_rn50v1 --streams heldout --grid --seeds 0 --shard auto   # a SLURM array
     python scripts/04_cache_logits.py --duo vitb16_rn50v1 --streams test clean --seeds 0 1 2 --lr_large 5e-4 --lr_small 2.5e-4

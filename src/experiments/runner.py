@@ -3,8 +3,8 @@ runner.py
 =========
 Compute-or-load the members' logits, then replay gates on them.
 
-    ctx   = Context.create("vitb16_rn50")
-    spec  = RunSpec("vitb16_rn50", tta="tent", seed=0)
+    ctx   = Context.create("vitb16_rn50v1")
+    spec  = RunSpec("vitb16_rn50v1", tta="tent", seed=0)
     gates = [GateSpec("fixed TS", kind="fixed_ts"), GateSpec.from_global(ctx.g, "ours")]
     res   = evaluate(spec, ctx, gates)          # res.rows: one dict per (segment, series)
 
@@ -54,12 +54,13 @@ class Context:
 
     @classmethod
     def create(cls, duo_name: str, g: GlobalConfig | None = None, device: str | None = None,
-               tta: str = "tent", bn: bool = False) -> "Context":
-        """`tta` selects which tuned optimizer settings (cfgs/tuned/<tta>__<model>.yaml) override the duo YAML's."""
+               tta: str = "tent", bn: bool = False, regime: str = "indep") -> "Context":
+        """The optimizer settings are the ones of cfgs/duo_lrs/<duo>__<regime>.yaml for the TTA method `tta`: `regime` "indep" (each
+        member on its own entropy: Vanilla DD) or "joint" (both on the duo's entropy: Joint DD; NotTuned while its rates are pending)."""
         g = g or load_global()
         device = get_device(device)
         print(f"device: {describe_device(device)}" + (" | frozen BN members use test-batch statistics" if bn else ""))
-        return cls(g, load_duo(duo_name, g, tta=tta), device, bn=bn)
+        return cls(g, load_duo(duo_name, g, tta=tta, regime=regime), device, bn=bn)
 
     @property
     def batch_size(self) -> int:

@@ -1,12 +1,14 @@
 """
 config.py
 =========
-Loads the repo-wide configuration (cfgs/global.yaml) and the per-duo model configs (cfgs/duos/*.yaml).
+Loads the repo-wide configuration (cfgs/global.yaml) and the per-duo model configs (cfgs/duos/*.yaml, which only name the two
+models). The optimizer settings of a duo live in ONE place, cfgs/duo_lrs/<duo>__<regime>.yaml (src/utils/duo_lrs.py).
 
     g = load_global()                     # honours $DUO_GLOBAL_CONFIG
     g.path("imagenet_c")                  # Path, resolved against the repo root
     g.test_corruptions                    # the 15 ImageNet-C test corruptions, in table-column order
-    duo = load_duo("vitb16_rn50")         # LARGE/SMALL + the legacy keys src/tta still reads (tuned OPTIM applied)
+    duo = load_duo("vitb16_rn50v1")       # LARGE/SMALL + the legacy keys src/tta still reads; OPTIM from cfgs/duo_lrs
+    duo = load_duo("vitb16_rn50v1", tta="tent", regime="joint")      # the joint regime's learning rates (NotTuned while pending)
 
 A dataset path set to `null` in global.yaml means "not imported yet": `g.path(key)` then raises
 DatasetPathNotSet naming the key to fill in, instead of failing later with a confusing IO error.
@@ -24,7 +26,6 @@ from __future__ import annotations
 
 import functools
 import os
-import warnings
 from pathlib import Path
 
 import yaml
@@ -188,22 +189,17 @@ def load_global(path: str | Path | None = None) -> GlobalConfig:
     return _load(str(_resolve(chosen)))
 
 
-def tuned_file(g: GlobalConfig, model: str, tta: str) -> Path | None:
-    """cfgs/tuned/<tta>__<model>.yaml (paths.tuned), written by scripts/02_tune_tta.py; None if not tuned yet."""
-    if "tuned" not in g.raw["paths"]:
-        return None
-    p = g.path("tuned") / f"{tta}__{model}.yaml"
-    return p if p.is_file() else None
-
-
-def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None, tta: str = "tent") -> dict:
+def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None, tta: str = "tent", regime: str = "indep") -> dict:
     """A duo config (LARGE/SMALL) merged with the global values under the key names the existing
     src/tta engine reads (TEST_DIR, VAL_DIR, BS, WORKERS, EVAL, CALIBRATOR). `name_or_path` is a file
-    in cfgs/duos/ (with or without .yaml) or a path to a duo YAML.
+    in cfgs/duos/ (with or without .yaml) or a path to a duo YAML; it names the two models (NAME, NORM) and nothing else.
 
-    Each member's OPTIM is the duo YAML's (the pre-tuning default) unless cfgs/tuned/<tta>__<model>.yaml exists,
-    in which case the tuned OPTIM replaces it (`tta` = the TTA method the run will use). The tuned file must have
-    been tuned for the same NORM (otherwise the learning rate belongs to a different set of parameters)."""
+    Each member's OPTIM comes from cfgs/duo_lrs/<duo>__<regime>.yaml (src/utils/duo_lrs.py): `regime` "indep" (each member on its
+    own entropy: Vanilla DD) or "joint" (both on the duo's entropy: Joint DD, NotTuned while its rates are pending). `tta` = the TTA
+    method the run will use: the member's tuned entry for it, else (indep) its default. The entry must have been tuned for the same
+    NORM (otherwise the learning rate belongs to a different set of parameters)."""
+    from src.utils import duo_lrs
+
     g = global_cfg or load_global()
     p = Path(name_or_path)
     if not p.suffix:
@@ -218,17 +214,12 @@ def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None, t
     for side in ("LARGE", "SMALL"):
         if side not in duo or "NAME" not in duo[side] or "NORM" not in duo[side]:
             raise ValueError(f"{p}: {side} must define NAME and NORM")
-    for side in ("LARGE", "SMALL"):
-        tuned = tuned_file(g, duo[side]["NAME"], tta)
-        if tuned is None:
-            continue
-        t = yaml.safe_load(tuned.read_text())
-        if t["NORM"] != duo[side]["NORM"]:
-            raise ValueError(f"{tuned} was tuned adapting {t['NORM']} layers, but {p} adapts {duo[side]['NORM']} "
-                             f"for {duo[side]['NAME']}: retune (scripts/02_tune_tta.py) or fix NORM")
-        if t.get("batch_size") not in (None, g.batch_size):
-            warnings.warn(f"{tuned} was tuned at batch size {t['batch_size']}, the protocol uses {g.batch_size}")
-        duo[side]["OPTIM"] = dict(t["OPTIM"])
+        if "OPTIM" in duo[side]:
+            raise ValueError(f"{p}: {side}.OPTIM would be ignored: the learning rates live in cfgs/duo_lrs/ "
+                             f"(python -m src.utils.duo_lrs --init_indep {duo['NAME']}), remove it from the duo file")
+    root = g.path("duo_lrs") if "duo_lrs" in g.raw["paths"] else duo_lrs.LR_DIR
+    for side, optim in duo_lrs.resolve(duo, regime, tta, root=root, batch_size=g.batch_size).items():
+        duo[side]["OPTIM"] = optim
     sev = [g.severity]
     duo.update(
         TEST_DIR=str(g.path_or_none("imagenet_c") or ""),
@@ -273,23 +264,45 @@ if __name__ == "__main__":
     except FileNotFoundError as e:
         assert "/nonexistent/b" in str(e)
 
-    # tuned optimizer settings replace the duo YAML's for the matching model and TTA method only. The expected
-    # defaults come from an EMPTY tuned folder, so the test does not depend on what is in the real cfgs/tuned.
-    with tempfile.TemporaryDirectory() as empty:
-        base_duo = load_duo("vitb16_rn50", GlobalConfig({**g.raw, "paths": {**g.raw["paths"], "tuned": empty}}, g.source))
+    # learning rates come from cfgs/duo_lrs only (cfgs/duos names the models), per regime, per TTA method and per member. The tests use
+    # a temporary duo_lrs folder, so they do not depend on what is in the real one.
+    from src.utils import duo_lrs
+
+    sgd = lambda lr: {"METHOD": "SGD", "STEPS": 1, "LR": lr, "MOMENTUM": 0.9, "DAMPENING": 0.0, "WD": 0.0, "NESTEROV": False}  # noqa: E731
+    adam = {"METHOD": "Adam", "STEPS": 1, "LR": 1e-4, "BETA": 0.9, "WD": 0.0}
     with tempfile.TemporaryDirectory() as tmp:
-        g_tuned = GlobalConfig({**g.raw, "paths": {**g.raw["paths"], "tuned": tmp}}, g.source)
-        (Path(tmp) / "tent__resnet50.yaml").write_text(yaml.safe_dump(
-            {"model": "resnet50", "tta": "tent", "NORM": "BN", "batch_size": 64,
-             "OPTIM": {"METHOD": "SGD", "STEPS": 1, "LR": 0.0007, "MOMENTUM": 0.9, "DAMPENING": 0.0, "WD": 0.0, "NESTEROV": False}}))
-        d = load_duo("vitb16_rn50", g_tuned, tta="tent")
-        assert d["SMALL"]["OPTIM"]["LR"] == 0.0007 and d["SMALL"]["OPTIM"]["METHOD"] == "SGD", "tuned file applies"
-        assert d["LARGE"]["OPTIM"] == base_duo["LARGE"]["OPTIM"], "a model with no tuned file keeps the YAML's"
-        assert load_duo("vitb16_rn50", g_tuned, tta="eata")["SMALL"]["OPTIM"] == base_duo["SMALL"]["OPTIM"], "per TTA method"
-        (Path(tmp) / "tent__resnet50.yaml").write_text(yaml.safe_dump({"NORM": "LN", "OPTIM": {"METHOD": "Adam"}}))
+        g_lrs = GlobalConfig({**g.raw, "paths": {**g.raw["paths"], "duo_lrs": tmp}}, g.source)
         try:
-            load_duo("vitb16_rn50", g_tuned)
-            raise AssertionError("a tuned file for another NORM must be rejected")
+            load_duo("vitb16_rn50", g_lrs)
+            raise AssertionError("a duo with no learning-rate file must raise")
+        except FileNotFoundError as e:
+            assert "--init_indep vitb16_rn50" in str(e)
+        duo_lrs.init_indep("vitb16_rn50", Path(tmp), defaults={"large": adam, "small": sgd(2.5e-4)})
+        base_duo = load_duo("vitb16_rn50", g_lrs)
+        assert base_duo["LARGE"]["OPTIM"] == adam and base_duo["SMALL"]["OPTIM"] == sgd(2.5e-4), "untuned: the defaults"
+        rec = {"model": "resnet50", "tta": "tent", "NORM": "BN", "batch_size": 64, "OPTIM": sgd(7e-4), "written_by": "test"}
+        duo_lrs.record_tuned("resnet50", "tent", rec, root=tmp, duos=["vitb16_rn50"])
+        d = load_duo("vitb16_rn50", g_lrs, tta="tent")
+        assert d["SMALL"]["OPTIM"]["LR"] == 7e-4 and d["SMALL"]["OPTIM"]["METHOD"] == "SGD", "the tuned entry applies"
+        assert d["LARGE"]["OPTIM"] == base_duo["LARGE"]["OPTIM"], "a model with no tuned entry keeps its default"
+        assert load_duo("vitb16_rn50", g_lrs, tta="eata")["SMALL"]["OPTIM"] == base_duo["SMALL"]["OPTIM"], "per TTA method"
+        try:
+            load_duo("vitb16_rn50", g_lrs, regime="joint")
+            raise AssertionError("no joint file")
+        except FileNotFoundError as e:
+            assert "--init_joint" in str(e)
+        duo_lrs.init_joint("vitb16_rn50", Path(tmp))
+        try:
+            load_duo("vitb16_rn50", g_lrs, regime="joint")
+            raise AssertionError("no joint rates: never the indep ones")
+        except duo_lrs.NotTuned:
+            pass
+        doc = duo_lrs.load("vitb16_rn50", "indep", tmp)
+        doc["methods"]["tent"]["small"]["norm"] = "LN"
+        duo_lrs._write(doc, tmp)
+        try:
+            load_duo("vitb16_rn50", g_lrs)
+            raise AssertionError("an entry for another NORM must be rejected")
         except ValueError as e:
             assert "tuned adapting LN" in str(e)
 
@@ -303,7 +316,16 @@ if __name__ == "__main__":
         except ValueError as e:
             assert "set `NAME: copied_duo`" in str(e), str(e)
         copy_of.write_text((DUO_DIR / "vitb16_rn50.yaml").read_text().replace("NAME: vitb16_rn50\n", "NAME: copied_duo\n", 1))
-        assert load_duo(copy_of)["NAME"] == "copied_duo"
+        g_copy = GlobalConfig({**g.raw, "paths": {**g.raw["paths"], "duo_lrs": tmp}}, g.source)
+        duo_lrs.init_indep("copied_duo", Path(tmp), duos_dir=Path(tmp), defaults={"large": adam, "small": sgd(1e-3)})
+        assert load_duo(copy_of, g_copy)["NAME"] == "copied_duo"
+        # an OPTIM block in a duo file is refused, not silently ignored
+        copy_of.write_text(copy_of.read_text().replace("  NORM: LN\n", "  NORM: LN\n  OPTIM: {METHOD: SGD, LR: 1}\n", 1))
+        try:
+            load_duo(copy_of, g_copy)
+            raise AssertionError("an OPTIM block in a duo file must be refused")
+        except ValueError as e:
+            assert "learning rates live in cfgs/duo_lrs" in str(e), str(e)
 
     for name in list_duos():
         duo = load_duo(name)

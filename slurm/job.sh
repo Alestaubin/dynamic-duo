@@ -12,7 +12,7 @@
 
 # The one generic launcher: runs any repo script inside a SLURM job. Submit from the repo root.
 #
-#   sbatch slurm/job.sh scripts/15_tab_accuracy.py --duo vitb16_rn50 --seeds 0 1 2
+#   sbatch slurm/job.sh scripts/15_tab_accuracy.py --duo vitb16_rn50v1 --seeds 0 1 2
 #   STAGE="imagenet_a imagenet_r imagenet_v2 imagenet_sketch" sbatch slurm/job.sh scripts/setup_check.py --probe 200
 #   sbatch --array=0-8 -J ccc slurm/job.sh scripts/23_tab_continual_duo.py ...   # scripts read $SLURM_ARRAY_TASK_ID
 #   sbatch --gres=gpu:0 -t 00:30:00 -J check slurm/job.sh scripts/setup_check.py   # sbatch options override the #SBATCH lines

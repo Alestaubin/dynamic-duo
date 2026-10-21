@@ -6,7 +6,7 @@ saturate; severity 5; none is a test corruption).
 
 Script 02 tunes one model alone, on its own entropy; with the duo's entropy as the signal adaptation should be steadier
 and tolerate larger rates, and the two rates interact. So the grid is over PAIRS (lr_large, lr_small): by default 1, 2, 4,
-8 and 16 times each member's CURRENT rate (the tuned one of cfgs/tuned/, else the duo YAML's), 25 pairs. Only the learning
+8 and 16 times each member's CURRENT rate (the tuned one of cfgs/duo_lrs/<duo>__indep.yaml, else its default), 25 pairs. Only the learning
 rate changes; the rest of each member's OPTIM stays. --mults, or --lrs_large / --lrs_small for explicit values, change it.
 
 A grid point is one Joint run over the 4 full streams (batch size as in the protocol; both members reset to source
@@ -29,12 +29,15 @@ splits the grid, one point per task:
 (--bn matters only for the frozen reference: a frozen BatchNorm model then runs on the test batch's statistics; the Joint
 and Independent runs adapt both members, which always use batch statistics.)
 
-Unlike 02 and 05 this does NOT write cfgs/tuned/: that file also sets the rates of the independent modes (and of every
-cache key made with them), whereas these rates belong to the Joint mode alone. The ranking is the result; the last line it
-prints is the script-03 command that scores the winning pair on the 15 test corruptions (Joint only, with the temperatures
-used here). Writes <out>/ranking.csv (one row per run, fractions) and <out>/results.json, with <out> =
-<paths.out>/results/tune_joint_lr/<duo>__<tta>[_bn]. A capped run (--num_samples) goes to its own folder and prints no command:
-short streams favour larger rates than the 780 updates of a full stream do.
+Unlike 02 and 05 this does NOT touch the indep file of cfgs/duo_lrs/ (those rates also set every cache key of the independent
+modes), whereas these rates belong to the Joint mode alone: the ranking run records the best pair itself in
+cfgs/duo_lrs/<duo>__joint.yaml (what script 03 and the reset scripts read), replacing the pair that was there for that TTA method
+and any `pending:` note, and prints what it replaced. So the file always holds the winner of the LAST ranking run: a report with a
+smaller grid than before can record a different winner. (`python -m src.utils.duo_lrs --import_joint <out>/results.json` does the
+same by hand.) The last line printed is the script-03 command that scores the pair on the 15 test corruptions (Joint only, with
+the temperatures used here). Writes <out>/ranking.csv (one row per run, fractions) and <out>/results.json, with <out> =
+<paths.out>/results/tune_joint_lr/<duo>__<tta>[_bn]. A capped run (--num_samples) goes to its own folder; it records nothing and
+prints no command: short streams favour larger rates than the 780 updates of a full stream do.
 """
 
 from __future__ import annotations
@@ -118,9 +121,8 @@ def main() -> int:
 
     rows = JL.result_rows(summaries, ranked)
     save_rows(out / "ranking.csv", pd.DataFrame(rows).astype({"rank": "Int64"}))     # the references have no rank
-    command = None if args.num_samples else JL.evaluate_command(
-        duo=args.duo, tta=args.tta, tta_kwargs=args.tta_kwargs, bn=args.bn, lr_large=best["lr_large"],
-        lr_small=best["lr_small"], temps_folder=temps.folder)
+    command = None if args.num_samples else JL.evaluate_command(      # no --joint_lr_*: script 03 reads the pair recorded below
+        duo=args.duo, tta=args.tta, tta_kwargs=args.tta_kwargs, bn=args.bn, temps_folder=temps.folder)
     (out / "results.json").write_text(json.dumps({
         "duo": args.duo, "tta": args.tta, "tta_kwargs": args.tta_kwargs, "bn": args.bn, "seeds": seeds,
         "num_samples": args.num_samples, "batch_size": ctx.batch_size, "streams": sorted(best["streams"]),
@@ -132,9 +134,10 @@ def main() -> int:
         "runs": [{k: None if isinstance(v, float) and v != v else v for k, v in r.items()} for r in rows]}, indent=1))
     print(f"wrote {out / 'ranking.csv'} and {out / 'results.json'}")
     if args.num_samples:
-        print("capped run (--num_samples): no follow-up command")
-    else:
-        print(f"\nscore the best pair on the 15 test corruptions:\n{command}")
+        print("capped run (--num_samples): the best pair is not recorded, no follow-up command")
+        return 0
+    print(JL.record_best(out / "results.json", ctx.g.path("duo_lrs")))
+    print(f"\nscore the best pair on the 15 test corruptions:\n{command}")
     return 0
 
 

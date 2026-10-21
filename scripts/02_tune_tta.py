@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Tune Tent's optimizer settings for ONE model on the 4 held-out corruptions (speckle noise, Gaussian blur, spatter,
-saturate; severity 5; none is a test corruption), and write the winner to cfgs/tuned/tent__<model>.yaml, where every
-experiment script picks it up (src/utils/config.py::load_duo overlays it on the duo YAML's OPTIM).
+saturate; severity 5; none is a test corruption), and record the winner in cfgs/duo_lrs/<duo>__indep.yaml of every duo that
+uses the model, where every experiment script picks it up (src/utils/duo_lrs.py; src/utils/config.py::load_duo reads it).
 
     --model NAME    any model src/utils/model.py::get_model knows: resnet50, vit_b_16, convnext_tiny, swin_t, ...
                     The norm layer Tent adapts (BN / LN / GN) is read off the model; --norm overrides it.
@@ -18,11 +18,11 @@ and a SLURM array splits the grid:
 
     sbatch slurm/job.sh scripts/02_tune_tta.py --model resnet50                       # whole grid in one job
     sbatch --array=0-15 slurm/job.sh scripts/02_tune_tta.py --model vit_b_16 --shard auto   # one trial per task
-    python scripts/02_tune_tta.py --model resnet50 --report_only                      # ranking + tuned file from the stored trials
+    python scripts/02_tune_tta.py --model resnet50 --report_only                      # ranking + the winner into cfgs/duo_lrs from the stored trials
     python scripts/02_tune_tta.py --model resnet50 --optimizers Adam --adam_lrs 1e-4 3e-4 --num_samples 2000   # smoke test
 
-Writes <paths.out>/results/tune_tta/<model>__tent/{trials/*.json, ranking.csv} and, once every trial is in,
-<paths.tuned>/tent__<model>.yaml. A capped run (--num_samples) never writes the tuned file: short streams favour
+Writes <paths.out>/results/tune_tta/<model>__tent/{trials/*.json, ranking.csv} and, once every trial is in, the winner into
+<paths.duo_lrs>/<duo>__indep.yaml. A capped run (--num_samples) never records it: short streams favour
 larger learning rates than the 780 updates of a full stream do.
 """
 
@@ -112,15 +112,18 @@ def main() -> int:
     if not beats:
         print("WARNING: no setting beats the frozen model; try smaller learning rates")
     if args.num_samples:
-        print("capped run (--num_samples): the tuned file is not written")
+        print("capped run (--num_samples): the winner is not recorded")
         return 0
     if not beats:
-        print("not writing a tuned file")
+        print("not recording a winner")
         return 1
-    path = T.write_tuned(g.path("tuned") / f"{args.tta}__{args.model}.yaml", T.tuned_record(
+    paths = T.write_tuned(g.path("duo_lrs"), T.tuned_record(
         best, frozen, model=args.model, tta=args.tta, norm=norm, batch_size=g.batch_size, stream_labels=labels,
         seed=args.seed, bn=args.bn))
-    print(f"wrote {path}")
+    for path in paths:
+        print(f"wrote {path}")
+    if not paths:
+        print(f"WARNING: no duo of cfgs/duos uses {args.model}, so the winner was recorded nowhere; add the duo, then rerun with --report_only")
     return 0
 
 

@@ -1,15 +1,13 @@
 # COCA-comparable duo, AugReg weights (what timm 0.6.x gave for a bare vit_base_patch16_224).
 # The ViT-B/16 here is timm's augreg_in21k_ft_in1k (see src/utils/model.py), the ResNet-50 is torchvision's ORIGINAL (V1) weights: the
-# pair COCA ("When Small Guides Large") evaluates. OPTIM values are the pre-tuning defaults, replaced by
-# cfgs/tuned/tent__<model>.yaml where one exists (resnet50_v1 has one; run scripts/02_tune_tta.py --model vit_b_16_augreg for the ViT).
+# pair COCA ("When Small Guides Large") evaluates. Learning rates: cfgs/duo_lrs/vitb16aug_rn50v1__{indep,joint}.yaml (resnet50_v1 is
+# tuned; for the ViT run scripts/02_tune_tta.py --model vit_b_16_augreg).
 NAME: vitb16aug_rn50v1
 
 LARGE:
   NAME: vit_b_16_augreg
   NORM: LN
-  OPTIM: {METHOD: Adam, STEPS: 1, LR: 0.0001, BETA: 0.9, WD: 0.0}
 
 SMALL:
   NAME: resnet50_v1
   NORM: BN
-  OPTIM: {METHOD: SGD, STEPS: 1, LR: 0.00025, MOMENTUM: 0.9, DAMPENING: 0.0, WD: 0.0, NESTEROV: false}

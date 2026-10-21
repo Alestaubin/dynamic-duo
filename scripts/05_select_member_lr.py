@@ -8,7 +8,8 @@ worst held-out stream next to it and warning when the best value is the first or
 
     python scripts/05_select_member_lr.py --duo vitb16_rn50v1 --tta sar --seeds 0
     python scripts/05_select_member_lr.py --duo vitb16_rn50v1 --tta sar --lrs_large 5e-5 1e-4 2.5e-4 5e-4 1e-3 2.5e-3   # an extended grid
-    ... --write_tuned      also write cfgs/tuned/<tta>__<model>.yaml, which every later run of that algorithm reads
+    ... --write_tuned      also record the winners in cfgs/duo_lrs/<duo>__indep.yaml (every duo that uses the model), which every later
+                           run of that algorithm reads
 
 Writes <out>/select_member_lr__<duo>__<tta>__seed<seed>.json with every number.
 """
@@ -37,7 +38,7 @@ def main() -> int:
     ap.add_argument("--lrs_large", nargs="+", type=float, default=None, help="default: the model's grid")
     ap.add_argument("--lrs_small", nargs="+", type=float, default=None, help="default: the model's grid")
     ap.add_argument("--momentum", type=float, default=0.9)
-    ap.add_argument("--write_tuned", action="store_true", help="write cfgs/tuned/<tta>__<model>.yaml")
+    ap.add_argument("--write_tuned", action="store_true", help="record the winners in cfgs/duo_lrs/ (every duo that uses the model)")
     args = ap.parse_args()
     if args.tta not in ALGORITHMS:
         ap.error(f"--tta must be one of {ALGORITHMS}")
@@ -71,10 +72,11 @@ def main() -> int:
         if args.write_tuned:
             for side, r in res.items():
                 cfg = ctx.duo[side.upper()]
-                path = write_tuned(ctx.g.path("tuned") / f"{args.tta}__{cfg['NAME']}.yaml",
-                                   tuned_record(r, model=cfg["NAME"], algorithm=args.tta, norm=cfg["NORM"], batch_size=ctx.batch_size,
-                                                stems=stems, seed=seed, momentum=args.momentum))
-                print(f"wrote {path}")
+                paths = write_tuned(ctx.g.path("duo_lrs"),
+                                    tuned_record(r, model=cfg["NAME"], algorithm=args.tta, norm=cfg["NORM"], batch_size=ctx.batch_size,
+                                                 stems=stems, seed=seed, momentum=args.momentum))
+                for path in paths:
+                    print(f"wrote {path}")
     return status
 
 

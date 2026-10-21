@@ -1,0 +1,8 @@
+# Learning rates of duo `vitb16aug_rn50v1` in the JOINT regime: both members adapt on the entropy of the duo's combined prediction
+# (engine mode both_duo; the joint mode of scripts/03 and Joint DD). They are tuned as PAIRS by scripts/02b_tune_joint_lr.py,
+# which only reports; `python -m src.experiments.duo_lrs --import_joint <results.json>` copies the best pair in. A method under
+# `pending:` is being tuned: src/experiments/duo_lrs.py refuses to hand out learning rates for it (never the indep ones).
+duo: vitb16aug_rn50v1
+regime: joint
+engine_mode: both_duo
+methods: {}

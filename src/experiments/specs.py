@@ -101,7 +101,7 @@ class RunSpec:
         BatchNorm members on the test batch's statistics, instead of eval() with the source ones).
         A member that does not adapt in this mode enters the key without its OPTIM block: its optimizer is never built,
         so retuning a learning rate must not orphan the frozen logits (a frozen run's key is the same whatever
-        cfgs/tuned holds). An adapting member keeps it."""
+        cfgs/duo_lrs holds). An adapting member keeps it."""
         adapt = self.adapts
         payload: dict[str, Any] = {
             "models": {side: duo_cfg[side] if adapt[side] else {k: v for k, v in duo_cfg[side].items() if k != "OPTIM"}

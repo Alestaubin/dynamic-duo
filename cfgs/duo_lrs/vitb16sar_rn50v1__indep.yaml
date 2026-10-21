@@ -1,0 +1,141 @@
+# Learning rates of duo `vitb16sar_rn50v1`, INDEP regime: each member adapts on its OWN entropy (engine mode both_indep; Vanilla DD).
+# The one place these numbers live (cfgs/duos/ only names the models). `methods`: what was tuned, per TTA method and per member,
+# recorded by scripts/02_tune_tta.py and 05_select_member_lr.py (src/utils/duo_lrs.py::record_tuned); `defaults`: what a member
+# runs with when nothing is tuned for the method.
+duo: vitb16sar_rn50v1
+regime: indep
+engine_mode: both_indep
+defaults:
+  large:
+    model: vit_b_16_sar
+    norm: LN
+    OPTIM:
+      METHOD: SGD
+      STEPS: 1
+      LR: 0.001
+      MOMENTUM: 0.9
+      DAMPENING: 0.0
+      WD: 0.0
+      NESTEROV: false
+    source: pre-tuning default (the former OPTIM block of cfgs/duos/vitb16sar_rn50v1.yaml)
+  small:
+    model: resnet50_v1
+    norm: BN
+    OPTIM:
+      METHOD: SGD
+      STEPS: 1
+      LR: 0.00025
+      MOMENTUM: 0.9
+      DAMPENING: 0.0
+      WD: 0.0
+      NESTEROV: false
+    source: pre-tuning default (the former OPTIM block of cfgs/duos/vitb16sar_rn50v1.yaml)
+methods:
+  eata:
+    small:
+      model: resnet50_v1
+      norm: BN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.0005
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/05_select_member_lr.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seed: 0
+      macro_accuracy: 0.48846
+      worst_stream_accuracy: 0.26382
+      lrs_tried:
+      - 5.0e-05
+      - 0.0001
+      - 0.00025
+      - 0.0005
+      - 0.001
+  eta:
+    small:
+      model: resnet50_v1
+      norm: BN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.00025
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/05_select_member_lr.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seed: 0
+      macro_accuracy: 0.48535
+      worst_stream_accuracy: 0.26432
+      lrs_tried:
+      - 5.0e-05
+      - 0.0001
+      - 0.00025
+      - 0.0005
+      - 0.001
+  sar:
+    small:
+      model: resnet50_v1
+      norm: BN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.001
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/05_select_member_lr.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seed: 0
+      macro_accuracy: 0.46527
+      worst_stream_accuracy: 0.2056
+      lrs_tried:
+      - 5.0e-05
+      - 0.0001
+      - 0.00025
+      - 0.0005
+      - 0.001
+      - 0.002
+  tent:
+    small:
+      model: resnet50_v1
+      norm: BN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.00025
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02_tune_tta.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seed: 0
+      macro_accuracy: 0.45581
+      frozen_macro_accuracy: 0.3482
+      frozen_bn_batch_stats: true

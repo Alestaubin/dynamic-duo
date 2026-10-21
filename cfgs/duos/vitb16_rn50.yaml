@@ -1,14 +1,12 @@
-# Primary duo: ViT-B/16 (large) + ResNet-50 (small). Dataset paths, batch size, corruptions and
-# severities come from cfgs/global.yaml; this file only holds the model choices.
-# OPTIM values are the pre-tuning defaults: a cfgs/tuned/<tta>__<model>.yaml written by scripts/02_tune_tta.py overrides them (load_duo).
+# Primary duo of the first phase: ViT-B/16 (large) + ResNet-50 (small; torchvision's V2 weights, see plan.md decision 15). The main duo
+# is now vitb16_rn50v1. Dataset paths, batch size, corruptions and severities come from cfgs/global.yaml; this file only names the
+# models. Their learning rates are in cfgs/duo_lrs/vitb16_rn50__{indep,joint}.yaml.
 NAME: vitb16_rn50
 
 LARGE:
   NAME: vit_b_16
   NORM: LN
-  OPTIM: {METHOD: Adam, STEPS: 1, LR: 0.0001, BETA: 0.9, WD: 0.0}
 
 SMALL:
   NAME: resnet50
   NORM: BN
-  OPTIM: {METHOD: Adam, STEPS: 1, LR: 0.00025, BETA: 0.9, WD: 0.0}

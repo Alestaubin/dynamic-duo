@@ -28,8 +28,8 @@ Dataset locations, output folders and the protocol constants (severity 5, batch 
 | `src/tta/`, `src/calibrators/`, `src/reliability/` | TTA methods (Tent, ...), the ways of combining the two models' logits, and the proxies behind the gate. |
 | `src/utils/` | Config loading, one class per dataset, LaTeX table writer, ... |
 | `cfgs/global.yaml` | Shared settings: dataset paths, output folders, protocol constants. |
-| `cfgs/duos/` | The model pairs (default `vitb16_rn50`). |
-| `cfgs/tuned/` | Tuned Tent settings per model, written by `scripts/02_tune_tta.py` and read by every other script. |
+| `cfgs/duos/` | The model pairs: which two models, and which norm layers Tent adapts. Nothing else (default `vitb16_rn50v1`, the main duo: ViT-B/16 + ResNet-50 V1). |
+| `cfgs/duo_lrs/` | **The one place the learning rates live**: `<duo>__indep.yaml` (each member on its own entropy: Vanilla DD; the tuned settings per TTA method and member, with the default a member runs with when nothing is tuned) and `<duo>__joint.yaml` (both members on the duo's entropy: Joint DD; the pairs of `02b`). Written by `02`, `02b` and `05` (a joint pair can also be copied in by hand with `python -m src.utils.duo_lrs --import_joint`), read by every other script (`python -m src.utils.duo_lrs --show <duo> indep`). |
 | `slurm/job.sh`, `slurm/job_cpu.sh` | The launchers for running a script as a SLURM job: with one GPU, and without a GPU (for steps that run no model). |
 | `out/paper/` | The final tables and figures (tracked by git). |
 | `out/results/<script>/` | Each script's CSV files (git-ignored). |
@@ -51,7 +51,7 @@ The model name decides which pretrained weights are loaded (`src/utils/model.py`
 
 The duos `vitb16aug_rn50v1` and `vitb16aug2_rn50v1` pair each timm ViT with `resnet50_v1`, to compare with COCA ("When Small Guides Large"; its ViT is AugReg2 fed ImageNet mean/std). `vitb16sar_rn50v1` pairs `vit_b_16_sar` with `resnet50_v1` and SAR's optimizer settings: the duo to use to compare with SAR, EATA and DeYO. Weights are downloaded on first use and then cached (`$TORCH_HOME` for torchvision, `~/.cache/huggingface` for timm). Loading a new model once on the login node first is a good habit, so that a job array does not start many downloads at once; Hugging Face is reachable from the compute nodes, but I have not tested torchvision's download server from there.
 
-**Input pipeline.** ImageNet-C and CCC images are already 224x224 centre crops, so they go to the models without the models' own Resize(256) (`ShiftDataset.input_transform`, `native_224` in `src/utils/model.py`), as in the Tent, EATA and SAR code. Resizing them zooms in by 14% and costs Tent on ResNet-50 about 7 points of ImageNet-C accuracy (it reproduced COCA's published numbers only without the resize; frozen `resnet50_v1` with source BatchNorm statistics scores 18.2% on the 15 corruptions here, 18.0% in SAR's paper). Clean ImageNet images and the natural shifts keep the models' own transform. This is part of every cache key of an ImageNet-C or CCC stream (`INPUTS_TAG` in `src/experiments/specs.py`): caches and temperature checkpoints made before it are simply not found, and the trials stored by `02_tune_tta.py` are keyed by it too. `cfgs/tuned/*.yaml` carries no key, so files written before it were tuned on zoomed images: rerun `02_tune_tta.py` for a model before trusting its file.
+**Input pipeline.** ImageNet-C and CCC images are already 224x224 centre crops, so they go to the models without the models' own Resize(256) (`ShiftDataset.input_transform`, `native_224` in `src/utils/model.py`), as in the Tent, EATA and SAR code. Resizing them zooms in by 14% and costs Tent on ResNet-50 about 7 points of ImageNet-C accuracy (it reproduced COCA's published numbers only without the resize; frozen `resnet50_v1` with source BatchNorm statistics scores 18.2% on the 15 corruptions here, 18.0% in SAR's paper). Clean ImageNet images and the natural shifts keep the models' own transform. This is part of every cache key of an ImageNet-C or CCC stream (`INPUTS_TAG` in `src/experiments/specs.py`): caches and temperature checkpoints made before it are simply not found, and the trials stored by `02_tune_tta.py` are keyed by it too. The learning-rate entries in `cfgs/duo_lrs/` carry no such key, so entries written before it were tuned on zoomed images: rerun `02_tune_tta.py` for a model before trusting its file.
 
 ## How the scripts work
 
@@ -106,11 +106,11 @@ On this cluster the login node kills processes above 5 GB of memory, so run anyt
 | Script | What it does |
 |---|---|
 | `01_tab_temperatures.py` | Which temperatures Fixed TS should use, and how much better temperature scaling could possibly be. |
-| `02_tune_tta.py --model NAME` | Tunes Tent's optimizer settings for one model on the 4 held-out corruptions, and writes `cfgs/tuned/`. |
-| `02b_tune_joint_lr.py` | Tunes the two members' learning rates **together** for the Joint mode (both adapt on the duo entropy) on the 4 held-out corruptions: a grid over pairs, scored by the duo's accuracy. Does not write `cfgs/tuned/`; prints the script-03 command that evaluates the winner. |
+| `02_tune_tta.py --model NAME` | Tunes Tent's optimizer settings for one model on the 4 held-out corruptions, and records the winner in `cfgs/duo_lrs/` (the indep file of every duo that uses the model). |
+| `02b_tune_joint_lr.py` | Tunes the two members' learning rates **together** for the Joint mode (both adapt on the duo entropy) on the 4 held-out corruptions: a grid over pairs, scored by the duo's accuracy. Records the winning pair in `cfgs/duo_lrs/<duo>__joint.yaml` itself (a full ranking run only); prints the script-03 command that evaluates the winner. |
 | `03_tab_adaptation_modes.py` | Six ways of adapting the duo (joint, one model adapting, independent), all scored with the same Fixed TS. |
 | `04_cache_logits.py` | Adapts a duo's two members (they never see each other) and stores their logits **per member**, under a key made of that member's own settings, in `cache/logits/`. `--grid` runs the learning-rate sweep (run i uses the i-th value of each model's grid), `--streams` picks held-out / test / clean / the clean training slice / a natural shift. Any large member can be paired with any small one afterwards. Produces no table. |
-| `05_select_member_lr.py` | Reads the sweep that `04` stored for ETA, EATA or SAR and picks each member's learning rate on the held-out streams (the counterpart of `02` for the other algorithms); `--write_tuned` writes `cfgs/tuned/`. |
+| `05_select_member_lr.py` | Reads the sweep that `04` stored for ETA, EATA or SAR and picks each member's learning rate on the held-out streams (the counterpart of `02` for the other algorithms); `--write_tuned` records the winners in `cfgs/duo_lrs/`. |
 | `06_run_coca.py` | COCA through its official code, run live (its temperature is refitted every batch, so it cannot be replayed from logits); the same learning-rate grid, one pair of learning rates per run. |
 | `07_eval_duo_grid.py` | Reads a stored pair and evaluates Vanilla Dynamic Duos offline: every proxy x beta x proxy-batch size, the members alone, the fixed combinations, the oracles and the proxy diagnostics, from the cached logits alone (no model). |
 | `08_select_proxy.py` | Chooses the proxy, beta and proxy-batch size of Vanilla Dynamic Duos on the held-out streams, per base algorithm, and writes `results/selection_section45.json`. |
@@ -120,7 +120,7 @@ On this cluster the login node kills processes above 5 GB of memory, so run anyt
 
 Later scripts (`11` onwards, the paper's tables and figures) are planned in `plan.md`.
 
-**Run order.** `setup_check.py`; then `02_tune_tta.py` once for each model of the duo (for the default duo: `--model vit_b_16` and `--model resnet50`), because its result in `cfgs/tuned/` changes the learning rates every other script uses, and the learning rates are part of the cache fingerprint (logits cached before tuning are not found any more); then `01`, `03`, `04`, ... in numerical order. `04` to `06` and `09` run models, so launch them as jobs (never on the CPU); `07`, `08` and `10` only read saved results. The design is in `docs/design_section45.md`; launch arrays only after checking `plan.md`, Phase 3.
+**Run order.** `setup_check.py`; then `02_tune_tta.py` once for each model of the duo (for the default duo: `--model vit_b_16` and `--model resnet50_v1`), because its result in `cfgs/duo_lrs/` changes the learning rates every other script uses, and the learning rates are part of the cache fingerprint (logits cached before tuning are not found any more); then `01`, `03`, `04`, ... in numerical order. `04` to `06` and `09` run models, so launch them as jobs (never on the CPU); `07`, `08` and `10` only read saved results. The design is in `docs/design_section45.md`; launch arrays only after checking `plan.md`, Phase 3.
 
 ```bash
 python scripts/04_cache_logits.py --duo vitb16_rn50v1 --streams heldout clean_train_slice --grid --seeds 0 --shard auto   # as a SLURM array
@@ -186,7 +186,7 @@ python scripts/02_tune_tta.py --model vit_b_16 --report_only                    
 Each trial runs 4 × 50,000 images, so for the large models use the array. A finished trial is saved on its own: if a job dies, run the same command again and only the missing trials run. When all 16 are saved, a run without `--shard` ranks them. That last step only reads the saved trials, so it needs no GPU and runs in seconds on the login node (as in the third command above; it loads the model once to read its norm type, so set `TORCH_HOME` as `slurm/job.sh` does, or pass `--norm LN` / `--norm BN` to skip that). Do not use `--num_samples` to make tuning cheaper: a learning rate that wins over a few updates is usually too large for the 780 updates of a full stream. (It is fine for a smoke test, and a capped run never writes the result.)
 
 **Output.**
-- `cfgs/tuned/tent__<model>.yaml`: the winning optimizer settings, plus its score and the frozen model's score. Every other script reads it: for that model and `--tta tent`, it replaces the optimizer settings in `cfgs/duos/*.yaml`. Delete the file to go back to the defaults in the duo file. The script writes it only if the winner beats the frozen model, and only from a full run.
+- `cfgs/duo_lrs/<duo>__indep.yaml`, `methods.tent.<large|small>` of every duo that uses the model: the winning optimizer settings, plus its score and the frozen model's score. Every other script reads it (for that model and `--tta tent`; a member with no tuned entry runs with the file's `defaults`). The script records it only if the winner beats the frozen model, and only from a full run.
 - `out/results/tune_tta/<model>__tent/ranking.csv`: every trial, best first, with its accuracy on each stream.
 - `out/results/tune_tta/<model>__tent/trials/`: one JSON file per trial (this is what makes the run resumable).
 
@@ -194,7 +194,7 @@ Each trial runs 4 × 50,000 images, so for the large models use the array. A fin
 
 `02b_tune_joint_lr.py` asks: when both models adapt on the duo entropy (the Joint mode of script 03), **which pair of learning rates is best?** Script 02 tunes one model alone, on its own entropy. The duo entropy is a steadier signal (a model that starts to collapse is held up by its partner), so Joint may tolerate larger rates, and the two rates interact, so the grid is over **pairs** `(lr_large, lr_small)`.
 
-**The grid.** By default 1, 2, 4, 8 and 16 times each model's *current* learning rate (the tuned one in `cfgs/tuned/<tta>__<model>.yaml`, else the duo file's): 25 pairs. Only the learning rate changes; momentum and the rest of each `OPTIM` stay. `--mults` changes the multiples, `--lrs_large` / `--lrs_small` give explicit rates. Finished points are reused, so extending a grid only runs the new pairs.
+**The grid.** By default 1, 2, 4, 8 and 16 times each model's *current* learning rate (the tuned one in `cfgs/duo_lrs/<duo>__indep.yaml`, else its default): 25 pairs. Only the learning rate changes; momentum and the rest of each `OPTIM` stay. `--mults` changes the multiples, `--lrs_large` / `--lrs_small` give explicit rates. Finished points are reused, so extending a grid only runs the new pairs.
 
 **What one run is.** One Joint run over the 4 held-out streams (severity 5, all 50,000 images each), both models reset to source weights before every stream. The score is the mean over the 4 streams of the accuracy of the static duo `(z_L / T_L + z_S / T_S) / 2`, the same prediction script 03's Joint row scores. The worst stream and each model's own accuracy are reported next to it. Two references run as well: the frozen duo, and Independent both at the current rates (already cached: the temperatures' fit needs it). The report then says what the duo signal buys at *equal* rates (the Joint run at the current rates against Independent both) and what *larger* rates buy on top (the best pair against that run).
 
@@ -217,7 +217,9 @@ All tasks and the ranking run must be given the same grid flags. `--bn` only aff
 - `results.json`: the same rows plus the temperatures, optimizers, grid and the winner.
 - The printout: the grid of duo accuracies and of worst-stream accuracies, the top of the ranking, the comparisons above, and a warning when a model's best rate is the smallest or largest tried (the optimum may lie outside the grid).
 
-**It does not write `cfgs/tuned/`**: that file also sets the rates of the independent modes, and these rates belong to the Joint mode alone. Instead the last line printed is the command that scores the winning pair on the 15 test corruptions: script 03 with `--modes joint --lr_large X --lr_small Y --temps_checkpoint <the same temperatures>`.
+**The best pair is recorded automatically.** When a full ranking run (not a capped `--num_samples` one) has written `results.json`, it records the winning pair in `cfgs/duo_lrs/<duo>__joint.yaml` (the joint regime), replacing the pair already there for that TTA method and any `pending:` note, and prints what it replaced. From then on script 03 and the reset scripts read the pair from that file. The file always holds the winner of the *last* ranking run, so a report with a smaller grid than before can record a different winner; pass the same grid flags as the tasks. `python -m src.utils.duo_lrs --import_joint <results.json>` does the same by hand.
+
+**It does not touch the indep file of `cfgs/duo_lrs/`**: those rates also set the independent modes, and these rates belong to the Joint mode alone. The last line printed is the command that scores the recorded pair on the 15 test corruptions: script 03 with `--modes joint --temps_checkpoint <the same temperatures>` (no rates needed; `--joint_lr_large X --joint_lr_small Y` would give them by hand).
 
 ## Script 03: ways of adapting the duo
 
@@ -236,6 +238,12 @@ The *duo entropy* is the entropy of that combined prediction. In every name belo
 | No adaptation | Neither | The reference row: frozen weights (BatchNorm on the source statistics, or on the test batch's with `--bn`). |
 
 **The temperatures.** The duo entropy depends on T_L and T_S, so they must exist before the run. All modes share one pair, the paper's Fixed TS: it is fitted once on the 4 held-out corruptions, using models adapted independently. It is the same fit as the "Held-out TS" column of script 01, and it reuses 01's cache. The pair is saved in `checkpoints/fixed_ts/heldout_...`. `--temps_checkpoint DIR` uses another saved pair instead.
+
+**The learning rates.** The two kinds of mode adapt on different signals, and each runs with its own rates (`cfgs/duo_lrs/<duo>__<regime>.yaml`):
+- The modes that adapt on a model's **own entropy** (Independent large / small / both) use the *indep* regime's rates, tuned one model at a time by script 02 (or 05).
+- The modes that adapt on the **duo entropy** (Joint, Large adapt, Small adapt) use the *joint* regime's pair, tuned together by script 02b. Large / Small adapt use the rate of the model that adapts.
+- A duo whose joint pair is not tuned yet makes those three modes an **error** (`NotTuned`), never a silent run at the indep rates. `--joint_lr_large LR --joint_lr_small LR` run them with rates given by hand (both, to skip the file); `--lr_large` / `--lr_small` do the same for the own-entropy modes.
+- Both tables' captions list both sets of rates and say which modes use which. The temperatures stay one pair for every mode (fitted on the indep regime's members, as before).
 
 **Running it.** The work is one job per (mode, seed): 7 modes × 3 seeds = 21 jobs, which is why the array has indices 0 to 20. Fit the temperatures once first, so that the array tasks do not all fit them at the same time:
 
@@ -259,7 +267,7 @@ Every run also visits the clean validation images (the 50,000 images ImageNet-C 
   A *Clean* column holds the accuracy on the clean validation images; it is not part of *Avg.*, which is the mean over the 15 corruptions.
 - `out/paper/tab_adaptation_modes_summary__<tag>.tex`: one row per mode with each model's accuracy under that mode, then the duo's accuracy, ECE and NLL, averaged over the 15 corruptions.
 - `out/results/tab_adaptation_modes/<tag>.csv`: the numbers behind both tables (clean stream included, as segment `clean`).
-- Both tables' captions list the hyperparameters of the adapting models: the batch size and each model's optimizer with all its parameters, read from the duo config after `cfgs/tuned/` is applied (the values the cached logits were made with).
+- Both tables' captions list the hyperparameters of the adapting models: the batch size and each model's optimizer with all its parameters, read from the duo config as `cfgs/duo_lrs/` gives it (the values the cached logits were made with). When the two regimes' optimizers differ, the caption lists both and says that the models adapting on their own entropy use the first and those adapting on the duo entropy the second.
 - `<tag>` is the TTA method (`tent`), followed by the duo's name if it is not the default duo, and `_bn` with `--bn`.
 
 ## Arguments of each script
@@ -270,7 +278,7 @@ Every run also visits the clean validation images (the 50,000 images ImageNet-C 
 
 | Flag | 01 | 02 | 03 | `setup_check` |
 |---|---|---|---|---|
-| `--duo NAME` | default `vitb16_rn50` | no (it has `--model`) | default `vitb16_rn50` | no |
+| `--duo NAME` | default `vitb16_rn50v1` | no (it has `--model`) | default `vitb16_rn50v1` | no |
 | `--tta METHOD` | default `tent` | `tent` is the only choice | default `tent` | no |
 | `--tta_kwargs JSON` | yes | no | yes | no |
 | `--seeds` | default `0` | no (it has `--seed`, default 0) | default `0 1 2` | no |
@@ -332,6 +340,10 @@ The number of array tasks is the number of grid points times the number of seeds
 | `--modes MODE [...]` | Which modes to run: `joint`, `large_anchor`, `small_anchor`, `indep_large`, `indep_small`, `indep_duo`, `frozen`. | all seven |
 | `--temps_checkpoint DIR` | Use the temperatures saved in a `JointFixedTS` checkpoint (a folder with a `config.json`) instead of fitting them on the held-out corruptions. | fit on the held-out corruptions |
 | `--temps_only` | Fit and save the temperatures, then stop. Run it once before a `--shard` array. | off |
+| `--lr_large LR`, `--lr_small LR` | Replace the learning rate of that model in the modes that adapt on its **own** entropy (Independent large / small / both); the rest of its optimizer stays. The rates are part of every cache key, and other own-entropy rates get their own temperatures. | the indep regime's rates |
+| `--joint_lr_large LR`, `--joint_lr_small LR` | The same for the modes that adapt on the **duo** entropy (Joint, Large adapt, Small adapt). With both given, the joint file is not read. | the joint regime's pair (an error while it is pending) |
+
+With any of these four flags the output files get a `_lrL<large>_S<small>` and/or `_jlrL<large>_S<small>` tag and a time stamp, so they never replace the tuned run's files.
 
 The number of array tasks is the number of modes times the number of seeds.
 

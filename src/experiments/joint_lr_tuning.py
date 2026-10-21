@@ -4,7 +4,7 @@ joint_lr_tuning.py
 The logic behind scripts/02b_tune_joint_lr.py: choose the two members' learning rates TOGETHER for the Joint mode of
 src/experiments/adaptation_modes.py (both members minimize the entropy of the static duo's combined prediction).
 
-Why a tuner of its own. scripts/02_tune_tta.py tunes ONE model on ITS OWN entropy, and what it writes to cfgs/tuned/ is
+Why a tuner of its own. scripts/02_tune_tta.py tunes ONE model on ITS OWN entropy, and what it records in cfgs/duo_lrs/<duo>__indep.yaml is
 what the independent modes run with. In the Joint mode the loss is the duo's entropy, a steadier signal than either
 member's own (a member that starts to collapse is held up by its partner), so the best rates may be larger. They also
 interact: how far one member can move depends on how far the other does. So the grid is over PAIRS (lr_large, lr_small),
@@ -269,16 +269,41 @@ def result_rows(summaries: dict[tuple, dict], ranked: Sequence[dict]) -> list[di
                                        r["lr_small"] or 0, r["kind"]))
 
 
-def evaluate_command(*, duo: str, tta: str, tta_kwargs: dict | None, bn: bool, lr_large: float, lr_small: float,
-                     temps_folder: Path) -> str:
-    """The script-03 command that scores the chosen pair on the 15 test corruptions: the Joint mode only, with the
-    SAME temperatures as the tuning (03 would otherwise fit new ones on members adapted at the new rates)."""
+def evaluate_command(*, duo: str, tta: str, tta_kwargs: dict | None, bn: bool, temps_folder: Path,
+                     lr_large: float | None = None, lr_small: float | None = None) -> str:
+    """The script-03 command that scores the chosen pair on the 15 test corruptions: the Joint mode only, with the SAME
+    temperatures as the tuning (03 fits its own on the indep regime's members otherwise). Script 03 reads the pair from
+    cfgs/duo_lrs/<duo>__joint.yaml, where `record_best` has put it; `lr_large` / `lr_small` add `--joint_lr_*` to give it by
+    hand instead (that run's files then carry a rates tag and a time stamp)."""
     parts = ["python", "scripts/03_tab_adaptation_modes.py", "--duo", duo, "--tta", tta]
     if tta_kwargs:
         parts += ["--tta_kwargs", json.dumps(tta_kwargs)]
-    parts += (["--bn"] if bn else []) + ["--modes", "joint", "--lr_large", f"{lr_large:g}", "--lr_small", f"{lr_small:g}",
-                                         "--temps_checkpoint", str(temps_folder)]
-    return shlex.join(parts)
+    parts += (["--bn"] if bn else []) + ["--modes", "joint"]
+    for flag, lr in (("--joint_lr_large", lr_large), ("--joint_lr_small", lr_small)):
+        if lr is not None:
+            parts += [flag, f"{lr:g}"]
+    return shlex.join(parts + ["--temps_checkpoint", str(temps_folder)])
+
+
+def record_best(results_json: Path, root: Path | None = None, duos_dir: Path | None = None) -> str:
+    """Record the best pair of a finished full run (its results.json) as the joint learning rates of the duo for that TTA
+    method, in cfgs/duo_lrs/<duo>__joint.yaml (`root`: that folder): what script 03 and the reset scripts read. It replaces
+    the pair already there, and a `pending:` note. Returns the line to print."""
+    from src.utils import duo_lrs
+
+    r = json.loads(Path(results_json).read_text())
+    duo, tta = r["duo"], r["tta"]
+    old = None
+    try:
+        entry = duo_lrs.load(duo, "joint", root)["methods"].get(tta)
+        old = (float(entry["large"]["OPTIM"]["LR"]), float(entry["small"]["OPTIM"]["LR"])) if entry else None
+    except FileNotFoundError:
+        pass
+    path = duo_lrs.import_joint(results_json, root=root, duos_dir=duos_dir)
+    new = (float(r["best"]["lr_large"]), float(r["best"]["lr_small"]))
+    note = ("" if old is None else " (unchanged)" if old == new else f" (replacing large {old[0]:g}, small {old[1]:g})")
+    return (f"recorded the best pair, large {new[0]:g} and small {new[1]:g}, as the joint learning rates of "
+            f"{duo} / {tta} in {path}{note}")
 
 
 def optimizer_text(optim: dict) -> str:
@@ -290,8 +315,8 @@ def optimizer_text(optim: dict) -> str:
 
 def add_args(ap) -> None:
     ap.add_argument("--mults", type=float, nargs="+", default=list(DEFAULT_MULTS), metavar="X",
-                    help="the grid of each member: these multiples of its CURRENT learning rate (cfgs/tuned/<tta>__<model>.yaml, "
-                         "else the duo YAML's). Default: %(default)s")
+                    help="the grid of each member: these multiples of its CURRENT learning rate (cfgs/duo_lrs/<duo>__indep.yaml, "
+                         "else its default). Default: %(default)s")
     ap.add_argument("--lrs_large", type=float, nargs="+", default=None, metavar="LR",
                     help="explicit learning rates of the large member (replaces --mults for it)")
     ap.add_argument("--lrs_small", type=float, nargs="+", default=None, metavar="LR",
@@ -466,10 +491,53 @@ if __name__ == "__main__":
     cmd = evaluate_command(duo="vitb16_rn50v1", tta="tent", tta_kwargs=None, bn=True, lr_large=2e-4, lr_small=5e-4,
                            temps_folder=Path("/x/heldout y"))
     assert cmd == ("python scripts/03_tab_adaptation_modes.py --duo vitb16_rn50v1 --tta tent --bn --modes joint "
-                   "--lr_large 0.0002 --lr_small 0.0005 --temps_checkpoint '/x/heldout y'"), cmd
+                   "--joint_lr_large 0.0002 --joint_lr_small 0.0005 --temps_checkpoint '/x/heldout y'"), cmd
+    assert evaluate_command(duo="d", tta="tent", tta_kwargs=None, bn=True, temps_folder=Path("t")) == \
+        "python scripts/03_tab_adaptation_modes.py --duo d --tta tent --bn --modes joint --temps_checkpoint t", \
+        "without rates: script 03 reads the recorded pair"
     plain = evaluate_command(duo="d", tta="eata", tta_kwargs={"d_margin": 0.1}, bn=False, lr_large=1e-3, lr_small=1e-3,
                              temps_folder=Path("t"))
     assert "--tta_kwargs '{\"d_margin\": 0.1}'" in plain and "--bn" not in plain, plain
     assert optimizer_text({"METHOD": "SGD", "MOMENTUM": 0.9, "WD": 0.0, "STEPS": 1}) == \
         "SGD (momentum 0.9, weight decay 0, 1 step per batch)"
+
+    # ---- the best pair is recorded in the duo's joint file, replacing the previous one and the pending note ---------------
+    import tempfile
+
+    import yaml
+
+    from src.utils import duo_lrs
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "duos").mkdir()
+        (tmp / "duos" / "tiny.yaml").write_text(yaml.safe_dump({"NAME": "tiny", "LARGE": {"NAME": "tiny_ln", "NORM": "LN"},
+                                                                 "SMALL": {"NAME": "tiny_bn", "NORM": "BN"}}))
+        lrs = tmp / "duo_lrs"
+        duo_lrs.init_joint("tiny", lrs)
+        duo_lrs.set_pending("tiny", "tent", "02b is running", lrs)
+        sgd = {"METHOD": "SGD", "STEPS": 1, "LR": 5e-5, "MOMENTUM": 0.9, "DAMPENING": 0.0, "WD": 0.0, "NESTEROV": False}
+
+        def results(lr_large, lr_small, **extra):
+            f = tmp / "results.json"
+            f.write_text(json.dumps({"duo": "tiny", "tta": "tent", "bn": True, "seeds": [0], "num_samples": None,
+                                     "streams": ["a__s5", "b__s5"], "temperatures": {"T_l": 0.8, "T_s": 1.0, "checkpoint": "x"},
+                                     "optim": {"large": sgd, "small": sgd}, "lrs_large": [5e-5, 1e-3], "lrs_small": [5e-5, 1e-3],
+                                     "best": {"lr_large": lr_large, "lr_small": lr_small, "duo": 0.6, "worst": 0.4}, **extra}))
+            return f
+
+        msg = record_best(results(1e-3, 5e-5), lrs, tmp / "duos")
+        assert "large 0.001 and small 5e-05" in msg and "replacing" not in msg and "unchanged" not in msg, msg
+        doc = duo_lrs.load("tiny", "joint", lrs)
+        assert doc["pending"] == {} and doc["methods"]["tent"]["large"]["OPTIM"] == {**sgd, "LR": 1e-3}
+        assert duo_lrs.resolve({"NAME": "tiny", "LARGE": {"NAME": "tiny_ln", "NORM": "LN"}, "SMALL": {"NAME": "tiny_bn", "NORM": "BN"}},
+                               "joint", "tent", root=lrs)["SMALL"]["LR"] == 5e-5, "script 03 and load_duo can now hand it out"
+        assert "(unchanged)" in record_best(results(1e-3, 5e-5), lrs, tmp / "duos")
+        assert "(replacing large 0.001, small 5e-05)" in record_best(results(5e-5, 1e-3), lrs, tmp / "duos")
+        assert duo_lrs.load("tiny", "joint", lrs)["methods"]["tent"]["small"]["OPTIM"]["LR"] == 1e-3
+        try:
+            record_best(results(1e-3, 1e-3, num_samples=2000), lrs, tmp / "duos")
+            raise AssertionError("a capped run must not be recorded")
+        except ValueError:
+            pass
+        assert duo_lrs.load("tiny", "joint", lrs)["methods"]["tent"]["large"]["OPTIM"]["LR"] == 5e-5, "the capped run changed nothing"
     print("joint_lr_tuning self-test passed")

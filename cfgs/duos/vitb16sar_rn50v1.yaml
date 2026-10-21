@@ -1,17 +1,15 @@
 # SAR-comparable duo: the ViT-Base-LN and ResNet-50 of SAR (github.com/mr-eggplant/SAR), whose ImageNet-C pipeline Tent, EATA, DeYO and
 # COCA share. The ViT-B/16 is vit_b_16_sar (timm's augreg_in21k_ft_in1k, what timm 0.6.11's bare vit_base_patch16_224 is, fed ImageNet
-# mean/std as SAR does; see src/utils/model.py), the ResNet-50 is torchvision's ORIGINAL (V1) weights. OPTIM values are SAR's own (SGD,
-# momentum 0.9, lr 0.001 for the ViT and 0.00025 for the ResNet at batch size 64) and the pre-tuning defaults: a
-# cfgs/tuned/tent__<model>.yaml overrides them (resnet50_v1 has one; none exists for vit_b_16_sar, so SAR's setting stands unless
-# scripts/02_tune_tta.py --model vit_b_16_sar is run).
+# mean/std as SAR does; see src/utils/model.py), the ResNet-50 is torchvision's ORIGINAL (V1) weights. Learning rates:
+# cfgs/duo_lrs/vitb16sar_rn50v1__{indep,joint}.yaml. Their defaults are SAR's own (SGD, momentum 0.9, lr 0.001 for the ViT and 0.00025
+# for the ResNet at batch size 64); resnet50_v1 has tuned entries, vit_b_16_sar none, so SAR's setting stands for the ViT unless
+# scripts/02_tune_tta.py --model vit_b_16_sar is run.
 NAME: vitb16sar_rn50v1
 
 LARGE:
   NAME: vit_b_16_sar
   NORM: LN
-  OPTIM: {METHOD: SGD, STEPS: 1, LR: 0.001, MOMENTUM: 0.9, DAMPENING: 0.0, WD: 0.0, NESTEROV: false}
 
 SMALL:
   NAME: resnet50_v1
   NORM: BN
-  OPTIM: {METHOD: SGD, STEPS: 1, LR: 0.00025, MOMENTUM: 0.9, DAMPENING: 0.0, WD: 0.0, NESTEROV: false}

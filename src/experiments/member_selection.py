@@ -9,8 +9,8 @@ same criterion scripts/02_tune_tta.py uses for Tent), computed per stream and av
 next to it. Ties go to the smaller learning rate. When the best value is the first or the last of the values tried, the optimum
 may lie outside the grid: `edge` says so (the author allowed a 5e-5 point for the ViT in that case).
 
-`write_tuned` writes cfgs/tuned/<algorithm>__<model>.yaml in the format of 02's files, which `load_duo(..., tta=<algorithm>)` overlays on
-the duo's OPTIM, so every later run of that algorithm picks the chosen learning rate up.
+`write_tuned` records the choice in the learning-rate file of every duo that uses the model (cfgs/duo_lrs/<duo>__indep.yaml,
+src/utils/duo_lrs.py), which `load_duo(..., tta=<algorithm>)` reads, so every later run of that algorithm picks it up.
 """
 
 from __future__ import annotations
@@ -20,12 +20,12 @@ from pathlib import Path
 from typing import Sequence
 
 import torch
-import yaml
 
 from src.experiments.grids import sgd_optim
 from src.experiments.logit_runs import run_member_specs, with_optim
 from src.experiments.logit_store import LogitStore
 from src.experiments.specs import RunSpec
+from src.utils import duo_lrs
 
 
 def member_accuracies(store: LogitStore, member, stems: Sequence[str]) -> dict[str, float]:
@@ -65,11 +65,9 @@ def select(store: LogitStore, ctx, spec: RunSpec, lrs: dict[str, Sequence[float]
     return {side: select_side(store, ctx, spec, side, lrs[side], stems, momentum) for side in ("large", "small")}
 
 
-def write_tuned(path: Path, record: dict) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# Written by scripts/05_select_member_lr.py on the held-out corruptions; read by src/utils/config.py::load_duo.\n"
-                    "# Do not edit by hand: rerun the selection.\n" + yaml.safe_dump(record, sort_keys=False))
-    return path
+def write_tuned(root: Path, record: dict, duos: list[str] | None = None) -> list[Path]:
+    """Record the choice in the indep learning-rate file of every duo that uses the model (all of them, or `duos`)."""
+    return duo_lrs.record_tuned(record["model"], record["tta"], record, root=root, duos=duos)
 
 
 def tuned_record(choice: dict, *, model: str, algorithm: str, norm: str, batch_size: int, stems: Sequence[str], seed: int,
@@ -146,22 +144,22 @@ if __name__ == "__main__":
             assert "0.4" in str(e)
         assert select_side(store, ctx, spec, "large", [0.2], stems)["edge"] is False, "one value tried: no edge to speak of"
 
-        # ---- the tuned file is what load_duo overlays for that algorithm -----------------------------------------------------
+        # ---- the recorded choice is what load_duo reads for that algorithm ----------------------------------------------------
         raw = copy.deepcopy(load_global().raw)
-        raw["paths"]["tuned"] = str(tmp / "tuned")
+        raw["paths"]["duo_lrs"] = str(tmp / "lrs")
         g = GlobalConfig(raw, Path("<test>"))
+        duo_lrs.init_indep("vitb16_rn50v1", tmp / "lrs", defaults={"large": sgd_optim(1e-3), "small": sgd_optim(2.5e-4)})
         base = load_duo("vitb16_rn50v1", g, tta="eta")
         for side, name in (("large", "vit_b_16"), ("small", "resnet50_v1")):
             cfg = base[side.upper()]
             assert cfg["NAME"] == name
-            write_tuned(tmp / "tuned" / f"eta__{cfg['NAME']}.yaml",
-                        tuned_record(res[side], model=cfg["NAME"], algorithm="eta", norm=cfg["NORM"], batch_size=g.batch_size,
-                                     stems=stems, seed=0))
+            write_tuned(tmp / "lrs", tuned_record(res[side], model=cfg["NAME"], algorithm="eta", norm=cfg["NORM"],
+                                                  batch_size=g.batch_size, stems=stems, seed=0), duos=["vitb16_rn50v1"])
         tuned = load_duo("vitb16_rn50v1", g, tta="eta")
         assert tuned["LARGE"]["OPTIM"]["LR"] == 0.2 and tuned["SMALL"]["OPTIM"]["LR"] == 0.3
         assert tuned["LARGE"]["OPTIM"]["MOMENTUM"] == 0.9 and tuned["LARGE"]["OPTIM"]["METHOD"] == "SGD"
         assert load_duo("vitb16_rn50v1", g, tta="sar")["LARGE"]["OPTIM"] == base["LARGE"]["OPTIM"], "other algorithms are untouched"
-        rec = yaml.safe_load((tmp / "tuned" / "eta__vit_b_16.yaml").read_text())
-        assert rec["lrs_tried"] == [0.1, 0.2, 0.3] and rec["tta"] == "eta" and rec["tuned_on"]["streams"] == stems
+        rec = duo_lrs.load("vitb16_rn50v1", "indep", tmp / "lrs")["methods"]["eta"]["large"]
+        assert rec["lrs_tried"] == [0.1, 0.2, 0.3] and rec["tuned_on"] == [s.replace("__", "/") for s in stems] and rec["seed"] == 0
         json.dumps(res)                                   # the table is plain data
     print("member_selection self-test passed")

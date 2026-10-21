@@ -3,8 +3,8 @@ tuning.py
 =========
 The logic behind scripts/02_tune_tta.py: tune a TTA method's optimizer settings for ONE model on the held-out
 corruptions (corruptions.tuning in cfgs/global.yaml: speckle noise, Gaussian blur, spatter, saturate; none of them is
-a test corruption), then hand the winner to every experiment through cfgs/tuned/<tta>__<model>.yaml
-(src/utils/config.py::load_duo overlays it on the duo YAML's OPTIM).
+a test corruption), then hand the winner to every experiment through the learning-rate files of the duos that use the model
+(cfgs/duo_lrs/<duo>__indep.yaml, src/utils/duo_lrs.py; src/utils/config.py::load_duo reads them).
 
 The model is adapted exactly as it is inside the duo's independent modes: the real TTAMethod (src/tta/methods) set
 up on the model as its "large" side with the other side a placeholder, one update per batch of cfgs/global.yaml's
@@ -15,7 +15,7 @@ A trial is one optimizer setting run over the 4 streams; its score is the macro 
 accuracies, so no stream weighs more because it has more images). Results are stored one JSON per trial, which makes
 the sweep resumable and shardable over a SLURM array; the ranking is built from them. Tuning on full streams matters:
 a learning rate that wins on a few hundred images (about 5 updates) is typically too large over the 780 updates of
-a 50,000-image stream, so `num_samples` below the stream size is for smoke tests only and never writes cfgs/tuned.
+a 50,000-image stream, so `num_samples` below the stream size is for smoke tests only and never writes cfgs/duo_lrs.
 """
 
 from __future__ import annotations
@@ -30,12 +30,12 @@ from typing import Callable, Sequence
 
 import torch
 import torch.nn as nn
-import yaml
 from tqdm import tqdm
 
 from src.experiments.evaluate import StreamMetrics
 from src.experiments.specs import INPUTS_TAG
 from src.tta.methods import build_tta_method
+from src.utils import duo_lrs
 from src.utils.datasets.base import ShiftDataset
 
 TUNABLE_TTA = ("tent",)
@@ -212,7 +212,8 @@ def edge_warnings(best: dict, trials: Sequence[Trial]) -> list[str]:
 
 def tuned_record(best: dict, frozen: dict, *, model: str, tta: str, norm: str, batch_size: int,
                  stream_labels: Sequence[str], seed: int, bn: bool = False) -> dict:
-    """The content of cfgs/tuned/<tta>__<model>.yaml; load_duo reads NORM, OPTIM and batch_size, the rest is provenance.
+    """The record of a tuning run (duo_lrs.record_tuned turns it into the entry of every duo that uses the model; load_duo
+    reads NORM, OPTIM and batch_size from it, the rest is provenance).
     For a BatchNorm model the frozen score depends on --bn, so the record says which kind of frozen model it is."""
     rec = {"model": model, "tta": tta, "NORM": norm, "batch_size": batch_size, "OPTIM": dict(best["optim"]),
            "tuned_on": {"streams": list(stream_labels), "seed": seed},
@@ -222,11 +223,9 @@ def tuned_record(best: dict, frozen: dict, *, model: str, tta: str, norm: str, b
     return {**rec, "written_by": "scripts/02_tune_tta.py"}
 
 
-def write_tuned(path: Path, record: dict) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# Written by scripts/02_tune_tta.py on the held-out corruptions; read by src/utils/config.py::load_duo.\n"
-                    "# Do not edit by hand: rerun the tuner.\n" + yaml.safe_dump(record, sort_keys=False))
-    return path
+def write_tuned(root: Path, record: dict, duos: list[str] | None = None) -> list[Path]:
+    """Record the winner in the indep learning-rate file of every duo that uses the model (all of them, or `duos`)."""
+    return duo_lrs.record_tuned(record["model"], record["tta"], record, root=root, duos=duos)
 
 
 if __name__ == "__main__":
@@ -235,7 +234,7 @@ if __name__ == "__main__":
 
     from src.experiments._testing import DUO, FakeStream, tiny_models
     from src.experiments.members import MemberRunner
-    from src.utils.config import DUO_DIR, GlobalConfig, load_duo, load_global
+    from src.utils.config import GlobalConfig, load_duo, load_global
 
     torch.set_num_threads(2)
     cpu = torch.device("cpu")
@@ -336,18 +335,22 @@ if __name__ == "__main__":
     assert "largest" in edge_warnings(fake("e", grid[2].optim, 0.9), grid)[0]
     assert edge_warnings(fake("only", grid[0].optim, 0.9), grid[:1]) == [], "one learning rate has no edge"
 
-    # ---- the tuned file reaches the experiments: load_duo overlays it on the duo YAML --------------------------------
+    # ---- the winner reaches the experiments: it is recorded in the learning-rate file of the duo, which load_duo reads ----------------
     g = load_global()
     with tempfile.TemporaryDirectory() as tmp:
-        g2 = GlobalConfig({**g.raw, "paths": {**g.raw["paths"], "tuned": tmp}}, g.source)
-        rec = tuned_record(ranked[0], res[0], model="resnet50", tta="tent", norm="BN", batch_size=g.batch_size,
+        g2 = GlobalConfig({**g.raw, "paths": {**g.raw["paths"], "duo_lrs": tmp}}, g.source)
+        rec = tuned_record(ranked[0], res[0], model="resnet50_v1", tta="tent", norm="BN", batch_size=g.batch_size,
                            stream_labels=["a", "b"], seed=0, bn=True)
         assert rec["frozen_bn_batch_stats"] is True
         assert "frozen_bn_batch_stats" not in tuned_record(ranked[0], res[0], model="m", tta="tent", norm="LN",
                                                            batch_size=64, stream_labels=["a"], seed=0)
-        out = write_tuned(Path(tmp) / "tent__resnet50.yaml", rec)
-        assert yaml.safe_load(out.read_text()) == rec and out.read_text().startswith("# Written by")
-        duo = load_duo("vitb16_rn50", g2)
-        yaml_large = yaml.safe_load((DUO_DIR / "vitb16_rn50.yaml").read_text())["LARGE"]["OPTIM"]
-        assert duo["SMALL"]["OPTIM"] == ranked[0]["optim"] and duo["LARGE"]["OPTIM"] == yaml_large
+        files = write_tuned(Path(tmp), rec, duos=["vitb16_rn50v1"])
+        assert [f.name for f in files] == ["vitb16_rn50v1__indep.yaml"]
+        duo = load_duo("vitb16_rn50v1", g2)
+        assert duo["SMALL"]["OPTIM"] == ranked[0]["optim"], "the tuned optimizer reaches the member"
+        assert duo["LARGE"]["OPTIM"] == duo_lrs._generic_default("vit_b_16"), "the other member keeps its default"
+        e = duo_lrs.load("vitb16_rn50v1", "indep", tmp)["methods"]["tent"]["small"]
+        assert e["macro_accuracy"] == rec["macro_accuracy"] and e["tuned_on"] == ["a", "b"] and e["source"] == "scripts/02_tune_tta.py"
+        assert write_tuned(Path(tmp), tuned_record(ranked[0], res[0], model="not_in_any_duo", tta="tent", norm="BN", batch_size=64,
+                                                   stream_labels=["a"], seed=0)) == [], "a model no duo uses is recorded nowhere"
     print("tuning self-test passed")

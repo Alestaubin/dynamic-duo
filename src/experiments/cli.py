@@ -3,7 +3,7 @@ cli.py
 ======
 The flags every script in scripts/ takes, and the setup they share.
 
-    --duo NAME          cfgs/duos/<NAME>.yaml                          (default vitb16_rn50; not for single-model scripts)
+    --duo NAME          cfgs/duos/<NAME>.yaml                          (default vitb16_rn50v1; not for single-model scripts)
     --tta METHOD        tent | eata | ...; --tta_kwargs '{"k": v}'      (default tent)
     --seeds 0 1 2       stream-order seeds                              (default: cfgs/global.yaml)
     --num_samples N     cap per stream, for smoke tests                 (default: the whole stream)
@@ -53,7 +53,7 @@ def add_common_args(p: argparse.ArgumentParser, *, tta: bool = True, seeds: bool
     """`duo=False` for a script that works on one model rather than a pair (the tuner): it then builds no
     Context (use `setup_global`)."""
     if duo:
-        p.add_argument("--duo", default="vitb16_rn50", help="cfgs/duos/<name>.yaml")
+        p.add_argument("--duo", default="vitb16_rn50v1", help="cfgs/duos/<name>.yaml (default: the main duo)")
     if tta:
         p.add_argument("--tta", default="tent", help="TTA method of the adapting members")
         p.add_argument("--tta_kwargs", type=_json_object, default=None, metavar="JSON")
@@ -124,9 +124,11 @@ def setup_global(args: argparse.Namespace, script: str, default_seeds: Sequence[
 def setup(args: argparse.Namespace, script: str, default_seeds: Sequence[int] | None = None
           ) -> tuple[Context, list[int], Path]:
     """(context, seeds, output dir) for a script. Seeds: --seeds, else `default_seeds`, else protocol.seeds.
-    The duo's optimizer settings are the tuned ones of the selected --tta method, where cfgs/tuned has them."""
+    The duo's optimizer settings are those of cfgs/duo_lrs/<duo>__<regime>.yaml for the selected --tta method (the tuned ones where
+    there are any, else the defaults); the regime is `args.regime` if a script defines it (--regime indep|joint), else indep."""
     g, seeds, out = setup_global(args, script, default_seeds)
-    return Context.create(args.duo, g, args.device, tta=getattr(args, "tta", "tent"), bn=args.bn), seeds, out
+    return Context.create(args.duo, g, args.device, tta=getattr(args, "tta", "tent"), bn=args.bn,
+                          regime=getattr(args, "regime", "indep")), seeds, out
 
 
 if __name__ == "__main__":

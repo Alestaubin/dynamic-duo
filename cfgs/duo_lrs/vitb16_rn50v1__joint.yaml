@@ -1,0 +1,47 @@
+# Learning rates of duo `vitb16_rn50v1`, JOINT regime: both members adapt on the entropy of the duo's combined prediction (engine mode
+# both_duo; the joint mode of scripts/03 and Joint DD). Tuned as PAIRS by scripts/02b_tune_joint_lr.py, which only reports:
+# `python -m src.utils.duo_lrs --import_joint <results.json>` copies the best pair in. A method under `pending:` is being tuned:
+# asking for it raises NotTuned (never the indep rates).
+duo: vitb16_rn50v1
+regime: joint
+engine_mode: both_duo
+methods:
+  tent:
+    large:
+      model: vit_b_16
+      norm: LN
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.0032
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: out/results/tune_joint_lr/vitb16_rn50v1__tent_bn/results.json
+      tuned_on:
+      - gaussian_blur/s5
+      - saturate/s5
+      - spatter/s5
+      - speckle_noise/s5
+      duo_macro_accuracy: 0.62397
+      worst_stream_accuracy: 0.4767
+    small:
+      model: resnet50_v1
+      norm: BN
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.004
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: out/results/tune_joint_lr/vitb16_rn50v1__tent_bn/results.json
+      tuned_on:
+      - gaussian_blur/s5
+      - saturate/s5
+      - spatter/s5
+      - speckle_noise/s5
+      duo_macro_accuracy: 0.62397
+      worst_stream_accuracy: 0.4767

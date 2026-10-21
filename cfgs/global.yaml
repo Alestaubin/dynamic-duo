@@ -1,6 +1,6 @@
 # Shared configuration: everything that is the same for every script in this repo.
-# Per-duo model choices live in cfgs/duos/*.yaml; values written by the tuning scripts live in
-# cfgs/tuned/; facts copied from upstream repos live in cfgs/protocols.yaml (generated).
+# Per-duo model choices (names and norm types only) live in cfgs/duos/*.yaml; the learning rates of every duo, written by
+# the tuning scripts, live in cfgs/duo_lrs/; facts copied from upstream repos live in cfgs/protocols.yaml (generated).
 #
 # Relative paths are relative to the repository root. Override the whole file for one shell with
 #   export DUO_GLOBAL_CONFIG=/path/to/other_global.yaml
@@ -36,7 +36,7 @@ paths:
                                 # (moved from cache/ on 2026-10-18: 56 GB of caches off /project, and the ~3,500 files of the
                                 # per-member logit store stay off it too: /project is at 83% of its file-count quota)
   checkpoints: checkpoints      # fitted temperatures, proxy source statistics
-  tuned: cfgs/tuned             # tuning-script outputs read by every experiment script
+  duo_lrs: cfgs/duo_lrs         # the learning rates of every duo, per regime (<duo>__indep|joint.yaml); written by the tuning scripts
 
 runtime:
   workers: 8
