@@ -120,30 +120,20 @@ methods:
       OPTIM:
         METHOD: SGD
         STEPS: 1
-        LR: 5.0e-05
+        LR: 0.0001
         MOMENTUM: 0.9
         DAMPENING: 0.0
         WD: 0.0
         NESTEROV: false
-      source: scripts/02_tune_tta.py, lr edited by hand (the author's decision of 2026-10-19)
+      source: scripts/02_tune_tta.py
       tuned_on:
       - speckle_noise/s5
       - gaussian_blur/s5
       - spatter/s5
       - saturate/s5
       seed: 0
-      macro_accuracy: 0.5118
+      macro_accuracy: 0.50945
       frozen_macro_accuracy: 0.48794
-      worst_stream_accuracy: 0.3222
-      lrs_tried:
-      - 5.0e-05
-      - 0.0001
-      - 0.00025
-      - 0.0005
-      - 0.001
-      - 0.0025
-      note: 02's grid (1e-4 .. 2.5e-3) extended with 5e-5 because its winner, 1e-4, was the lowest point; 5e-5 scores 51.18
-        against 50.94 (worst stream 32.2 against 35.0). 02's own winner was 1e-4; the author picked 5e-5 on 2026-10-19.
     small:
       model: resnet50
       norm: BN

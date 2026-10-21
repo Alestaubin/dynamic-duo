@@ -4,6 +4,10 @@ Goal: every result in the paper's Experiments section has its own short script i
 
 Status key: `[x]` done, `[ ]` open, `[?]` needs the author's decision.
 
+## Rules for every chat
+
+- **Submit every Slurm job with `--qos=high`** (author's instruction, 2026-10-21): GPU jobs and arrays, CPU jobs through `slurm/job_cpu.sh`, smoke tests, self-test jobs and dependent report jobs alike, e.g. `sbatch --qos=high -t 01:35:00 --array=0-2 slurm/job.sh scripts/03_tab_adaptation_modes.py ...`. The account `aip-evanesce` may use the QOS `high` (priority 10; `normal` is 0; `sacctmgr show qos`). A pending job's QOS cannot be changed afterwards (`scontrol update JobId=<id> QOS=high` is denied), so `scancel` it and resubmit. Since 2026-10-21 the launchers (`slurm/job.sh`, `slurm/job_cpu.sh`, `run_paper_tables.sh`, `test_tta_refactor.sh`) carry `#SBATCH --qos=high` themselves, so a plain `sbatch slurm/job.sh ...` is already at QOS high; `sbatch --qos=normal ...` overrides it. A job submitted by hand with `sbatch` on another script still needs the flag.
+
 ## Status (2026-10-18)
 
 | Phase | State |

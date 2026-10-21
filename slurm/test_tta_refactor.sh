@@ -9,6 +9,7 @@
 #SBATCH --mem=32G                # Memory
 #SBATCH --time=01:00:00          # Walltime (HH:MM:SS)
 #SBATCH --account=aip-evanesce
+#SBATCH --qos=high             # the author's standing rule: every job runs at QOS high (sbatch --qos=normal overrides it)
 
 # Validates the TTA-method refactor (src/tta/methods/). Submit from the repo root:
 #   sbatch slurm/test_tta_refactor.sh

@@ -21,6 +21,9 @@ and a SLURM array splits the grid:
     python scripts/02_tune_tta.py --model resnet50 --report_only                      # ranking + the winner into cfgs/duo_lrs from the stored trials
     python scripts/02_tune_tta.py --model resnet50 --optimizers Adam --adam_lrs 1e-4 3e-4 --num_samples 2000   # smoke test
 
+    python scripts/02_tune_tta.py --model vit_b_16 --rank_cache                      # rank EVERYTHING stored for the model, no grid flags
+    python scripts/02_tune_tta.py --model vit_b_16 --rank_cache --record             # ... and record the winner in cfgs/duo_lrs/
+
 Writes <paths.out>/results/tune_tta/<model>__tent/{trials/*.json, ranking.csv} and, once every trial is in, the winner into
 <paths.duo_lrs>/<duo>__indep.yaml. A capped run (--num_samples) never records it: short streams favour
 larger learning rates than the 780 updates of a full stream do.
@@ -57,7 +60,14 @@ def main() -> int:
     ap.add_argument("--sgd_momentums", type=float, nargs="+", default=[0.0, 0.9])
     ap.add_argument("--wd", type=float, default=0.0, help="weight decay, both optimizers")
     ap.add_argument("--seed", type=int, default=0, help="stream order (subset and shuffle) seed")
+    ap.add_argument("--rank_cache", action="store_true",
+                    help="rank EVERY trial stored for this model, whatever grid it came from, instead of the grid the flags above "
+                         "describe (they are ignored); needs no GPU. Only trials made with the current settings (input pipeline, "
+                         "batch size, --seed, --bn, --num_samples) count. Does not record the winner unless --record is given")
+    ap.add_argument("--record", action="store_true", help="with --rank_cache: record the winner in cfgs/duo_lrs/ (a --report_only run always does)")
     args = ap.parse_args()
+    if args.record and not args.rank_cache:
+        ap.error("--record is for --rank_cache (a full run or --report_only records the winner anyway)")
 
     g, _, out = setup_global(args, f"tune_tta/{args.model}__{args.tta}")
     device = get_device(args.device)
@@ -67,17 +77,31 @@ def main() -> int:
     norm = args.norm or T.detect_norm(make_model()[0])
     streams = [(f"{c}/s{g.severity}", ImageNetC.from_config(g, c, g.severity)) for c in g.tuning_corruptions]
     labels = [label for label, _ in streams]
-    trials = [T.FROZEN, *T.build_trials(args.optimizers, args.adam_lrs, args.adam_betas, args.sgd_lrs,
-                                        args.sgd_momentums, args.wd)]
-    print(f"{args.model} ({norm}), {args.tta}: {len(trials) - 1} trials + frozen reference on {labels}, "
-          f"batch size {g.batch_size}, {args.num_samples or 'all'} images per stream")
-    if norm == "BN":
-        print("frozen reference: BatchNorm on " + ("the test batch's statistics (--bn)" if args.bn
-                                                   else "the source statistics (eval() mode; --bn for test-batch statistics)"))
-
     trial_dir = out / "trials"
     key = lambda t: T.trial_key(t, model=args.model, tta=args.tta, norm=norm, stream_labels=labels,        # noqa: E731
                                 batch_size=g.batch_size, seed=args.seed, num_samples=args.num_samples, bn=args.bn)
+    if args.rank_cache:
+        args.report_only = True
+        stored = [t for t in T.discover_trials(trial_dir) if T.load_result(trial_dir, key(t)) is not None]
+        left_out = len(list(trial_dir.glob("*.json"))) - len(stored)
+        trials = [T.FROZEN, *sorted((t for t in stored if t.optim is not None), key=T.grid_order)]
+        print(f"{args.model} ({norm}), {args.tta}: --rank_cache: {len(trials) - 1} stored trials"
+              f"{' + the frozen reference' if T.FROZEN in stored else ' (NO frozen reference stored)'} on {labels}, batch size "
+              f"{g.batch_size}, {args.num_samples or 'all'} images per stream"
+              + (f"; {left_out} stored results made with other settings (another input pipeline, seed, batch size or --bn) left out"
+                 if left_out else ""))
+        if T.FROZEN not in stored:
+            print(f"the frozen reference is missing for these settings: run  scripts/02_tune_tta.py --model {args.model}"
+                  f"{' --bn' if args.bn else ''} --only frozen")
+            return 1
+    else:
+        trials = [T.FROZEN, *T.build_trials(args.optimizers, args.adam_lrs, args.adam_betas, args.sgd_lrs,
+                                            args.sgd_momentums, args.wd)]
+        print(f"{args.model} ({norm}), {args.tta}: {len(trials) - 1} trials + frozen reference on {labels}, "
+              f"batch size {g.batch_size}, {args.num_samples or 'all'} images per stream")
+    if norm == "BN":
+        print("frozen reference: BatchNorm on " + ("the test batch's statistics (--bn)" if args.bn
+                                                   else "the source statistics (eval() mode; --bn for test-batch statistics)"))
     if not args.report_only:
         for t in select_jobs(trials, lambda t: t.name, args.shard, args.only):
             if T.load_result(trial_dir, key(t)) is not None:
@@ -114,14 +138,21 @@ def main() -> int:
     if args.num_samples:
         print("capped run (--num_samples): the winner is not recorded")
         return 0
+    if args.rank_cache and not args.record:
+        print(f"ranked what is stored; the winner ({best['trial']}) is not recorded: add --record to record it in cfgs/duo_lrs/")
+        return 0
     if not beats:
         print("not recording a winner")
         return 1
+    replaced: list[dict] = []
     paths = T.write_tuned(g.path("duo_lrs"), T.tuned_record(
         best, frozen, model=args.model, tta=args.tta, norm=norm, batch_size=g.batch_size, stream_labels=labels,
-        seed=args.seed, bn=args.bn))
+        seed=args.seed, bn=args.bn), replaced=replaced)
     for path in paths:
         print(f"wrote {path}")
+    for r in replaced:
+        print(f"REPLACED {r['duo']} / {args.tta} / {r['side']}: lr {r['old']['LR']:g} -> {r['new']['LR']:g}"
+              + (f"  (the old entry said: {r['note']})" if r["note"] else ""))
     if not paths:
         print(f"WARNING: no duo of cfgs/duos uses {args.model}, so the winner was recorded nowhere; add the duo, then rerun with --report_only")
     return 0

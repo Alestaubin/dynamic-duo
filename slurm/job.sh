@@ -9,6 +9,7 @@
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
 #SBATCH --account=aip-evanesce
+#SBATCH --qos=high             # the author's standing rule: every job runs at QOS high (sbatch --qos=normal overrides it)
 
 # The one generic launcher: runs any repo script inside a SLURM job. Submit from the repo root.
 #

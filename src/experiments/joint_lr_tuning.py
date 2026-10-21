@@ -33,8 +33,9 @@ point per task.
 from __future__ import annotations
 
 import json
+import re
 import shlex
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -92,6 +93,121 @@ def build_jobs(lrs_large: Sequence[float], lrs_small: Sequence[float], seeds: Se
     (which wrap around onto the first tasks: Independent both is cached already, the frozen run is forward-only)."""
     jobs = [Job("joint", s, lr_l, lr_s) for s in seeds for lr_l in lrs_large for lr_s in lrs_small]
     return jobs + [Job(kind, s) for s in seeds for kind in ("frozen", "indep")]
+
+
+_LABEL = re.compile(r"^joint/L(?P<l>[^_/]+)_S(?P<s>[^/]+)/seed(?P<seed>\d+)$")
+
+
+def _job_of_dir(d: Path) -> Job | None:
+    """The Joint job whose run lives in cache folder `d`, read back from what the run left there (a divergence marker names its
+    job; a finished or partial run has a manifest with the spec and the optimizers it used); None for any other kind of run."""
+    marker, manifest = d / DIVERGED, d / "manifest.json"
+    try:
+        if marker.is_file():
+            m = _LABEL.match(json.loads(marker.read_text())["job"])
+            return Job("joint", int(m["seed"]), float(m["l"]), float(m["s"])) if m else None
+        if manifest.is_file():
+            info = json.loads(manifest.read_text())
+            if info["spec"]["mode"] != "both_duo":
+                return None
+            return Job("joint", int(info["spec"]["seed"]), float(info["duo"]["LARGE"]["OPTIM"]["LR"]),
+                       float(info["duo"]["SMALL"]["OPTIM"]["LR"]))
+    except (KeyError, ValueError, TypeError):
+        return None
+    return None
+
+
+def discover_jobs(tuner: "Tuner", seeds: Sequence[int]) -> tuple[list[Job], dict]:
+    """The runs in the member cache that this tuner could have made (`--rank_cache`): every Joint run of the duo and TTA method whose
+    cache folder is exactly the one the tuner would use for its pair of learning rates (so the input pipeline, temperatures, batch
+    size, seed, number of samples and optimizer settings all match), whatever grid flags it was run with. Returns (the complete
+    ones, grid points first and then the references, and a description of what was left out): {"left_out": runs of other settings,
+    "incomplete": labels of runs with missing streams, "no_reference": labels of the references that are not there}."""
+    ctx = tuner.ctx
+    root = ctx.g.path("cache") / "members" / ctx.duo["NAME"] / tuner.tta
+    info = {"left_out": 0, "incomplete": [], "no_reference": []}
+    points: dict[Job, Path] = {}
+    for d in sorted(root.glob("independent_seed*_*")) if root.is_dir() else []:
+        job = _job_of_dir(d)
+        if job is None or job.seed not in seeds:
+            continue
+        if run_dir(tuner.spec(job), tuner.context(job)) != d:
+            info["left_out"] += 1
+            continue
+        points[job] = d
+    jobs = []
+    for job in sorted(points, key=lambda j: (j.seed, j.lr_large, j.lr_small)):
+        if tuner.missing([job]):
+            info["incomplete"].append(job.label)
+        else:
+            jobs.append(job)
+    for job in (Job(kind, s) for s in seeds for kind in ("frozen", "indep")):
+        if tuner.missing([job]):
+            info["no_reference"].append(job.label)
+        else:
+            jobs.append(job)
+    return jobs, info
+
+
+def cached_temperatures(ctx: Context, tta: str, num_samples: int | None, seeds: Sequence[int]) -> list[tuple[float, float]]:
+    """The static duos (T_L, T_S) that the Joint runs in the cache were made with (the `loop_ts` of each run's manifest), the
+    pair with the most runs first. They depend on the independent rates the temperatures were once fitted at, so after a change
+    of those rates the current members no longer give the pair the grid was run with."""
+    root = ctx.g.path("cache") / "members" / ctx.duo["NAME"] / tta
+    counts: Counter = Counter()
+    for d in sorted(root.glob("independent_seed*_*")) if root.is_dir() else []:
+        try:
+            sp = json.loads((d / "manifest.json").read_text())["spec"]
+        except (OSError, KeyError, ValueError):
+            continue
+        if sp["mode"] == "both_duo" and sp["tta"] == tta and sp["seed"] in seeds and sp.get("num_samples") == num_samples and sp.get("loop_ts"):
+            counts[tuple(float(x) for x in sp["loop_ts"])] += 1
+    return [pair for pair, _ in counts.most_common()]
+
+
+def find_temps_checkpoint(ctx: Context, tta: str, t_l: float, t_s: float) -> Path | None:
+    """The held-out JointFixedTS checkpoint of this duo and TTA method that holds the pair (T_L, T_S), if there is one."""
+    for folder in sorted((ctx.g.path("checkpoints") / "fixed_ts").glob(f"heldout_{ctx.duo['NAME']}_{tta}_*")):
+        try:
+            tl, ts = AM.load_temperatures(folder)
+        except (OSError, KeyError, ValueError):
+            continue
+        if abs(tl - t_l) < 1e-9 and abs(ts - t_s) < 1e-9:
+            return folder
+    return None
+
+
+def rank_cache_setup(ctx: Context, tta: str, tta_kwargs: dict | None, num_samples: int | None, seeds: Sequence[int],
+                     temps_checkpoint: str | None = None, segments: list[Segment] | None = None):
+    """Everything `--rank_cache` needs, from the cache alone: (tuner, jobs, info); the tuner is None if the cache holds no Joint run
+    of this duo and TTA method whose temperatures are known (no run, or no checkpoint with its pair). The
+    temperatures are those the cached runs were made with: with several pairs in the cache, the one under which the most complete
+    runs are valid; `temps_checkpoint` names the pair instead. `info` is discover_jobs's, plus "temperatures": the pairs found and
+    the runs valid under each."""
+    if temps_checkpoint:
+        spec = AM.temperature_spec(ctx.duo["NAME"], tta, tta_kwargs, num_samples)
+        options = [AM.resolve_temperatures(ctx, spec, temps_checkpoint, report_only=True)]
+        skipped = []
+    else:
+        options, skipped = [], []
+        for t_l, t_s in cached_temperatures(ctx, tta, num_samples, seeds):
+            folder = find_temps_checkpoint(ctx, tta, t_l, t_s)
+            if folder is None:
+                skipped.append((t_l, t_s))
+            else:
+                options.append(AM.Temps(folder, t_l, t_s, f"taken from the cached runs, which were made with the checkpoint \\texttt{{{folder.name}}}"))
+    best, valid = None, []
+    for temps in options:
+        tuner = Tuner(ctx, tta, tta_kwargs, num_samples, temps, segments=segments)
+        jobs, info = discover_jobs(tuner, seeds)
+        n = sum(j.kind == "joint" for j in jobs)
+        valid.append(((temps.T_l, temps.T_s), n))
+        if best is None or n > best[0]:
+            best = (n, tuner, jobs, info)
+    if best is None:
+        return None, [], {"left_out": 0, "incomplete": [], "no_reference": [], "temperatures": [], "no_checkpoint": skipped}
+    _, tuner, jobs, info = best
+    return tuner, jobs, {**info, "temperatures": valid, "no_checkpoint": skipped}
 
 
 # ------------------------------------------------------------------------------------------------------ running
@@ -213,7 +329,7 @@ def _pct(x: float) -> str:
 def grid_table(points: Sequence[dict], lrs_large: Sequence[float], lrs_small: Sequence[float], key: str = "duo",
                mark: dict | None = None) -> str:
     """Rows: the large member's rate; columns: the small member's. `key` is a summary field (a fraction, printed as
-    %). `mark` (a point) gets a trailing `*`. A missing or diverged cell prints as `div.`."""
+    %). `mark` (a point) gets a trailing `*`. A diverged cell prints as `div.`, a pair that was not run as `-`."""
     cell = {(p["lr_large"], p["lr_small"]): p[key] for p in points}
     corner = "large \\ small"
     head = f"{corner:>14}" + "".join(f"{s:>10g}" for s in lrs_small)
@@ -222,7 +338,7 @@ def grid_table(points: Sequence[dict], lrs_large: Sequence[float], lrs_small: Se
         cells = []
         for lr_s in lrs_small:
             star = "*" if mark and (lr_l, lr_s) == (mark["lr_large"], mark["lr_small"]) else " "
-            cells.append(f"{_pct(cell.get((lr_l, lr_s), NAN)):>9}{star}")
+            cells.append(f"{(_pct(cell[lr_l, lr_s]) if (lr_l, lr_s) in cell else '-'):>9}{star}")
         lines.append(f"{lr_l:>14g}" + "".join(cells))
     return "\n".join(lines)
 
@@ -321,6 +437,12 @@ def add_args(ap) -> None:
                     help="explicit learning rates of the large member (replaces --mults for it)")
     ap.add_argument("--lrs_small", type=float, nargs="+", default=None, metavar="LR",
                     help="explicit learning rates of the small member (replaces --mults for it)")
+    ap.add_argument("--rank_cache", action="store_true",
+                    help="rank EVERY Joint run in the member cache that matches the other settings (duo, --tta, --seeds, --bn, "
+                         "temperatures), whatever grid it was run with; --mults / --lrs_large / --lrs_small are ignored and "
+                         "nothing is computed (no GPU). The best pair is not recorded unless --record is given")
+    ap.add_argument("--record", action="store_true",
+                    help="with --rank_cache: record the best pair in cfgs/duo_lrs/<duo>__joint.yaml (a full --report_only run does)")
     ap.add_argument("--temps_checkpoint", default=None, metavar="DIR",
                     help="JointFixedTS checkpoint (a folder with config.json) for the duo's temperatures; default: "
                          "fitted on the 4 held-out corruptions, as in script 03")
@@ -449,6 +571,37 @@ if __name__ == "__main__":
             raise AssertionError("a negative learning rate must raise, not be recorded as divergence")
         except ValueError as e:
             assert "positive" in str(e)
+
+        # ---- --rank_cache: the runs are found in the cache without the grid; what does not belong is left out -----------
+        found, info = discover_jobs(tuner, [0])
+        want = {j.point for j in grid} | {boom.point}
+        assert {j.point for j in found} == want, "every complete Joint run, the diverged one too, and both references"
+        assert [j.kind for j in found[-2:]] == ["frozen", "indep"] and info == {"left_out": 0, "incomplete": [], "no_reference": []}
+        assert all(j.lr_large == float(f"{j.lr_large:.6g}") for j in found if j.kind == "joint"), "the rates read back are the run's"
+        assert not [j for j in discover_jobs(tuner, [1])[0] if j.kind == "joint"], "another seed: none of the runs belongs to it"
+        other = AM.Temps(temps.folder, temps.T_l * 1.5, temps.T_s, "test")
+        f2, i2 = discover_jobs(Tuner(ctx, "tent", None, None, other, segments=held), [0])
+        assert not [j for j in f2 if j.kind == "joint"] and i2["left_out"] == len(pts) + 1, \
+            "runs made with other temperatures are not valid for these (and are counted, not guessed at)"
+        victim = MemberCache(run_dir(tuner.spec(pts[0]), tuner.context(pts[0]))).dir
+        next(victim.glob("*.pt")).unlink()
+        f3, i3 = discover_jobs(tuner, [0])
+        assert pts[0].label in i3["incomplete"] and pts[0].point not in {j.point for j in f3}, "an incomplete run is reported, not ranked"
+        tuner.compute([pts[0]])
+        assert pts[0].point in {j.point for j in discover_jobs(tuner, [0])[0]}, "and is found again once it is complete"
+        assert "-" in grid_table(pts_all, lrs_l + [3e-3], lrs_s).splitlines()[-1], "a pair that was not run prints as '-'"
+
+        # ---- the temperatures come from the cache too: no flag, and no dependence on the CURRENT independent rates ------
+        got, gjobs, ginfo = rank_cache_setup(ctx, "tent", None, None, [0], segments=held)
+        assert got.temps.folder == temps.folder and {j.point for j in gjobs} == want and ginfo["temperatures"] == [((temps.T_l, temps.T_s), len(pts) + 1)]
+        moved = AM.with_learning_rates(ctx, base_lr * 2, base_lr * 2)                  # the situation after the Tent rates were changed
+        got2, jobs2, info2 = rank_cache_setup(moved, "tent", None, None, [0], segments=held)
+        assert {j.point for j in jobs2 if j.kind == "joint"} == {j.point for j in found if j.kind == "joint"}, "the same grid is found"
+        assert got2.temps.folder == temps.folder and info2["no_reference"] == ["indep/seed0"], \
+            "only the Independent reference depends on the current rates, so only it is missing"
+        assert rank_cache_setup(ctx, "eta", None, None, [0], segments=held)[0] is None, "no run of that TTA method: nothing to rank"
+        assert rank_cache_setup(ctx, "tent", None, None, [0], str(temps.folder), held)[0].temps.folder == temps.folder, "--temps_checkpoint"
+        assert find_temps_checkpoint(ctx, "tent", temps.T_l, temps.T_s) == temps.folder and find_temps_checkpoint(ctx, "tent", 9.9, 9.9) is None
 
     # ---- ranking, ties, edges, tables on synthetic summaries -----------------------------------------------------
     def fake(duo, **kw):

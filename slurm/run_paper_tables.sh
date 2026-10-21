@@ -9,6 +9,7 @@
 #SBATCH --mem=32G                # Memory
 #SBATCH --time=10:00:00          # Walltime (HH:MM:SS)
 #SBATCH --account=aip-evanesce
+#SBATCH --qos=high             # the author's standing rule: every job runs at QOS high (sbatch --qos=normal overrides it)
 
 # Regenerates every paper table for ViT-B/16 + ResNet-50 on all 15 ImageNet-C corruptions
 # (zoom_blur added to EVAL). Submit from the repo root: sbatch slurm/run_paper_tables.sh

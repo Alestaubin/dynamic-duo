@@ -23,7 +23,8 @@ splits the grid, one point per task:
 
     sbatch slurm/job.sh scripts/02b_tune_joint_lr.py --duo vitb16_rn50v1 --bn --temps_only
     sbatch -t 00:40:00 --array=0-24 slurm/job.sh scripts/02b_tune_joint_lr.py --duo vitb16_rn50v1 --bn --shard auto
-    sbatch slurm/job_cpu.sh scripts/02b_tune_joint_lr.py --duo vitb16_rn50v1 --bn --report_only     # the ranking (no model runs)
+    sbatch slurm/job_cpu.sh scripts/02b_tune_joint_lr.py --duo vitb16_rn50v1 --bn --report_only     # the ranking of THIS grid (no model runs)
+    sbatch slurm/job_cpu.sh scripts/02b_tune_joint_lr.py --duo vitb16_rn50v1 --bn --rank_cache      # rank EVERY cached Joint run, no grid flags
     sbatch -t 00:20:00 slurm/job.sh scripts/02b_tune_joint_lr.py --duo vitb16_rn50v1 --bn --num_samples 2000 --mults 1 4  # smoke test
 
 (--bn matters only for the frozen reference: a frozen BatchNorm model then runs on the test batch's statistics; the Joint
@@ -62,26 +63,59 @@ def main() -> int:
     JL.add_args(ap)
     args = ap.parse_args()
     tag = f"{args.duo}__{args.tta}{bn_tag(args)}" + (f"__n{args.num_samples}" if args.num_samples else "")
+    if args.record and not args.rank_cache:
+        ap.error("--record is for --rank_cache (a full --report_only run records the best pair anyway)")
+    if args.rank_cache:
+        args.report_only = True                        # nothing is computed: the cache is read as it is
     ctx, seeds, out = setup(args, f"tune_joint_lr/{tag}", default_seeds=[0])
 
     current = {side: float(ctx.duo[side]["OPTIM"]["LR"]) for side in ("LARGE", "SMALL")}
-    lrs_large = JL.lr_axis(current["LARGE"], args.mults, args.lrs_large)
-    lrs_small = JL.lr_axis(current["SMALL"], args.mults, args.lrs_small)
     base = tuple(float(f"{current[side]:.6g}") for side in ("LARGE", "SMALL"))
-    for side, lrs in (("LARGE", lrs_large), ("SMALL", lrs_small)):
+    for side in ("LARGE", "SMALL"):
+        grid = "" if args.rank_cache else "; grid " + str([f"{v:g}" for v in JL.lr_axis(
+            current[side], args.mults, args.lrs_large if side == "LARGE" else args.lrs_small)])
         print(f"{side.lower()} {ctx.duo[side]['NAME']} ({ctx.duo[side]['NORM']}): {JL.optimizer_text(ctx.duo[side]['OPTIM'])}, "
-              f"current learning rate {current[side]:g}; grid {[f'{v:g}' for v in lrs]}")
+              f"current learning rate {current[side]:g}{grid}")
 
-    temps = AM.resolve_temperatures(ctx, AM.temperature_spec(args.duo, args.tta, args.tta_kwargs, args.num_samples),
-                                    args.temps_checkpoint, report_only=args.report_only)
-    print(f"static duo: T_L = {temps.T_l}, T_S = {temps.T_s}  ({temps.folder})")
-    if args.temps_only:
-        return 0
-
-    tuner = JL.Tuner(ctx, args.tta, args.tta_kwargs, args.num_samples, temps)
-    jobs = JL.build_jobs(lrs_large, lrs_small, seeds)
-    print(f"{len(jobs)} runs: {len(jobs) - 2 * len(seeds)} grid points + frozen and Independent both (references), "
-          f"batch size {ctx.batch_size}, {args.num_samples or 'all'} images per stream, seeds {seeds}")
+    if args.rank_cache:
+        tuner, jobs, info = JL.rank_cache_setup(ctx, args.tta, args.tta_kwargs, args.num_samples, seeds, args.temps_checkpoint)
+        n_pairs = sum(j.kind == "joint" for j in jobs)
+        if tuner is None or not n_pairs:
+            print(f"--rank_cache: no complete Joint run of {args.duo} / {args.tta} for seeds {seeds} in the cache "
+                  f"(batch size {ctx.batch_size}, {args.num_samples or 'all'} images per stream)")
+            for t_l, t_s in info["no_checkpoint"]:
+                print(f"  runs exist for T_L={t_l}, T_S={t_s}, but no checkpoint under checkpoints/fixed_ts/ holds that pair: "
+                      f"pass --temps_checkpoint")
+            return 1
+        temps = tuner.temps
+        print(f"--rank_cache: {n_pairs} complete Joint runs found in the cache (batch size {ctx.batch_size}, "
+              f"{args.num_samples or 'all'} images per stream, seeds {seeds}), scored with T_L={temps.T_l}, T_S={temps.T_s} "
+              f"({temps.folder.name}), the temperatures they were made with")
+        if len(info["temperatures"]) > 1:
+            print("  the cache holds Joint runs for several temperature pairs (runs valid under each): "
+                  + ", ".join(f"T_L={a}, T_S={b}: {n}" for (a, b), n in info["temperatures"])
+                  + "; the pair with most runs is used, --temps_checkpoint DIR chooses another")
+        if info["left_out"]:
+            print(f"  {info['left_out']} other Joint runs of this duo are cached with other settings (another input pipeline, "
+                  f"temperatures, batch size, seed, --num_samples or optimizer) and are left out")
+        for label in info["incomplete"]:
+            print(f"  left out, streams missing: {label}")
+        for label in info["no_reference"]:
+            print(f"  reference not cached (it depends on the current independent rates), its comparison is skipped: {label}")
+        lrs_large = sorted({j.lr_large for j in jobs if j.kind == "joint"})
+        lrs_small = sorted({j.lr_small for j in jobs if j.kind == "joint"})
+    else:
+        temps = AM.resolve_temperatures(ctx, AM.temperature_spec(args.duo, args.tta, args.tta_kwargs, args.num_samples),
+                                        args.temps_checkpoint, report_only=args.report_only)
+        print(f"static duo: T_L = {temps.T_l}, T_S = {temps.T_s}  ({temps.folder})")
+        if args.temps_only:
+            return 0
+        tuner = JL.Tuner(ctx, args.tta, args.tta_kwargs, args.num_samples, temps)
+        lrs_large = JL.lr_axis(current["LARGE"], args.mults, args.lrs_large)
+        lrs_small = JL.lr_axis(current["SMALL"], args.mults, args.lrs_small)
+        jobs = JL.build_jobs(lrs_large, lrs_small, seeds)
+        print(f"{len(jobs)} runs: {len(jobs) - 2 * len(seeds)} grid points + frozen and Independent both (references), "
+              f"batch size {ctx.batch_size}, {args.num_samples or 'all'} images per stream, seeds {seeds}")
     if not args.report_only:
         tuner.compute(select_jobs(jobs, lambda j: j.label, args.shard, args.only))
     gaps = tuner.missing(jobs)
@@ -136,7 +170,11 @@ def main() -> int:
     if args.num_samples:
         print("capped run (--num_samples): the best pair is not recorded, no follow-up command")
         return 0
-    print(JL.record_best(out / "results.json", ctx.g.path("duo_lrs")))
+    if args.rank_cache and not args.record:
+        print(f"ranked what is cached; the best pair is not recorded: add --record, or run "
+              f"python -m src.utils.duo_lrs --import_joint {out / 'results.json'}")
+    else:
+        print(JL.record_best(out / "results.json", ctx.g.path("duo_lrs")))
     print(f"\nscore the best pair on the 15 test corruptions:\n{command}")
     return 0
 

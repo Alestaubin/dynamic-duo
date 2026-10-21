@@ -182,6 +182,22 @@ def load_result(directory: Path, key: str) -> dict | None:
     return json.loads(p.read_text()) if p.is_file() else None
 
 
+def discover_trials(directory: Path) -> list[Trial]:
+    """Every distinct trial stored in `directory`, whatever grid flags produced it (`--rank_cache`): name and optimizer are read back
+    from the result files. Which of them belong to the current settings is decided by `trial_key`, as for any trial."""
+    seen: dict[str, Trial] = {}
+    for p in sorted(Path(directory).glob("*.json")):
+        r = json.loads(p.read_text())
+        seen.setdefault(json.dumps([r["trial"], r["optim"]], sort_keys=True), Trial(r["trial"], r["optim"]))
+    return list(seen.values())
+
+
+def grid_order(t: Trial) -> tuple:
+    """A stable order for discovered trials: optimizer, learning rate, then momentum or beta."""
+    o = t.optim
+    return (o["METHOD"], o["LR"], o.get("MOMENTUM", o.get("BETA", 0.0)))
+
+
 def rank(results: Sequence[dict]) -> list[dict]:
     """The adapting trials, best macro accuracy first (ties: the grid order, i.e. the stable sort)."""
     return sorted((r for r in results if r["optim"] is not None), key=lambda r: -r["macro_accuracy"])
@@ -223,9 +239,10 @@ def tuned_record(best: dict, frozen: dict, *, model: str, tta: str, norm: str, b
     return {**rec, "written_by": "scripts/02_tune_tta.py"}
 
 
-def write_tuned(root: Path, record: dict, duos: list[str] | None = None) -> list[Path]:
-    """Record the winner in the indep learning-rate file of every duo that uses the model (all of them, or `duos`)."""
-    return duo_lrs.record_tuned(record["model"], record["tta"], record, root=root, duos=duos)
+def write_tuned(root: Path, record: dict, duos: list[str] | None = None, replaced: list[dict] | None = None) -> list[Path]:
+    """Record the winner in the indep learning-rate file of every duo that uses the model (all of them, or `duos`);
+    `replaced` collects the entries it overwrote (duo_lrs.record_tuned)."""
+    return duo_lrs.record_tuned(record["model"], record["tta"], record, root=root, duos=duos, replaced=replaced)
 
 
 if __name__ == "__main__":

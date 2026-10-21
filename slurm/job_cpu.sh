@@ -8,6 +8,7 @@
 #SBATCH --mem=32G
 #SBATCH --time=00:30:00
 #SBATCH --account=aip-evanesce
+#SBATCH --qos=high             # the author's standing rule: every job runs at QOS high (sbatch --qos=normal overrides it)
 
 # Like slurm/job.sh (runs any repo script inside a SLURM job, submit from the repo root) but WITHOUT a GPU, for
 # steps that never run a model: ranking stored tuning trials, rendering tables from the cache, setup checks.

@@ -221,9 +221,11 @@ def entry_from_record(record: dict) -> dict:
     return {k: v for k, v in e.items() if v is not None}
 
 
-def record_tuned(model: str, tta: str, record: dict, root=None, duos_dir=None, duos: list[str] | None = None) -> list[Path]:
+def record_tuned(model: str, tta: str, record: dict, root=None, duos_dir=None, duos: list[str] | None = None,
+                 replaced: list[dict] | None = None) -> list[Path]:
     """Record the winner of a tuning run in the indep file of EVERY duo that uses `model` (on the side(s) where it appears; `duos`
-    restricts which). Returns the files written; [] if no duo uses the model."""
+    restricts which). Returns the files written; [] if no duo uses the model. An entry that already held other optimizer settings
+    is replaced, and described in `replaced` if given: {"duo", "side", "old": OPTIM, "new": OPTIM, "note": its note or None}."""
     duos_dir = Path(duos_dir or DUO_DIR)
     entry = entry_from_record(record)
     written = []
@@ -238,6 +240,9 @@ def record_tuned(model: str, tta: str, record: dict, root=None, duos_dir=None, d
         init_indep(spec["NAME"], root, duos_dir)
         doc = load(spec["NAME"], "indep", root)
         for s in sides:
+            old = doc["methods"].get(tta, {}).get(s)
+            if old is not None and old["OPTIM"] != entry["OPTIM"] and replaced is not None:
+                replaced.append({"duo": spec["NAME"], "side": s, "old": old["OPTIM"], "new": entry["OPTIM"], "note": old.get("note")})
             doc["methods"].setdefault(tta, {})[s] = copy.deepcopy(entry)
         written.append(_write(doc, root))
     return written
@@ -405,6 +410,13 @@ if __name__ == "__main__":
         assert resolve(spec, "indep", "eta", root) == {"LARGE": adam(1e-4), "SMALL": optim(2.5e-4)}, "per TTA method: eta keeps the defaults"
         assert resolve(_duo_spec("other", duos), "indep", "tent", root)["SMALL"] == optim(2.5e-3), "the shared model's rate reached the other duo"
         assert resolve(_duo_spec("other", duos), "indep", "tent", root)["LARGE"] != optim(5e-5), "a model of another duo is untouched"
+        gone = []
+        record_tuned("vit", "tent", {**rec("vit", "tent", "LN", 1e-4), "note": "x"}, root, duos, replaced=gone)
+        assert [(g["duo"], g["side"], g["old"]["LR"], g["new"]["LR"]) for g in gone] == [("main", "large", 5e-5, 1e-4)], gone
+        gone.clear()
+        record_tuned("vit", "tent", {**rec("vit", "tent", "LN", 1e-4), "note": "x"}, root, duos, replaced=gone)
+        assert gone == [], "recording the same settings again replaces nothing"
+        record_tuned("vit", "tent", rec("vit", "tent", "LN", 5e-5), root, duos)                 # back to the value the checks below expect
         e = load("main", "indep", root)["methods"]["tent"]["large"]
         assert e["source"] == "scripts/02_tune_tta.py" and e["tuned_on"] == ["a/s5", "b/s5"] and e["macro_accuracy"] == 0.5 and e["seed"] == 0
         assert list(load("main", "indep", root)["methods"]["tent"]) == ["large", "small"]

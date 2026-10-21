@@ -7,6 +7,9 @@ from stored logits: each (proxy, b_t, beta) is a live run over the held-out stre
 The members use one base algorithm's settings (Tent, the learning rates given), the temperatures and the source statistics of the stateful proxies
 come from the offline evaluation of that algorithm (its `.temps.json`), and each proxy is run at the b_t that won its Vanilla DD selection.
 
+    --lr_large LR --lr_small LR   the members' learning rates (SGD, momentum 0.9). Omitted, both are the duo's joint regime
+                                  (cfgs/duo_lrs/<duo>__joint.yaml, the pair of 02b_tune_joint_lr.py; NotTuned while pending)
+    --streams NAME [...]          default heldout; `test` = the 15 test corruptions, `clean` = the validation images
     --cells proxy:b_t [...]       the proxies to run, each with its b_t (from the Stage E selection)
     --betas B [...]               default 0.1 0.25 0.5 1 2 4; add 0 once for the beta = 0 reference (any cell)
     --eval PREFIX                 the offline evaluation whose temperatures and statistics to use (<dir>/<name>, without .rows.csv)
@@ -28,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
 
+from src.experiments import adaptation_modes as AM
 from src.experiments import cli
 from src.experiments.grids import sgd_optim
 from src.experiments.joint_dd import run_joint_dd
@@ -38,8 +42,8 @@ from src.reliability.proxies.pure import PROXIES
 def main() -> int:
     ap = cli.add_common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter), tta=False)
     ap.add_argument("--streams", nargs="+", default=["heldout"], metavar="NAME")
-    ap.add_argument("--lr_large", type=float, required=True)
-    ap.add_argument("--lr_small", type=float, required=True)
+    ap.add_argument("--lr_large", type=float, default=None)
+    ap.add_argument("--lr_small", type=float, default=None)
     ap.add_argument("--momentum", type=float, default=0.9)
     ap.add_argument("--eval", required=True, metavar="PREFIX")
     ap.add_argument("--cells", nargs="+", required=True, metavar="PROXY:B_T")
@@ -47,7 +51,13 @@ def main() -> int:
     args = ap.parse_args()
 
     ctx, seeds, out = cli.setup(args, "run_joint_dd")
-    ctx = with_optim(ctx, large=sgd_optim(args.lr_large, args.momentum), small=sgd_optim(args.lr_small, args.momentum))
+    if (args.lr_large is None) != (args.lr_small is None):
+        ap.error("give both --lr_large and --lr_small, or neither (then the duo's joint regime of cfgs/duo_lrs/ is used)")
+    if args.lr_large is None:
+        ctx = AM.joint_context(ctx, "tent")
+        args.lr_large, args.lr_small = (ctx.duo[side]["OPTIM"]["LR"] for side in ("LARGE", "SMALL"))
+    else:
+        ctx = with_optim(ctx, large=sgd_optim(args.lr_large, args.momentum), small=sgd_optim(args.lr_small, args.momentum))
     segments = stream_segments(args.streams, ctx.g)
     meta = json.loads(Path(f"{args.eval}.temps.json").read_text())
     T_l, T_s = meta["temps"]["heldout"]
