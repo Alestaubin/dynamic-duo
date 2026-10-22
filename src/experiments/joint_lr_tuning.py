@@ -19,8 +19,13 @@ says what the Joint signal buys at the SAME rates (grid point x1,x1 against Inde
 on top of it (the best point against x1,x1).
 
 Temperatures. The duo entropy depends on T_L and T_S, so they are fixed before the grid and shared by every point (a
-pair per point would change the objective being compared): script 03's Fixed TS, fitted on the 4 held-out corruptions on
-independently adapted members at the current rates, or any JointFixedTS checkpoint. The same pair scores every point.
+pair per point would change the objective being compared): the Fixed TS fitted on the 4 held-out corruptions on the FROZEN
+models' logits (adaptation_modes.temperature_spec; the author's decision of 2026-10-22), or any JointFixedTS checkpoint. The
+same pair scores every point.
+
+Criterion. The score is the whole-stream online accuracy (the metric the paper reports, on pre-update predictions). Next to it
+every point carries its LATE accuracy (the last 20% of each stream); a point whose late duo accuracy is below the frozen
+duo's is ruled out by `rank(late_floor=...)`: an adaptation that ends worse than not adapting is drift, however good its mean.
 
 A learning rate that is too large can make the logits non-finite, which the member cache refuses to store. Such a run is
 recorded as DIVERGED (a marker next to its cache), counts as complete, and ranks below every finite one.
@@ -40,6 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
 import pandas as pd
 
 from src.experiments import adaptation_modes as AM
@@ -166,8 +172,9 @@ def cached_temperatures(ctx: Context, tta: str, num_samples: int | None, seeds: 
 
 
 def find_temps_checkpoint(ctx: Context, tta: str, t_l: float, t_s: float) -> Path | None:
-    """The held-out JointFixedTS checkpoint of this duo and TTA method that holds the pair (T_L, T_S), if there is one."""
-    for folder in sorted((ctx.g.path("checkpoints") / "fixed_ts").glob(f"heldout_{ctx.duo['NAME']}_{tta}_*")):
+    """The held-out JointFixedTS checkpoint of this duo (fitted on the frozen models: it does not depend on the TTA method, `tta`
+    is kept for the callers) that holds the pair (T_L, T_S), if there is one."""
+    for folder in sorted((ctx.g.path("checkpoints") / "fixed_ts").glob(f"heldout_{ctx.duo['NAME']}_frozen_*")):
         try:
             tl, ts = AM.load_temperatures(folder)
         except (OSError, KeyError, ValueError):
@@ -266,34 +273,58 @@ class Tuner:
         every job complete (FileNotFoundError naming the gaps otherwise)."""
         gate = GateSpec("duo", kind="fixed_ts", fixed_ts=str(self.temps.folder))
         rows: dict[tuple, list[dict]] = defaultdict(list)
+        late: dict[tuple, list[dict]] = defaultdict(list)
         diverged = set()
         for job in jobs:
             if self._marker(job).is_file():
                 diverged.add(job.point)
                 continue
-            rows[job.point] += evaluate(self.spec(job), self.context(job), [gate], report_only=True,
-                                        segments=self.segments).rows
-        return {**{p: summarize(r) for p, r in rows.items() if p not in diverged},
+            res = evaluate(self.spec(job), self.context(job), [gate], report_only=True, segments=self.segments)
+            rows[job.point] += res.rows
+            late[job.point].append({series: late_accuracy(res, series) for series in ("duo", "large", "small")})
+        return {**{p: summarize(r, late[p]) for p, r in rows.items() if p not in diverged},
                 **{p: DIVERGED_SUMMARY for p in diverged}}
 
 
 # ------------------------------------------------------------------------------------------------------ scoring
 
 NAN = float("nan")
-DIVERGED_SUMMARY = {"diverged": True, "duo": NAN, "large": NAN, "small": NAN, "duo_ece": NAN, "duo_nll": NAN,
-                    "worst": NAN, "worst_stream": None, "streams": {}}
+LATE_FRAC = 0.2           # the last fraction of each stream that the late accuracy covers
+DIVERGED_SUMMARY = {"diverged": True, "n_seeds": 0, "duo": NAN, "large": NAN, "small": NAN, "duo_ece": NAN, "duo_nll": NAN,
+                    "worst": NAN, "worst_stream": None, "streams": {}, "late_duo": NAN, "late_large": NAN, "late_small": NAN}
 
 
-def summarize(rows: Sequence[dict]) -> dict:
+def late_accuracy(res, series: str, frac: float = LATE_FRAC) -> dict[str, float]:
+    """{segment: accuracy over the last `frac` of the segment's samples (whole batches, from the end), in the order the
+    stream delivered them} for `series` of an `evaluate` result (its per-batch curves)."""
+    curve = res.curves[series]
+    n, k = np.asarray(curve["batch_n"]), np.asarray(curve["batch_correct"])
+    starts = [b for _, b in res.segment_batches] + [len(n)]
+    out = {}
+    for (label, _), a, b in zip(res.segment_batches, starts[:-1], starts[1:]):
+        nn, kk = n[a:b], k[a:b]
+        need, got, i = frac * nn.sum(), 0, len(nn)
+        while i > 0 and got < need:
+            i -= 1
+            got += nn[i]
+        out[label] = float(kk[i:].sum() / nn[i:].sum())
+    return out
+
+
+def summarize(rows: Sequence[dict], late: Sequence[dict] | None = None) -> dict:
     """One grid point from the rows of `evaluate` (series "duo", "large", "small"; one row per stream and seed).
-    Macro means: over the streams first, then over the seeds."""
+    Macro means: over the streams first, then over the seeds. `late`: one {series: late_accuracy(...)} per seed (the
+    `late_*` fields are the same macro means of the last 20% of each stream; NaN without it)."""
     df = pd.DataFrame(rows)
     macro = df.groupby(["seed", "series"])[["accuracy", "ece", "nll"]].mean().groupby("series").mean()
     duo_streams = df[df["series"] == "duo"].groupby("segment")["accuracy"].mean()
-    return {"diverged": False, "duo": float(macro.loc["duo", "accuracy"]), "large": float(macro.loc["large", "accuracy"]),
-            "small": float(macro.loc["small", "accuracy"]), "duo_ece": float(macro.loc["duo", "ece"]),
-            "duo_nll": float(macro.loc["duo", "nll"]), "worst": float(duo_streams.min()),
-            "worst_stream": str(duo_streams.idxmin()), "streams": {k: float(v) for k, v in duo_streams.items()}}
+    out = {"diverged": False, "n_seeds": int(df["seed"].nunique()), "duo": float(macro.loc["duo", "accuracy"]), "large": float(macro.loc["large", "accuracy"]),
+           "small": float(macro.loc["small", "accuracy"]), "duo_ece": float(macro.loc["duo", "ece"]),
+           "duo_nll": float(macro.loc["duo", "nll"]), "worst": float(duo_streams.min()),
+           "worst_stream": str(duo_streams.idxmin()), "streams": {k: float(v) for k, v in duo_streams.items()}}
+    for series in ("duo", "large", "small"):
+        out[f"late_{series}"] = float(np.mean([np.mean(list(per[series].values())) for per in late])) if late else NAN
+    return out
 
 
 def joint_points(summaries: dict[tuple, dict]) -> list[dict]:
@@ -301,11 +332,22 @@ def joint_points(summaries: dict[tuple, dict]) -> list[dict]:
     return [{"lr_large": p[1], "lr_small": p[2], **s} for p, s in summaries.items() if p[0] == "joint"]
 
 
-def rank(points: Sequence[dict]) -> list[dict]:
+def rank(points: Sequence[dict], late_floor: float | None = None) -> list[dict]:
     """Finite points, best duo accuracy first. A tie goes to the smaller pair of rates (the smaller product, then the
-    smaller large-member rate), the repo's convention of preferring the more conservative setting."""
+    smaller large-member rate), the repo's convention of preferring the more conservative setting. With `late_floor` (the frozen
+    duo's late accuracy) a point whose late duo accuracy is below it is ruled out (`guard_excluded` lists them); if that
+    would leave nothing, the guard is dropped (the caller says so)."""
     finite = [p for p in points if not p["diverged"]]
+    if late_floor is not None and (kept := [p for p in finite if not p.get("late_duo", NAN) < late_floor]):
+        finite = kept
     return sorted(finite, key=lambda p: (-round(p["duo"], 12), p["lr_large"] * p["lr_small"], p["lr_large"]))
+
+
+def guard_excluded(points: Sequence[dict], late_floor: float | None) -> list[dict]:
+    """The finite points that `rank(late_floor=...)` rules out."""
+    if late_floor is None:
+        return []
+    return [p for p in points if not p["diverged"] and p.get("late_duo", NAN) < late_floor]
 
 
 def edge_warnings(best: dict, lrs_large: Sequence[float], lrs_small: Sequence[float]) -> list[str]:
@@ -380,7 +422,9 @@ def result_rows(summaries: dict[tuple, dict], ranked: Sequence[dict]) -> list[di
         rows.append({"rank": place.get((lr_l, lr_s)) if kind == "joint" else None, "kind": kind, "lr_large": lr_l,
                      "lr_small": lr_s, "diverged": s["diverged"], "duo_acc": s["duo"], "worst_acc": s["worst"],
                      "worst_stream": s["worst_stream"], "large_acc": s["large"], "small_acc": s["small"],
-                     "duo_ece": s["duo_ece"], "duo_nll": s["duo_nll"], **{f"acc/{k}": v for k, v in s["streams"].items()}})
+                     "duo_ece": s["duo_ece"], "duo_nll": s["duo_nll"], "late_duo": s.get("late_duo", NAN),
+                     "late_large": s.get("late_large", NAN), "late_small": s.get("late_small", NAN),
+                     **{f"acc/{k}": v for k, v in s["streams"].items()}})
     return sorted(rows, key=lambda r: (r["kind"] != "joint", r["rank"] is None, r["rank"] or 0, r["lr_large"] or 0,
                                        r["lr_small"] or 0, r["kind"]))
 
@@ -443,9 +487,12 @@ def add_args(ap) -> None:
                          "nothing is computed (no GPU). The best pair is not recorded unless --record is given")
     ap.add_argument("--record", action="store_true",
                     help="with --rank_cache: record the best pair in cfgs/duo_lrs/<duo>__joint.yaml (a full --report_only run does)")
+    ap.add_argument("--min_seeds", type=int, default=1, metavar="N",
+                    help="only grid points run with at least N of the --seeds compete (the final choice among the finalists, which are the "
+                         "only points run on every seed)")
     ap.add_argument("--temps_checkpoint", default=None, metavar="DIR",
                     help="JointFixedTS checkpoint (a folder with config.json) for the duo's temperatures; default: "
-                         "fitted on the 4 held-out corruptions, as in script 03")
+                         "the Fixed TS fitted on the FROZEN models (never refitted per pair)")
     ap.add_argument("--temps_only", action="store_true",
                     help="fit and store the temperatures, then stop (run this once before a --shard array so that "
                          "no two tasks fit them at the same time)")
@@ -512,11 +559,12 @@ if __name__ == "__main__":
         mine = tuner.spec(j).fingerprint(tuner.context(j).duo, 32, "masked")
         theirs = AM.mode_spec(AM.MODE_BY_KEY["joint"], "tiny", "tent", None, 0, None, temps).fingerprint(ctx.duo, 32, "masked")
         assert mine == theirs, "the tuner's Joint run must be script 03's Joint run"
-        assert tuner.spec(Job("indep", 0)).fingerprint(ctx.duo, 32, "masked") == tspec.fingerprint(ctx.duo, 32, "masked"), \
-            "the Independent reference is the run the temperatures were fitted on (already cached)"
+        assert tuner.spec(Job("frozen", 0)).fingerprint(ctx.duo, 32, "masked") == tspec.fingerprint(ctx.duo, 32, "masked") and \
+            run_dir(tuner.spec(Job("frozen", 0)), ctx) == run_dir(tspec, ctx), \
+            "the frozen reference is the run the temperatures were fitted on (already cached)"
 
         # ---- running: nothing is cached, then everything; a repeat recomputes nothing --------------------------------
-        assert set(tuner.missing(grid)) == {j.label for j in grid if j.kind != "indep"}, "the temperatures' fit cached 'indep'"
+        assert set(tuner.missing(grid)) == {j.label for j in grid if j.kind != "frozen"}, "the temperatures' fit cached 'frozen'"
         try:
             tuner.score(grid)
             raise AssertionError("scoring an incomplete grid must fail, not guess")
@@ -603,6 +651,27 @@ if __name__ == "__main__":
         assert rank_cache_setup(ctx, "tent", None, None, [0], str(temps.folder), held)[0].temps.folder == temps.folder, "--temps_checkpoint"
         assert find_temps_checkpoint(ctx, "tent", temps.T_l, temps.T_s) == temps.folder and find_temps_checkpoint(ctx, "tent", 9.9, 9.9) is None
 
+    # ---- the late-stream accuracy: the last 20% of each stream, whole batches from the end ---------------------------------
+    class _Res:
+        pass
+    res = _Res()
+    res.curves = {"duo": {"batch_n": [10] * 6, "batch_correct": [9, 9, 9, 1, 1, 1]}}
+    res.segment_batches = [("a", 0), ("b", 3)]
+    assert late_accuracy(res, "duo", 0.2) == {"a": 0.9, "b": 0.1}, "20% of 30 samples is the last batch"
+    res.curves = {"duo": {"batch_n": [10] * 6, "batch_correct": [9, 5, 1, 2, 2, 2]}}
+    assert late_accuracy(res, "duo", 0.7) == {"a": 0.5, "b": 0.2} and late_accuracy(res, "duo", 1.0)["a"] == 0.5
+    res.curves = {"duo": {"batch_n": [10, 10, 4, 10, 10, 6], "batch_correct": [9, 5, 1, 2, 2, 6]}}
+    la = late_accuracy(res, "duo", 0.2)
+    assert abs(la["a"] - 6 / 14) < 1e-12 and la["b"] == 1.0, "20% of 24 samples is 4.8: the 4-sample last batch is not enough, a second one is added"
+
+    # ---- the guard: an adaptation that ends worse than the frozen duo is ruled out, however good its mean ------------------
+    gp = [dict(lr_large=1e-4, lr_small=1e-3, diverged=False, duo=.60, late_duo=.40),
+          dict(lr_large=2e-4, lr_small=1e-3, diverged=False, duo=.58, late_duo=.55),
+          dict(lr_large=4e-4, lr_small=1e-3, diverged=True, duo=NAN, late_duo=NAN)]
+    assert rank(gp)[0]["lr_large"] == 1e-4 and rank(gp, late_floor=0.5)[0]["lr_large"] == 2e-4
+    assert [p["lr_large"] for p in guard_excluded(gp, 0.5)] == [1e-4] and guard_excluded(gp, None) == []
+    assert rank(gp, late_floor=0.9)[0]["lr_large"] == 1e-4, "a guard that would rule out everything is dropped (the caller says so)"
+
     # ---- ranking, ties, edges, tables on synthetic summaries -----------------------------------------------------
     def fake(duo, **kw):
         return {**DIVERGED_SUMMARY, "diverged": False, "duo": duo, "large": duo - .05, "small": duo - .1, "worst": duo - .02,
@@ -638,7 +707,7 @@ if __name__ == "__main__":
           for sg, accs in vals.items() for sr, a in zip(("duo", "large", "small"), accs)]
     sm = summarize(rr)
     assert abs(sm["duo"] - (((.6 + .2) / 2 + (.8 + .4) / 2) / 2)) < 1e-12 and sm["worst_stream"] == "s2"
-    assert abs(sm["worst"] - .3) < 1e-12 and abs(sm["small"] - .4) < 1e-12
+    assert abs(sm["worst"] - .3) < 1e-12 and abs(sm["small"] - .4) < 1e-12 and sm["n_seeds"] == 2, "the seeds a point was run on are counted"
 
     # ---- the follow-up command: Joint only, the tuning's own temperatures ---------------------------------------------
     cmd = evaluate_command(duo="vitb16_rn50v1", tta="tent", tta_kwargs=None, bn=True, lr_large=2e-4, lr_small=5e-4,

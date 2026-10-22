@@ -288,11 +288,13 @@ def load_stream(pair, stem: str) -> dict:
 @torch.no_grad()
 def run_pair(pair, heldout: Sequence[str], test: Sequence[str], cfg: GridConfig = GridConfig(), *,
              clean_stem: str | None = None, source_stem: str | None = None, extra: Sequence[str] = (),
-             device: torch.device | str | None = None) -> dict:
+             device: torch.device | str | None = None, heldout_temps: tuple[float, float] | None = None) -> dict:
     """Evaluate a stored pair (logit_store.PairView) on the held-out streams, the test streams and `extra` ones (e.g. the clean
     validation stream, reported separately).
 
     heldout        stems whose pooled logits fit the held-out TS (and are evaluated too)
+    heldout_temps  (T_L, T_S) to use as the held-out TS instead of fitting it on this pair's logits: the Fixed TS fitted on the FROZEN
+                   models (adaptation_modes.temperature_spec), the author's decision of 2026-10-22 so that only adaptation differs
     clean_stem     the clean held-out slice of the training images: fits the clean TS
     source_stem    the same slice: fits the source statistics of the stateful proxies (default: clean_stem). Without one,
                    the stateful proxies are skipped
@@ -300,10 +302,13 @@ def run_pair(pair, heldout: Sequence[str], test: Sequence[str], cfg: GridConfig 
     from src.utils.device import get_device
     device = get_device(device)
     held = [load_stream(pair, s) for s in heldout]
-    pooled = [torch.cat([h[k] for h in held]).to(device) for k in ("z_l", "z_s", "labels")]
-    tl, ts, _ = O.fit_temperatures(pooled[0], pooled[1], pooled[2].long())
-    temps = {"heldout": (float(tl), float(ts))}
-    del pooled
+    if heldout_temps is not None:
+        temps = {"heldout": (float(heldout_temps[0]), float(heldout_temps[1]))}
+    else:
+        pooled = [torch.cat([h[k] for h in held]).to(device) for k in ("z_l", "z_s", "labels")]
+        tl, ts, _ = O.fit_temperatures(pooled[0], pooled[1], pooled[2].long())
+        temps = {"heldout": (float(tl), float(ts))}
+        del pooled
     source_stem = source_stem or clean_stem
     stats = None
     if clean_stem or source_stem:

@@ -1,0 +1,85 @@
+# Learning rates of duo `convnextb_deits`, INDEP regime: each member adapts on its OWN entropy (engine mode both_indep; Vanilla DD).
+# The one place these numbers live (cfgs/duos/ only names the models). `methods`: what was tuned, per TTA method and per member,
+# recorded by scripts/02_tune_tta.py and 05_select_member_lr.py (src/utils/duo_lrs.py::record_tuned); `defaults`: what a member
+# runs with when nothing is tuned for the method.
+duo: convnextb_deits
+regime: indep
+engine_mode: both_indep
+defaults:
+  large:
+    model: convnext_base
+    norm: LN
+    OPTIM:
+      METHOD: SGD
+      STEPS: 1
+      LR: 0.0001
+      MOMENTUM: 0.9
+      DAMPENING: 0.0
+      WD: 0.0
+      NESTEROV: false
+    source: placeholder until scripts/02c_tune_indep_pair.py tunes this duo (2026-10-22); never used for results
+  small:
+    model: deit_small
+    norm: LN
+    OPTIM:
+      METHOD: SGD
+      STEPS: 1
+      LR: 0.0001
+      MOMENTUM: 0.9
+      DAMPENING: 0.0
+      WD: 0.0
+      NESTEROV: false
+    source: placeholder until scripts/02c_tune_indep_pair.py tunes this duo (2026-10-22); never used for results
+methods:
+  tent:
+    large:
+      model: convnext_base
+      norm: LN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 1.25e-05
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02c_tune_indep_pair.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seeds: &id001
+      - 0
+      - 1
+      - 2
+      temperatures: heldout_convnextb_deits_frozen_3a9c254b15d4
+      note: tuned as a PAIR for this duo (static-duo accuracy)
+      duo_macro_accuracy: 0.60899
+      late_duo_accuracy: 0.62041
+      worst_stream_accuracy: 0.38408
+    small:
+      model: deit_small
+      norm: LN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.0008
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02c_tune_indep_pair.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seeds: *id001
+      temperatures: heldout_convnextb_deits_frozen_3a9c254b15d4
+      note: tuned as a PAIR for this duo (static-duo accuracy)
+      duo_macro_accuracy: 0.60899
+      late_duo_accuracy: 0.62041
+      worst_stream_accuracy: 0.38408

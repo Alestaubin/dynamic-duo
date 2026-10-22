@@ -1,0 +1,84 @@
+# Learning rates of duo `convnextb_deits`, SINGLE regime: each model tuned ALONE on its own entropy (the single-model Tent baseline), its optimum
+# interior to the grid and kept for every test. Written by scripts/02c_tune_indep_pair.py (individual optima). The independent duo's PAIR
+# lives in the indep file, the joint duo's in the joint file; tuning order: single, then indep and joint starting from these rates.
+duo: convnextb_deits
+regime: single
+engine_mode: both_indep
+defaults:
+  large:
+    model: convnext_base
+    norm: LN
+    OPTIM:
+      METHOD: SGD
+      STEPS: 1
+      LR: 0.0001
+      MOMENTUM: 0.9
+      DAMPENING: 0.0
+      WD: 0.0
+      NESTEROV: false
+    source: placeholder until scripts/02c_tune_indep_pair.py tunes this duo (2026-10-22); never used for results
+  small:
+    model: deit_small
+    norm: LN
+    OPTIM:
+      METHOD: SGD
+      STEPS: 1
+      LR: 0.0001
+      MOMENTUM: 0.9
+      DAMPENING: 0.0
+      WD: 0.0
+      NESTEROV: false
+    source: placeholder until scripts/02c_tune_indep_pair.py tunes this duo (2026-10-22); never used for results
+methods:
+  tent:
+    large:
+      model: convnext_base
+      norm: LN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 1.25e-05
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02c_tune_indep_pair.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seeds: &id001
+      - 0
+      - 1
+      - 2
+      temperatures: heldout_convnextb_deits_frozen_3a9c254b15d4
+      note: each model tuned ALONE
+      macro_accuracy: 0.54699
+      late_accuracy: 0.53745
+      frozen_macro_accuracy: 0.49583
+    small:
+      model: deit_small
+      norm: LN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.0008
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02c_tune_indep_pair.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seeds: *id001
+      temperatures: heldout_convnextb_deits_frozen_3a9c254b15d4
+      note: each model tuned ALONE
+      macro_accuracy: 0.56767
+      late_accuracy: 0.58474
+      frozen_macro_accuracy: 0.47752

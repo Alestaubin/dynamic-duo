@@ -1,0 +1,11 @@
+# Close to the main duo (generalization test, author 2026-10-22): ViT-B/16 (large) + ResNet-34 (small, torchvision IMAGENET1K_V1). Only the small member
+# changes, so the ViT-B/16 members stored for vitb16_rn50v1 (per-member logit store) are reused. Learning rates: cfgs/duo_lrs/vitb16_rn34__*.yaml.
+NAME: vitb16_rn34
+
+LARGE:
+  NAME: vit_b_16
+  NORM: LN
+
+SMALL:
+  NAME: resnet34
+  NORM: BN

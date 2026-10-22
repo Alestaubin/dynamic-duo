@@ -30,6 +30,10 @@ splits the grid, one point per task:
 (--bn matters only for the frozen reference: a frozen BatchNorm model then runs on the test batch's statistics; the Joint
 and Independent runs adapt both members, which always use batch statistics.)
 
+Criterion: whole-stream accuracy of the static duo (the reported metric); every point also reports its LATE accuracy (the last 20% of
+each stream), and a point that ends below the frozen duo's late accuracy is ruled out (drift). The temperatures are the Fixed TS fitted
+on the FROZEN models (adaptation_modes.temperature_spec), never refitted per pair.
+
 Unlike 02 and 05 this does NOT touch the indep file of cfgs/duo_lrs/ (those rates also set every cache key of the independent
 modes), whereas these rates belong to the Joint mode alone: the ranking run records the best pair itself in
 cfgs/duo_lrs/<duo>__joint.yaml (what script 03 and the reset scripts read), replacing the pair that was there for that TTA method
@@ -129,15 +133,33 @@ def main() -> int:
 
     summaries = tuner.score(jobs)
     points = JL.joint_points(summaries)
-    ranked = JL.rank(points)
+    if args.min_seeds > 1:
+        dropped = [p for p in points if p.get("n_seeds", 1) < args.min_seeds]
+        points = [p for p in points if p.get("n_seeds", 1) >= args.min_seeds]
+        print(f"--min_seeds {args.min_seeds}: {len(points)} grid points were run on that many seeds and compete; {len(dropped)} others are left out")
+        lrs_large = sorted({p["lr_large"] for p in points}) or lrs_large
+        lrs_small = sorted({p["lr_small"] for p in points}) or lrs_small
+    frozen = summaries.get(("frozen", None, None))
+    floor = None if frozen is None else frozen["late_duo"]           # the guard: ending worse than the frozen duo is drift
+    ranked = JL.rank(points, late_floor=floor)
     if not ranked:
         print("every grid point diverged (non-finite logits): the learning rates are too large; use smaller --mults")
         return 1
     best = ranked[0]
+    excluded = JL.guard_excluded(points, floor)
+    if floor is not None:
+        print(f"late-stream guard: the frozen duo's accuracy on the last {int(100 * JL.LATE_FRAC)}% of each stream is "
+              f"{100 * floor:.2f}; {len(excluded)} of {len(points)} grid points end below it and are ruled out"
+              + (": " + ", ".join(f"({p['lr_large']:g}, {p['lr_small']:g})" for p in excluded[:12]) + (" ..." if len(excluded) > 12 else "")
+                 if excluded else ""))
+        if excluded and len(excluded) == len([p for p in points if not p["diverged"]]):
+            print("WARNING: every finite point ends below the frozen duo, so the guard was dropped")
 
     print(f"\nduo accuracy (%), macro over the 4 held-out streams; rows: large member's rate, columns: small member's; "
           f"* = best\n{JL.grid_table(points, lrs_large, lrs_small, 'duo', best)}")
     print(f"\naccuracy (%) of the worst stream\n{JL.grid_table(points, lrs_large, lrs_small, 'worst', best)}")
+    print(f"\nlate accuracy (%): the last {int(100 * JL.LATE_FRAC)}% of each stream (macro)\n"
+          f"{JL.grid_table(points, lrs_large, lrs_small, 'late_duo', best)}")
     print(f"\n{JL.ranking_table(ranked)}")
     print(f"\nbest: large {best['lr_large']:g}, small {best['lr_small']:g}: duo {100 * best['duo']:.2f}, worst stream "
           f"{100 * best['worst']:.2f} ({best['worst_stream']}), large alone {100 * best['large']:.2f}, "
@@ -163,7 +185,9 @@ def main() -> int:
         "temperatures": {"T_l": temps.T_l, "T_s": temps.T_s, "checkpoint": str(temps.folder)},
         "optim": {side.lower(): ctx.duo[side]["OPTIM"] for side in ("LARGE", "SMALL")},
         "current_lrs": {"large": base[0], "small": base[1]}, "lrs_large": lrs_large, "lrs_small": lrs_small,
-        "best": {"lr_large": best["lr_large"], "lr_small": best["lr_small"], "duo": best["duo"], "worst": best["worst"]},
+        "best": {"lr_large": best["lr_large"], "lr_small": best["lr_small"], "duo": best["duo"], "worst": best["worst"],
+                 "late_duo": best["late_duo"]},
+        "late_floor": floor, "guard_excluded": [[p["lr_large"], p["lr_small"]] for p in excluded],
         "evaluate_command": command,
         "runs": [{k: None if isinstance(v, float) and v != v else v for k, v in r.items()} for r in rows]}, indent=1))
     print(f"wrote {out / 'ranking.csv'} and {out / 'results.json'}")

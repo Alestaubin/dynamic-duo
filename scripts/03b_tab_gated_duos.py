@@ -20,7 +20,7 @@ both and Joint rows, read from its caches). This script computes nothing on a GP
 
 Writes <paths.paper>/tab_gated_duos__<tag>.tex (accuracy per corruption, with a Clean column that is not part of Avg.) and
 <paths.out>/results/tab_gated_duos/<tag>.csv (every row, clean included), and prints accuracy / ECE / NLL averaged over the
-corruptions. <tag> is the TTA method, the duo unless it is the default, `_bn`, and `_<proxy>_bt<b_t>_beta<beta>`.
+corruptions. <tag> is the TTA method, the duo (always), `_bn`, and `_<proxy>_bt<b_t>_beta<beta>`.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def main() -> int:
     rows += GD.joint_dd_rows(directory, args.duo, tta, rows[0]["protocol_tag"], proxy, args.b_t, args.beta, seeds)
 
     df = pd.DataFrame(rows)
-    tag = (f"{tta}" + ("" if args.duo == ap.get_default("duo") else f"__{args.duo}") + bn_tag(args)
+    tag = (f"{tta}__{args.duo}" + bn_tag(args)
            + f"_{proxy}_bt{args.b_t}_beta{args.beta:g}")
     save_rows(out / f"{tag}.csv", df)
     print("\naccuracy / ECE (%) and NLL, averaged over the 15 corruptions (clean left out)" +

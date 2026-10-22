@@ -31,7 +31,9 @@ by scripts/02b_tune_joint_lr.py, which records its winner there itself; Large / 
 their adapting member's rate of that pair). A duo whose joint pair is not tuned yet makes the duo-entropy modes an ERROR
 (NotTuned), never a silent run at the indep rates; --joint_lr_large LR --joint_lr_small LR run them with rates given by hand (both are
 needed to skip the file; either one alone replaces just that member's). --lr_large / --lr_small replace the own-entropy modes' rates
-the same way (the rest of each member's OPTIM stays). Both tables' captions list both sets of rates and say which modes use which.
+the same way (the rest of each member's OPTIM stays). Independent large / small (one model adapting alone) run with the rates tuned for
+that model ALONE (the single regime); Independent both with the independent duo's pair (the indep regime). Both tables' captions list every
+set of rates and say which modes use which.
 The rates are part of every cache key, so nothing is shared between two settings, and the temperatures (one pair for every mode, fitted
 on members adapted at the own-entropy rates) are fitted again for other own-entropy rates (--temps_only first, as above;
 --temps_checkpoint DIR keeps another pair instead). With any of the four flags the CSV and both tables are named
@@ -85,11 +87,15 @@ def main() -> int:
     if any(AM.MODE_BY_KEY[key].duo_entropy for key in args.modes):
         duo_ctx = AM.joint_context(ctx, args.tta, args.joint_lr_large, args.joint_lr_small)
         print_rates("duo-entropy learning rates", duo_ctx)
+    single_ctx = None         # Independent large / small: one model adapting alone, at the rates tuned for that model alone (single regime)
+    if any(key in AM.SINGLE_MODES for key in args.modes):
+        single_ctx = AM.single_context(ctx, args.tta)
+        print_rates("single-model learning rates (one model adapting alone)", single_ctx)
 
     jobs = AM.mode_jobs(args.duo, args.tta, args.tta_kwargs, seeds, args.num_samples, temps, args.modes)
     if not args.report_only:
-        AM.compute_members(ctx, select_jobs(jobs, AM.job_label, args.shard, args.only), duo_ctx=duo_ctx)
-    gaps = AM.missing(ctx, jobs, duo_ctx)
+        AM.compute_members(ctx, select_jobs(jobs, AM.job_label, args.shard, args.only), duo_ctx=duo_ctx, single_ctx=single_ctx)
+    gaps = AM.missing(ctx, jobs, duo_ctx, single_ctx)
     if gaps:
         for label, streams in gaps.items():
             print(f"{label}: member logits missing for {len(streams)} streams (e.g. {streams[:3]}); "
@@ -98,7 +104,7 @@ def main() -> int:
     if args.shard:
         return 0        # (a shard that finds the cache complete must not render too: with --lr_* the names carry a stamp)
 
-    df = pd.DataFrame(AM.duo_rows(jobs, ctx, temps, duo_ctx=duo_ctx))
+    df = pd.DataFrame(AM.duo_rows(jobs, ctx, temps, duo_ctx=duo_ctx, single_ctx=single_ctx))
     tag = AM.output_tag(args, ap.get_default("duo"), stamp=time.strftime("%Y%m%d-%H%M%S"))
     save_rows(out / f"{tag}.csv", df)
     corruptions, clean = AM.split_clean(df)
@@ -109,9 +115,11 @@ def main() -> int:
     dest = out if args.num_samples else ctx.g.path("paper")       # a capped run (smoke test) must not overwrite the paper's
     source = "scripts/03_tab_adaptation_modes.py"
     write_table(dest / f"tab_adaptation_modes__{tag}.tex", AM.render_corruption_table(
-        df, ctx, args.tta, temps, label=f"tab:adaptation_modes:{tag}", source=source, duo_ctx=duo_ctx))
+        df, ctx, args.tta, temps, label=f"tab:adaptation_modes:{tag}", source=source, duo_ctx=duo_ctx,
+        single_ctx=single_ctx))
     write_table(dest / f"tab_adaptation_modes_summary__{tag}.tex", AM.render_summary_table(
-        df, ctx, args.tta, temps, label=f"tab:adaptation_modes_summary:{tag}", source=source, duo_ctx=duo_ctx))
+        df, ctx, args.tta, temps, label=f"tab:adaptation_modes_summary:{tag}", source=source, duo_ctx=duo_ctx,
+        single_ctx=single_ctx))
     return 0
 
 

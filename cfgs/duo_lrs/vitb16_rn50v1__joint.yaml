@@ -18,14 +18,14 @@ methods:
         DAMPENING: 0.0
         WD: 0.0
         NESTEROV: false
-      source: out/results/tune_joint_lr/vitb16_rn50v1__tent_bn/results.json
+      source: /project/6104790/alxstaub/dynamic-duos/out/results/tune_joint_lr/vitb16_rn50v1__tent_bn/results.json
       tuned_on:
       - gaussian_blur/s5
       - saturate/s5
       - spatter/s5
       - speckle_noise/s5
-      duo_macro_accuracy: 0.62397
-      worst_stream_accuracy: 0.4767
+      duo_macro_accuracy: 0.61971
+      worst_stream_accuracy: 0.47038
     small:
       model: resnet50_v1
       norm: BN
@@ -37,11 +37,11 @@ methods:
         DAMPENING: 0.0
         WD: 0.0
         NESTEROV: false
-      source: out/results/tune_joint_lr/vitb16_rn50v1__tent_bn/results.json
+      source: /project/6104790/alxstaub/dynamic-duos/out/results/tune_joint_lr/vitb16_rn50v1__tent_bn/results.json
       tuned_on:
       - gaussian_blur/s5
       - saturate/s5
       - spatter/s5
       - speckle_noise/s5
-      duo_macro_accuracy: 0.62397
-      worst_stream_accuracy: 0.4767
+      duo_macro_accuracy: 0.61971
+      worst_stream_accuracy: 0.47038

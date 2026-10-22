@@ -204,20 +204,26 @@ methods:
       OPTIM:
         METHOD: SGD
         STEPS: 1
-        LR: 0.0001
+        LR: 7.0e-05
         MOMENTUM: 0.9
         DAMPENING: 0.0
         WD: 0.0
         NESTEROV: false
-      source: scripts/02_tune_tta.py
+      source: scripts/02c_tune_indep_pair.py
       tuned_on:
       - speckle_noise/s5
       - gaussian_blur/s5
       - spatter/s5
       - saturate/s5
-      seed: 0
-      macro_accuracy: 0.50945
-      frozen_macro_accuracy: 0.48794
+      seeds: &id001
+      - 0
+      - 1
+      - 2
+      temperatures: heldout_vitb16_rn50v1_frozen_3ac1a4be9224
+      note: tuned as a PAIR for this duo (static-duo accuracy)
+      duo_macro_accuracy: 0.56591
+      late_duo_accuracy: 0.57763
+      worst_stream_accuracy: 0.36902
     small:
       model: resnet50_v1
       norm: BN
@@ -225,18 +231,20 @@ methods:
       OPTIM:
         METHOD: SGD
         STEPS: 1
-        LR: 0.00025
+        LR: 0.0005
         MOMENTUM: 0.9
         DAMPENING: 0.0
         WD: 0.0
         NESTEROV: false
-      source: scripts/02_tune_tta.py
+      source: scripts/02c_tune_indep_pair.py
       tuned_on:
       - speckle_noise/s5
       - gaussian_blur/s5
       - spatter/s5
       - saturate/s5
-      seed: 0
-      macro_accuracy: 0.45581
-      frozen_macro_accuracy: 0.3482
-      frozen_bn_batch_stats: true
+      seeds: *id001
+      temperatures: heldout_vitb16_rn50v1_frozen_3ac1a4be9224
+      note: tuned as a PAIR for this duo (static-duo accuracy)
+      duo_macro_accuracy: 0.56591
+      late_duo_accuracy: 0.57763
+      worst_stream_accuracy: 0.36902

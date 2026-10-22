@@ -28,6 +28,7 @@ from src.experiments.protocols import Segment
 from src.experiments.results import mean_std_over_seeds, per_seed_average
 from src.experiments.runner import Context, replay
 from src.experiments.specs import GateSpec, RunSpec
+from src.utils import provenance
 from src.utils.tables import corruption_table, latex_escape
 
 VANILLA, JOINT_DD = "vanilla_dd", "joint_dd"
@@ -105,7 +106,8 @@ def render_table(df: pd.DataFrame, ctx: Context, duo_ctx: Context, tta: str, tem
                   f"corruptions." if has_clean else "")
                + (f" Mean over {n_seeds} seeds." if n_seeds > 1 else ""))
     return corruption_table(d, groups, ctx.g.corruption_families, value="accuracy", caption=caption, label=label, star=True,
-                            source=source, std=False, clean=AM.CLEAN if has_clean else None, group_rows=True, tabcolsep=3.5)
+                            source=source, std=False, clean=AM.CLEAN if has_clean else None, group_rows=True, tabcolsep=3.5,
+                            models=provenance.run_label(ctx.duo, tta, ctx.bn))
 
 
 def summary(df: pd.DataFrame) -> pd.DataFrame:

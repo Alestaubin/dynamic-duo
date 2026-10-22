@@ -28,27 +28,28 @@ sbatch slurm/job.sh scripts/01_tab_temperatures.py --mode no_adapt --batch_sizes
 
 Writes `tab_temperatures__frozen_bn.tex`: per stream (clean, the 4 held-out corruptions, the 15 test corruptions) the NLL-optimal temperatures, the two members, Fixed TS fitted on clean data and on the held-out corruptions, and three oracles (per-corruption, per-batch and per-sample temperatures).
 
-**2. Tune Tent's learning rates** (once; the result is already stored in `cfgs/duo_lrs/`, so skip this to reuse it)
+**2. Tune Tent's learning rates: each model alone, and the independent duo** (once; the result is stored in `cfgs/duo_lrs/`, so skip this to reuse it)
+
+Rules (author, 2026-10-22): only the 4 held-out corruptions are used (no test leakage); every score uses the Fixed TS fitted on the **frozen** models, never refitted per method or pair (`sbatch slurm/job.sh scripts/03_tab_adaptation_modes.py --bn --temps_only` fits it once; the table of step 1 reports it); SGD with momentum 0.9, the rate only, on a sqrt-2 grid that is extended until the optimum is **interior**; the criterion is the whole-stream accuracy, and a candidate whose accuracy on the last 20% of each stream is below the frozen model's is ruled out (drift); the frozen model is on every table; the finalists are confirmed on 3 stream-order seeds.
 
 ```bash
-sbatch --array=0-15 slurm/job.sh scripts/02_tune_tta.py --model vit_b_16 --shard auto
-sbatch --array=0-15 slurm/job.sh scripts/02_tune_tta.py --model resnet50_v1 --bn --shard auto
-# when both arrays are done (reads the saved trials; no GPU, no grid flags):
-sbatch slurm/job_cpu.sh scripts/02_tune_tta.py --model vit_b_16 --rank_cache
-sbatch slurm/job_cpu.sh scripts/02_tune_tta.py --model resnet50_v1 --bn --rank_cache
+# the members never see each other, so a run at (a_i, b_i) stores the large member at a_i and the small one at b_i: N runs give N individual curves and N x N pairs
+for i in 0..N-1: sbatch slurm/job.sh scripts/04_cache_logits.py --bn --streams heldout --lr_large a_i --lr_small b_i --seeds 0
+sbatch slurm/job.sh scripts/04_cache_logits.py --bn --streams heldout --mode no_adapt --seeds 0        # the frozen members
+sbatch slurm/job_cpu.sh scripts/02c_tune_indep_pair.py --bn --lrs_large a_0 .. a_N-1 --lrs_small b_0 .. b_N-1 --seeds 0        # stage A: the full grid
+sbatch slurm/job_cpu.sh scripts/02c_tune_indep_pair.py --bn --lrs_large ... --lrs_small ... --seeds 0 1 2 --record              # stage B: neighbourhood on seeds 1, 2 (it lists the runs it needs), then record
 ```
 
-`--rank_cache` ranks every trial stored for the model, whatever grid it came from (results made with other settings are listed and left out). It only prints the ranking and writes `ranking.csv`; add `--record` to record the winner in `cfgs/duo_lrs/vitb16_rn50v1__indep.yaml`. The Tent rates in the repo are two by-hand choices (ViT 5e-5, ResNet 2.5e-4), so `--record` replaces them (it prints what it replaced).
+`02c` writes each model's best rate to `cfgs/duo_lrs/<duo>__single.yaml` (the regime of one model adapting alone: script 03's Independent large / small) and the best pair to `<duo>__indep.yaml` (the independent duo: Independent both, Vanilla DD); `--record` is refused while an optimum sits on the edge of the grid. `scripts/02_tune_tta.py` (trial-based, one model at a time) is the older tuner; its results are superseded for Tent.
 
-**3. Tune the learning rates of the Joint mode** (both members adapt on the duo's entropy; its rates differ from step 2's)
+**3. Tune the learning rates of the Joint mode** (both members adapt on the duo's entropy; the grid starts at step 2's single rates and increases)
 
 ```bash
-sbatch slurm/job.sh scripts/02b_tune_joint_lr.py --bn --temps_only                       # once: fit T_L, T_S
-sbatch -t 00:40:00 --array=0-24 slurm/job.sh scripts/02b_tune_joint_lr.py --bn --shard auto   # one task per (lr_large, lr_small) pair
-sbatch slurm/job_cpu.sh scripts/02b_tune_joint_lr.py --bn --rank_cache --record         # ranks every cached Joint run, records the best pair in cfgs/duo_lrs/<duo>__joint.yaml
+sbatch --array=0-47 slurm/job.sh scripts/02b_tune_joint_lr.py --bn --lrs_large a_0 .. --lrs_small b_0 .. --seeds 0 --shard auto --only joint/   # one task per pair
+sbatch slurm/job_cpu.sh scripts/02b_tune_joint_lr.py --bn --lrs_large ... --lrs_small ... --seeds 0 1 2 --report_only                       # ranks, records the best pair in <duo>__joint.yaml
 ```
 
-The array tasks must all get the same grid flags (the default grid is 5 x 5 pairs, hence `--array=0-24`); the ranking needs none, and takes the temperatures from the cached runs. Without `--record` it only prints the ranking.
+The array tasks must all get the same grid flags; the temperatures are the frozen fit; every point reports its late-stream accuracy and the ones that end below the frozen duo are ruled out. The ranking prints a warning when the best pair sits on the edge of the grid (extend it; finished points are reused).
 
 **4. Table: ways of adapting the duo** (joint, one member adapting, independent; all scored with the same Fixed TS). Needs steps 2 and 3.
 

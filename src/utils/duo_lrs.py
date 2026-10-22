@@ -54,10 +54,19 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LR_DIR = REPO_ROOT / "cfgs" / "duo_lrs"
 DUO_DIR = REPO_ROOT / "cfgs" / "duos"
-REGIMES = {"indep": "both_indep", "joint": "both_duo"}
+# single: each model tuned ALONE (the single-model Tent baseline, an Independent run in which only that member counts); indep: the
+# independent duo's PAIR; joint: the joint duo's pair. A duo with no `single` file reads its `indep` entries for it (before the
+# 2026-10-22 retune the indep entries were the member-by-member winners).
+REGIMES = {"single": "both_indep", "indep": "both_indep", "joint": "both_duo"}
+OPTIONAL_REGIMES = {"single"}
 SIDES = ("large", "small")
 
 _HEADERS = {
+    "single": """\
+# Learning rates of duo `{duo}`, SINGLE regime: each model tuned ALONE on its own entropy (the single-model Tent baseline), its optimum
+# interior to the grid and kept for every test. Written by scripts/02c_tune_indep_pair.py (individual optima). The independent duo's PAIR
+# lives in the indep file, the joint duo's in the joint file; tuning order: single, then indep and joint starting from these rates.
+""",
     "indep": """\
 # Learning rates of duo `{duo}`, INDEP regime: each member adapts on its OWN entropy (engine mode both_indep; Vanilla DD).
 # The one place these numbers live (cfgs/duos/ only names the models). `methods`: what was tuned, per TTA method and per member,
@@ -93,7 +102,8 @@ def load(duo: str, regime: str, root=None) -> dict:
     p = path(duo, regime, root)
     if not p.is_file():
         raise FileNotFoundError(f"{p} does not exist: the learning rates of duo {duo!r} ({regime}) live there. Create it with "
-                                f"`python -m src.utils.duo_lrs {'--init_indep ' + duo if regime == 'indep' else '--init_joint'}`")
+                                f"`python -m src.utils.duo_lrs {'--init_indep ' + duo if regime == 'indep' else '--init_joint'}` "
+                                f"(single: duo_lrs.init_single)")
     doc = yaml.safe_load(p.read_text())
     if doc.get("duo") != duo or doc.get("regime") != regime:
         raise ValueError(f"{p} is for duo {doc.get('duo')!r}, regime {doc.get('regime')!r}")
@@ -115,6 +125,8 @@ def resolve(duo_spec: dict, regime: str, tta: str, root=None, batch_size: int | 
     its tuned entry for `tta`, else (indep) its default. Raises NotTuned for a joint method that is pending or absent, and for an
     indep member with neither."""
     name = duo_spec["NAME"]
+    if regime == "single" and not path(name, "single", root).exists():
+        return resolve(duo_spec, "indep", tta, root, batch_size)          # no single file: the indep entries are the member-by-member ones
     doc = load(name, regime, root)
     where = f"{path(name, regime, root)}"
     methods = doc["methods"].get(tta, {})
@@ -133,7 +145,7 @@ def resolve(duo_spec: dict, regime: str, tta: str, root=None, batch_size: int | 
                 warnings.warn(f"{where}: {tta}/{side} is stale: {entry['stale']}")
             if batch_size is not None and entry.get("batch_size") not in (None, batch_size):
                 warnings.warn(f"{where}: {tta}/{side} was tuned at batch size {entry['batch_size']}, the protocol uses {batch_size}")
-        elif regime == "indep" and side in doc["defaults"]:
+        elif regime in ("indep", "single") and side in doc["defaults"]:
             entry = doc["defaults"][side]
             _check_member(entry, spec, f"{where}: defaults/{side}", side)
         else:
@@ -189,6 +201,18 @@ def init_indep(duo: str, root=None, duos_dir=None, defaults: dict | None = None,
                                  "source": source or ("explicit default" if (defaults or {}).get(side) else
                                                       "generic default: SGD, momentum 0.9, at the centre of the model family's grid")}
     return _write(doc, root)
+
+
+def init_single(duo: str, root=None) -> Path | None:
+    """A single-regime file with no methods (the defaults, if the indep file has them, are copied); None if it exists."""
+    if path(duo, "single", root).exists():
+        return None
+    defaults = {}
+    try:
+        defaults = copy.deepcopy(load(duo, "indep", root)["defaults"])
+    except FileNotFoundError:
+        pass
+    return _write({"duo": duo, "regime": "single", "engine_mode": REGIMES["single"], "defaults": defaults, "methods": {}, "pending": {}}, root)
 
 
 def init_joint(duo: str, root=None) -> Path | None:
@@ -284,7 +308,8 @@ def check(duo: str, root=None, duos_dir=None) -> list[str]:
         try:
             doc = load(duo, regime, root)
         except FileNotFoundError as e:
-            problems.append(str(e))
+            if regime not in OPTIONAL_REGIMES:
+                problems.append(str(e))
             continue
         for side in SIDES:
             if regime == "indep" and side not in doc["defaults"]:
@@ -470,6 +495,22 @@ if __name__ == "__main__":
         assert resolve(spec, "joint", "tent", root) == {"LARGE": optim(1e-4), "SMALL": optim(5e-3)}
         assert "pending" not in load("main", "joint", root) or load("main", "joint", root)["pending"] == {}
         assert resolve(spec, "indep", "tent", root)["LARGE"] == optim(5e-5), "the regimes do not mix"
+
+        # single (each model alone): no file = the indep entries; once the file exists it is its own regime
+        assert resolve(spec, "single", "tent", root) == resolve(spec, "indep", "tent", root)
+        assert check("main", root, duos) == [] or all("single" not in x for x in check("main", root, duos)), "an absent single file is fine"
+        init_single("main", root)
+        assert init_single("main", root) is None
+        doc = load("main", "single", root)
+        assert doc["regime"] == "single" and doc["engine_mode"] == "both_indep" and set(doc["defaults"]) == {"large", "small"}
+        doc["methods"]["tent"] = {side: {"model": spec[side.upper()]["NAME"], "norm": spec[side.upper()]["NORM"], "OPTIM": optim(7e-5),
+                                          "source": "test"} for side in SIDES}
+        _write(doc, root)
+        assert resolve(spec, "single", "tent", root) == {"LARGE": optim(7e-5), "SMALL": optim(7e-5)}
+        assert resolve(spec, "indep", "tent", root)["LARGE"] == optim(5e-5), "the single entries do not leak into the indep regime"
+        assert resolve(spec, "single", "eta", root) == {"LARGE": doc["defaults"]["large"]["OPTIM"], "SMALL": doc["defaults"]["small"]["OPTIM"]}, \
+            "a method with no single entry uses the file's defaults, not the indep entries"
+        assert "single" in describe("main", "single", root) and not [x for x in check("main", root, duos) if "single" in x]
         res.write_text(json.dumps(json.loads(res.read_text()) | {"num_samples": 2000}))
         try:
             import_joint(res, root, duos)

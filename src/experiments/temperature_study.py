@@ -229,14 +229,12 @@ def render_table(df: pd.DataFrame, labels: StudyLabels, *, batch_sizes: Sequence
         + (f" Mean $\\pm$ std over {n_seeds} seeds." if n_seeds > 1 else "")
     )
     return table_env(body, "l|ccc|cc|cc|" + "c" * (nb + 2), caption, table_labels[0], star=True, resize=False,
-                     source=source, tabcolsep=4.5, extra_labels=table_labels[1:])
+                     source=source, tabcolsep=4.5, extra_labels=table_labels[1:], models=f"{models[0]} + {models[1]}, {regime}")
 
 
 # ------------------------------------------------------------------------------------------ script plumbing
 
-MODEL_NAMES = {"vit_b_16": "ViT-B/16", "vit_l_16": "ViT-L/16", "vit_s_16": "ViT-S/16", "resnet50": "ResNet-50",
-               "resnet50_v1": "ResNet-50 (V1)", "vit_b_16_augreg": "ViT-B/16 (AugReg)",
-               "vit_b_16_augreg2": "ViT-B/16 (AugReg2)", "vit_b_16_sar": "ViT-B/16 (SAR)"}
+from src.utils.provenance import MODEL_NAMES  # noqa: E402  (display names of the models, shared with every table and figure)
 
 
 def add_study_args(ap) -> None:
@@ -253,16 +251,19 @@ def add_study_args(ap) -> None:
 def study_tag(args, default_duo: str | None = None) -> str:
     """File-name tag naming the regime: 'frozen' or the TTA method; `_bn` with --bn (in every mode: only frozen
     BatchNorm members change, but the name must not depend on that); '_trainslice' if clean comes from train;
-    `__<duo>` if `default_duo` is given and this is another duo (so a second duo never overwrites the default
-    duo's table)."""
+    `__<duo>` ALWAYS when `default_duo` is given (author's rule of 2026-10-22: every file names its models, so two duos never share
+    one and the default duo's table is not anonymous)."""
     tag = ("frozen" if args.mode == "no_adapt" else args.tta) + bn_tag(args)
     tag += "_trainslice" if args.clean_source == "train_slice" else ""
-    return tag + (f"__{args.duo}" if default_duo is not None and args.duo != default_duo else "")
+    return tag + (f"__{args.duo}" if default_duo is not None else "")
 
 
-def regime_text(args) -> str:
+def regime_text(args, duo: dict | None = None) -> str:
+    """How the members were run; `duo` (a duo config) lets a duo with no BatchNorm layer leave the BatchNorm clause out."""
     if args.mode != "no_adapt":
         return f"adapted independently with {args.tta.upper()}"
+    if duo is not None and not any(duo[s].get("NORM") == "BN" for s in ("LARGE", "SMALL")):
+        return "with frozen weights"
     return ("with frozen weights, their BatchNorm layers using test-batch statistics" if args.bn
             else "with frozen weights in eval() mode, their BatchNorm layers using the source statistics")
 
@@ -383,10 +384,13 @@ if __name__ == "__main__":
     assert study_tag(a(mode="both_indep")) == "tent" and study_tag(a(mode="both_indep", bn=True)) == "tent_bn", \
         "--bn renames the files in every mode, even where it changes no number"
     assert study_tag(a(bn=True, clean_source="train_slice")) == "frozen_bn_trainslice" and study_tag(a(duo="e", bn=True), "d") == "frozen_bn__e"
-    assert study_tag(a(duo="d"), "d") == "frozen" and study_tag(a(duo="e"), "d") == "frozen__e", "another duo has its own files"
+    assert study_tag(a(duo="d"), "d") == "frozen__d" and study_tag(a(duo="e"), "d") == "frozen__e", "every file names its duo (2026-10-22)"
     assert study_tag(a(duo="e")) == "frozen", "no default given: the old behaviour"
     assert "source statistics" in regime_text(a()) and "test-batch statistics" in regime_text(a(bn=True))
     assert regime_text(a(mode="both_indep")) == "adapted independently with TENT"
+    ln_only = {"LARGE": {"NORM": "LN"}, "SMALL": {"NORM": "LN"}}
+    assert regime_text(a(bn=True), ln_only) == "with frozen weights", "no BatchNorm layer: nothing to say about it"
+    assert "test-batch statistics" in regime_text(a(bn=True), {"LARGE": {"NORM": "LN"}, "SMALL": {"NORM": "BN"}})
 
     if shutil.which("pdflatex"):
         with tempfile.TemporaryDirectory() as tmp:

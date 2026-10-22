@@ -1,0 +1,11 @@
+# Different families (generalization test, author 2026-10-22): ConvNeXt-B (large, torchvision IMAGENET1K_V1, LayerNorm) + DeiT-S (small, timm
+# deit_small_patch16_224.fb_in1k, LayerNorm). Both members adapt LayerNorm. Learning rates: cfgs/duo_lrs/convnextb_deits__*.yaml.
+NAME: convnextb_deits
+
+LARGE:
+  NAME: convnext_base
+  NORM: LN
+
+SMALL:
+  NAME: deit_small
+  NORM: LN

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
 
+from src.experiments import adaptation_modes as AM
 from src.experiments import cli
 from src.experiments.dd_eval import GRID_BETAS, GRID_BT, GridConfig, average_over_streams, pooled_diagnostics, run_pair, save_results
 from src.experiments.grids import lr_grid, sgd_optim
@@ -55,6 +56,8 @@ def main() -> int:
     ap.add_argument("--betas", nargs="+", type=float, default=list(GRID_BETAS))
     ap.add_argument("--b_ts", nargs="+", type=int, default=list(GRID_BT))
     ap.add_argument("--ts", default="heldout", choices=["heldout", "clean"], help="temperature set of the DD and oracle cells")
+    ap.add_argument("--temps_checkpoint", default=None, metavar="DIR",
+                    help="JointFixedTS checkpoint for the held-out TS (default: the Fixed TS fitted on the FROZEN models, never refitted on the pair)")
     args = ap.parse_args()
 
     ctx, seeds, out = cli.setup(args, "eval_duo_grid")
@@ -74,6 +77,9 @@ def main() -> int:
     extra = [s.file_stem for s in stream_segments(args.extra, ctx.g)] if args.extra else []
     clean = None if args.clean_stream == "none" else stream_segments([args.clean_stream], ctx.g)[0].file_stem
     cfg = GridConfig(proxies=tuple(args.proxies), betas=tuple(args.betas), b_ts=tuple(args.b_ts), ts=args.ts)
+    frozen_ts = AM.resolve_temperatures(ctx, AM.temperature_spec(args.duo, args.tta, args.tta_kwargs, args.num_samples), args.temps_checkpoint,
+                                        report_only=True)
+    print(f"held-out Fixed TS (frozen models): T_L = {frozen_ts.T_l}, T_S = {frozen_ts.T_s} ({frozen_ts.folder.name})")
 
     status = 0
     for seed in seeds:
@@ -90,7 +96,7 @@ def main() -> int:
                   f"(scripts/04_cache_logits.py fills them)")
             status = 1
             continue
-        res = run_pair(pair, held, test, cfg, clean_stem=clean, extra=extra, device=args.device)
+        res = run_pair(pair, held, test, cfg, clean_stem=clean, extra=extra, device=args.device, heldout_temps=(frozen_ts.T_l, frozen_ts.T_s))
         files = save_results(out, name, res)
         print(f"\n== seed {seed}: large {ml.key} (lr {ml.model['OPTIM']['LR']}), small {ms.key} (lr {ms.model['OPTIM']['LR']})")
         print(f"temperatures: " + ", ".join(f"{k} T_L={a:.3f} T_S={b:.3f}" for k, (a, b) in res["temps"].items()))

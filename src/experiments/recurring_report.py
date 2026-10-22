@@ -25,6 +25,7 @@ import numpy as np
 from src.experiments import adaptation_modes as AM
 from src.experiments import gated_duos as GD
 from src.experiments import recurring as RC
+from src.utils import provenance
 from src.utils.tables import latex_escape, timestamp
 
 # (run, series, label, color, linestyle): drawn in this order, the first at the back. Slots 1-3 of the reference palette validate
@@ -104,8 +105,9 @@ def _spread(ys: dict[str, float], gap: float) -> dict[str, float]:
     return {k: v - shift for k, v in out.items()}
 
 
-def plot_stream(stream: Stream, path: Path, *, width: float = 7.2, height: float = 4.7, dpi: int = 300) -> list[Path]:
-    """Write the figure as `path` (.png) and next to it as .pdf; returns both."""
+def plot_stream(stream: Stream, path: Path, *, width: float = 7.2, height: float = 4.7, dpi: int = 300, footer: str = "") -> list[Path]:
+    """Write the figure as `path` (.png) and next to it as .pdf; returns both. `footer`: the line naming the models, the run and the time
+    (provenance.footer), drawn on the figure and stored in the files."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -194,14 +196,185 @@ def plot_stream(stream: Stream, path: Path, *, width: float = 7.2, height: float
     h, l_ = top.get_legend_handles_labels()
     fig.legend(h, l_, loc="upper center", ncol=len(labels), frameon=False, fontsize=6.5, bbox_to_anchor=(0.48, 1.0),
                handlelength=2.2, columnspacing=1.6)
-    out = []
-    for ext in ("png", "pdf"):
-        p = Path(path).with_suffix("." + ext)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(p, dpi=dpi, facecolor="white")
-        out.append(p)
+    out = provenance.save_figure(fig, path, footer or "unlabeled figure: no run text given", dpi=dpi)
     plt.close(fig)
     return out
+
+
+# ------------------------------------------------------------------------------------------------- gate reaction
+
+BETAS = (0.01, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0)
+# one-hue ramp for beta (light = small beta); the gate is the blue entity of the other figure. Members are neutral lines:
+# the two are told apart by dash pattern and direct label, not by hue.
+BETA_COLORS = ("#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#184f95", "#104281", "#0d366b")
+MEMBER = {"large": ("ViT-B/16", "#3d3c39", (0, (5, 2))), "small": ("ResNet-50", "#9a9992", (0, (1.5, 1.5, 5, 1.5)))}
+
+
+def load_gate_records(run_file: Path) -> list[dict]:
+    import json
+    return json.loads(Path(run_file).with_suffix(".gate.json").read_text())
+
+
+def gate_curves(run: dict, records: Sequence[dict], b_t: int) -> dict[str, np.ndarray]:
+    """Per proxy batch of the gate (b_t consecutive samples from the stream's start; the last may be shorter): the members' and the
+    duos' TRUE accuracy over the same samples (from the stored per-sample correctness), and the gate's own record (proxy scores r,
+    their logits x). `w(beta)` of the result is the gate weight w_L = sigmoid(beta (x_L - x_S)) at any beta, so one run gives every beta."""
+    n_samples = len(next(v for k, v in run.items() if k in ("large", "small")))
+    n = len(records)
+    edges = np.minimum(np.arange(n + 1) * b_t, n_samples)
+    if edges[-1] != n_samples:
+        raise ValueError(f"{n} proxy batches of {b_t} cover {edges[-1]} samples, the run has {n_samples}")
+    width = np.diff(edges)
+
+    def per_batch(c: np.ndarray) -> np.ndarray:
+        cs = np.concatenate([[0], np.cumsum(c, dtype=np.int64)])
+        return (cs[edges[1:]] - cs[edges[:-1]]) / width
+
+    out = {s: per_batch(run[s]) for s in ("large", "small", "ts", "gate") if s in run}
+    out.update(x=(edges[:-1] + edges[1:]) / 2, r_l=np.array([r["r_l"] for r in records]), r_s=np.array([r["r_s"] for r in records]),
+               x_l=np.array([r["x_l"] for r in records]), x_s=np.array([r["x_s"] for r in records]),
+               w_l=np.array([r["w_l"] for r in records]))
+    return out
+
+
+def gate_weight(curves: dict[str, np.ndarray], beta: float) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-beta * (curves["x_l"] - curves["x_s"])))
+
+
+def ema(y: np.ndarray, alpha: float) -> np.ndarray:
+    out = np.empty(len(y), dtype=float)
+    acc = float(y[0])
+    for i, v in enumerate(y):
+        acc = alpha * float(v) + (1 - alpha) * acc
+        out[i] = acc
+    return out
+
+
+def plot_gate_reaction(rows: Sequence[dict], path: Path, *, images: int, n_corruptions: int = 15, betas: Sequence[float] = BETAS,
+                       alpha: float = 0.1, width: float = 7.2, row_height: float = 2.15, dpi: int = 300, footer: str = "") -> list[Path]:
+    """The gate against the true accuracy, in the layout of the CSSRC draft's Figure 1: one row per (run, window of the stream).
+    Left: per-proxy-batch accuracy of each member (dashed) and of the duos (solid), EMA-smoothed over the faint raw values, and the
+    two proxy scores (dotted). Right: the gate weight w_L at every beta (a one-hue ramp, beta = the run's own bold) against the
+    members' accuracy (dashed). `rows`: dicts {title, curves (gate_curves), window (first, last sample), beta (the run's), duos:
+    [(series key, label, color)]}."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    plt.rcParams.update({"font.size": 7, "axes.edgecolor": INK2, "axes.labelcolor": INK2, "xtick.color": INK2, "ytick.color": INK2,
+                         "axes.linewidth": 0.6, "pdf.fonttype": 42, "font.family": "DejaVu Sans"})
+    fig, axes = plt.subplots(len(rows), 2, figsize=(width, row_height * len(rows) + 0.5), dpi=dpi, facecolor="white", squeeze=False,
+                             gridspec_kw=dict(left=0.07, right=0.975, top=0.93, bottom=0.155, hspace=0.62, wspace=0.17))
+    round_len = n_corruptions * images
+    for (axl, axr), row in zip(axes, rows):
+        c, (a, b) = row["curves"], row["window"]
+        inside = (c["x"] >= a) & (c["x"] <= b)
+        x = c["x"][inside]
+        for ax in (axl, axr):
+            ax.set_facecolor("white")
+            ax.set_xlim(a, b)
+            ax.set_ylim(-0.02, 1.02)
+            ax.grid(axis="y", color=GRID, linewidth=0.5)
+            ax.set_axisbelow(True)
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+            for k in range(int(a // images) + 1, int(b // images) + 1):                    # every shift; a round start is stronger
+                new_round = k % n_corruptions == 0
+                ax.axvline(k * images, color=INK2 if new_round else GRID, linewidth=0.6 if new_round else 0.3,
+                           linestyle="--" if new_round else "-", zorder=1)
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v / 1000:g}k" if v else "0"))
+            ax.set_xlabel("Samples processed", labelpad=1)
+        n_rounds_shown = (b - a) / round_len
+        if n_rounds_shown > 1.5:                                                           # name the rounds of a long window
+            for r in range(int(a // round_len), int(np.ceil(b / round_len))):
+                mid = np.clip((r + 0.5) * round_len, a, b)
+                axr.text(mid, 1.02, f"R{r + 1}", transform=axr.get_xaxis_transform(), ha="center", va="bottom", fontsize=5.4, color=INK2)
+        # left: accuracies and proxy scores
+        for key in ("large", "small"):
+            name, color, ls = MEMBER[key]
+            raw = c[key][inside]
+            axl.plot(x, raw, color=color, linewidth=0.4, alpha=0.25, zorder=2)
+            axl.plot(x, ema(raw, alpha), color=color, linestyle=ls, linewidth=1.0, zorder=3, label=f"{name} acc")
+            axl.plot(x, ema(c["r_" + key[0]][inside], alpha), color=color, linestyle=":", linewidth=0.9, zorder=3, label=f"{name} proxy")
+        for key, label, color in row["duos"]:
+            raw = c[key][inside]
+            axl.plot(x, raw, color=color, linewidth=0.4, alpha=0.25, zorder=2)
+            axl.plot(x, ema(raw, alpha), color=color, linewidth=1.3, zorder=4, label=label)
+        axl.set_ylabel("Accuracy / proxy score")
+        axl.set_title(row["title"], loc="left", fontsize=7, color=INK, pad=11)
+        # right: gate weight at every beta against the true accuracies
+        for key in ("large", "small"):
+            name, color, ls = MEMBER[key]
+            axr.plot(x, ema(c[key][inside], alpha), color=color, linestyle=ls, linewidth=1.0, zorder=3, label=f"{name} acc")
+        for beta, color in zip(betas, BETA_COLORS):
+            own = abs(beta - row["beta"]) < 1e-9
+            axr.plot(x, ema(gate_weight(c, beta)[inside], alpha), color=color, linewidth=1.7 if own else 0.9, zorder=5 if own else 4,
+                     label=f"$w_L$, $\\beta$ = {beta:g}" + (" (run)" if own else ""))
+        axr.axhline(0.5, color=INK2, linewidth=0.4, linestyle=":", zorder=1)
+        axr.set_ylabel("Gate weight $w_L$ / accuracy")
+    # legends: the left panels' entries (every row's duos included), then the gate weights, one below the other so they never meet
+    left: dict[str, object] = {}
+    for axl, _ in axes:
+        for h, l in zip(*axl.get_legend_handles_labels()):
+            left.setdefault(l, h)
+    seen = set(left)
+    right: dict[str, object] = {}
+    for _, axr in axes:
+        for h, l in zip(*axr.get_legend_handles_labels()):
+            if l not in seen:
+                right.setdefault(l, h)
+    fig.legend(list(left.values()), list(left), loc="lower left", ncol=4, frameon=False, fontsize=5.8, bbox_to_anchor=(0.06, 0.058),
+               handlelength=2.0, columnspacing=1.0)
+    fig.legend(list(right.values()), list(right), loc="lower right", ncol=4, frameon=False, fontsize=5.8, bbox_to_anchor=(0.985, 0.004),
+               handlelength=1.8, columnspacing=1.0)
+    out = provenance.save_figure(fig, path, footer or "unlabeled figure: no run text given", dpi=dpi)
+    plt.close(fig)
+    return out
+
+
+def collapse_round(curves: dict[str, np.ndarray], images: int, n_corruptions: int = 15, drop: float = 0.5) -> tuple[list[str], int] | None:
+    """(the members, the 0-based round) of the first round in which a member's accuracy is below `drop` of its own round-0 accuracy:
+    every member that is below it in that round; None if no member ever is. Rounds are read off the proxy batches' sample positions."""
+    rl = n_corruptions * images
+    rounds = np.floor(curves["x"] / rl).astype(int)
+    first = {}
+    for key in ("large", "small"):
+        per_round = np.array([curves[key][rounds == r].mean() for r in range(rounds.max() + 1)])
+        low = np.flatnonzero(per_round < drop * per_round[0])
+        if len(low):
+            first[key] = int(low[0])
+    if not first:
+        return None
+    r = min(first.values())
+    return [k for k, v in first.items() if v == r], r
+
+
+def _who(members: list[str]) -> str:
+    names = [MEMBER[k][0] for k in members]
+    return " and ".join(names) + (" collapse" if len(names) > 1 else " collapses")
+
+
+def default_rows(runs: dict[str, dict], images: int, b_t: int, beta: float, n_corruptions: int = 15) -> list[dict]:
+    """The rows of the gate-reaction figure for the stored runs: round 1 of Vanilla DD; Vanilla DD around the first collapse of one of
+    its members (5 rounds after it, 1 before); Joint DD from the start to one round after its first collapse. `runs`: {"indep": curves,
+    "joint_dd": curves} (gate_curves); a row is left out when its run has no collapse."""
+    rl = n_corruptions * images
+    n_rounds = int(runs["indep"]["x"].max() // rl) + 1
+    duos_v = [("ts", "Fixed TS duo", "#1baf7a"), ("gate", "Vanilla DD", "#2a78d6")]
+    rows = [dict(title="(a) Vanilla DD, round 1", curves=runs["indep"], window=(0, rl), beta=beta, duos=duos_v)]
+    hit = collapse_round(runs["indep"], images, n_corruptions)
+    if hit:
+        members, r = hit
+        a, b = max(r - 1, 0), min(r + 5, n_rounds)
+        rows.append(dict(title=f"(b) Vanilla DD, rounds {a + 1}-{b}: the {_who(members)}", curves=runs["indep"],
+                         window=(a * rl, b * rl), beta=beta, duos=duos_v))
+    if "joint_dd" in runs:
+        hit = collapse_round(runs["joint_dd"], images, n_corruptions)
+        b = min(hit[1] + 2, n_rounds) if hit else n_rounds
+        what = f": the {_who(hit[0])} in round {hit[1] + 1}" if hit else ""
+        rows.append(dict(title=f"({'c' if len(rows) > 1 else 'b'}) Joint DD, rounds 1-{b}{what}", curves=runs["joint_dd"],
+                         window=(0, b * rl), beta=beta, duos=[("ts", "Fixed TS (joint members)", "#1baf7a"), ("gate", "Joint DD", "#eb6834")]))
+    return rows
 
 
 # ------------------------------------------------------------------------------------------------------------ tables
@@ -225,8 +398,8 @@ def _setting(stream: Stream, ctx, duo_ctx, tta: str, temps, proxy: str, beta: fl
             f"the first set of learning rates, Joint DD the second.{seeds}")
 
 
-def _env(body: Sequence[str], col_spec: str, caption: str, label: str, source: str) -> str:
-    lines = [f"% Generated by {source} on {timestamp()}. Requires booktabs, graphicx.", "\\begin{table*}[t]", "    \\centering",
+def _env(body: Sequence[str], col_spec: str, caption: str, label: str, source: str, models: str = "") -> str:
+    lines = [f"% Generated by {source} on {timestamp()}{f' for {models}' if models else ''}. Requires booktabs, graphicx.", "\\begin{table*}[t]", "    \\centering",
              "    \\small", "    \\setlength{\\tabcolsep}{3.2pt}", f"    \\caption{{{caption}}}", f"    \\label{{{label}}}",
              f"    \\begin{{tabular}}{{{col_spec}}}", "        \\toprule", *("        " + b for b in body), "        \\bottomrule",
              "    \\end{tabular}", "\\end{table*}"]
@@ -246,7 +419,7 @@ def render_main_table(stream: Stream, ctx, duo_ctx, tta: str, temps, *, proxy: s
     body += [f"{latex_escape(l)} & " + " & ".join(best[j][i] for j in range(n + 1)) + " \\\\" for i, l in enumerate(labels)]
     caption = (f"Top-1 accuracy (\\%) in the CoTTA setting on ImageNet-C, severity 5, per corruption (mean over the "
                f"{stream.rounds} rounds). " + _setting(stream, ctx, duo_ctx, tta, temps, proxy, beta, b_t))
-    return _env(body, "l|" + "c" * n + "|c", caption, label, source)
+    return _env(body, "l|" + "c" * n + "|c", caption, label, source, provenance.run_label(ctx.duo, tta, ctx.bn))
 
 
 def render_round_table(stream: Stream, ctx, duo_ctx, tta: str, temps, *, proxy: str, beta: float, b_t: int, label: str, source: str) -> str:
@@ -260,7 +433,7 @@ def render_round_table(stream: Stream, ctx, duo_ctx, tta: str, temps, *, proxy: 
     body += [f"{latex_escape(l)} & " + " & ".join(best[j][i] for j in range(R + 1)) + " \\\\" for i, l in enumerate(labels)]
     caption = (f"Mean top-1 accuracy (\\%) over the 15 corruptions in each round of the CoTTA setting. "
                + _setting(stream, ctx, duo_ctx, tta, temps, proxy, beta, b_t))
-    return _env(body, "l|" + "c" * R + "|c", caption, label, source)
+    return _env(body, "l|" + "c" * R + "|c", caption, label, source, provenance.run_label(ctx.duo, tta, ctx.bn))
 
 
 def summary_text(stream: Stream) -> str:
@@ -296,7 +469,9 @@ def report(args, ctx, duo_ctx, temps, proxy: str, seeds: Sequence[int], path_of,
                         args.order) + f"__{proxy}_bt{args.b_t}_beta{args.beta:g}"
     print(summary_text(stream))
     pd.DataFrame(accuracy_rows(stream)).to_csv(out / f"{tag}__accuracy.csv", index=False)
-    figs = plot_stream(stream, out / f"{tag}__accuracy.png")
+    note = provenance.footer(ctx.duo, tta, args.bn, f"CoTTA {'standard order' if args.order is None else f'order {args.order}'}, {args.rounds} rounds x "
+                             f"{args.images} images, gate {proxy} b_t={args.b_t} beta={args.beta:g}, T_L = {temps.T_l}, T_S = {temps.T_s}")
+    figs = plot_stream(stream, out / f"{tag}__accuracy.png", footer=note)
     dest = out if (args.num_samples or args.out) else ctx.g.path("paper")       # an explicit --out keeps the tables beside the data
     kw = dict(proxy=proxy, beta=args.beta, b_t=args.b_t, source="scripts/03c_recurring_duos.py")
     write_table(dest / f"tab_recurring__{tag}.tex", render_main_table(stream, ctx, duo_ctx, tta, temps, label=f"tab:recurring:{tag}", **kw))
@@ -304,6 +479,16 @@ def report(args, ctx, duo_ctx, temps, proxy: str, seeds: Sequence[int], path_of,
                                                                               label=f"tab:recurring_rounds:{tag}", **kw))
     for f in figs:
         print(f"wrote {f}")
+    try:
+        curves = {}
+        for run in ("indep", "joint_dd"):
+            curves[run] = gate_curves(RC.load_run(path_of(run, seeds[0])), load_gate_records(path_of(run, seeds[0])), args.b_t)
+    except FileNotFoundError as e:
+        print(f"no gate figure: {e}")
+    else:
+        rows = default_rows(curves, stream.images, args.b_t, args.beta)
+        for f in plot_gate_reaction(rows, out / f"{tag}__gate_reaction.png", images=stream.images, footer=note):
+            print(f"wrote {f}")
     return 0
 
 
@@ -383,13 +568,42 @@ if __name__ == "__main__":
             cap = t.split("\\caption{")[1].split("\n")[0]
             assert cap.count("$") % 2 == 0 and "CoTTA's standard order" in cap and f"repeats them for {R} rounds" in cap, cap[:200]
             assert "Mean over 2 seeds" in cap and "Models that adapt on their own entropy:" in cap and "proxy batches of 256 samples" in cap
-        figs = plot_stream(st, tmp / "fig.png")
+        figs = plot_stream(st, tmp / "fig.png", footer="ViT-B/16 + ResNet-50 (V1) [tiny], Tent | generated 2026-01-01 00:00:00 +0000")
         assert [f.suffix for f in figs] == [".png", ".pdf"] and all(f.stat().st_size > 5000 for f in figs)
+        import PIL.Image
+        assert "ViT-B/16 + ResNet-50 (V1) [tiny]" in PIL.Image.open(figs[0]).text["Description"], "the footer is stored in the figure"
         one = Stream({k: v[:1] for k, v in st.acc.items()}, st.part_n, st.part_label, st.part_round, st.meta)
         plot_stream(one, tmp / "fig1.png")                                                   # one seed: no band
         st1 = Stream({k: v[:, : 15 * IMAGES] for k, v in st.acc.items()}, st.part_n[:15], st.part_label[:15], st.part_round[:15], st.meta)
         plot_stream(st1, tmp / "fig_r1.png")                                                  # one round: a single panel
         assert len(accuracy_rows(st)) == len(LINES) * S * R * 15 and "Joint DD" in summary_text(st)
+
+        # gate reaction: per-proxy-batch accuracies from the stored correctness, the gate weight at any beta from the stored logits
+        B_T = 64
+        nb = -(-N // B_T)
+        xl, xs = rng.normal(0.5, 1.0, nb), rng.normal(0.0, 1.0, nb)
+        recs = [{"r_l": 0.6, "r_s": 0.4, "x_l": float(a), "x_s": float(b), "w_l": float(1 / (1 + np.exp(-0.5 * (a - b))))} for a, b in zip(xl, xs)]
+        run0 = {k: st.acc[l][0] for k, l in (("large", "Frozen duo"), ("small", "Fixed TS duo"), ("ts", "Fixed TS duo"), ("gate", "Vanilla DD"))}
+        cv = gate_curves(run0, recs, B_T)
+        assert len(cv["x"]) == nb and np.allclose(gate_weight(cv, 0.5), cv["w_l"]) and np.all((0 <= cv["large"]) & (cv["large"] <= 1))
+        assert abs(np.average(cv["gate"], weights=np.diff(np.minimum(np.arange(nb + 1) * B_T, N))) - run0["gate"].mean()) < 1e-12
+        assert np.all(np.abs(gate_weight(cv, 0.01) - 0.5) < 0.05) and np.all(gate_weight(cv, 0) == 0.5), "beta -> 0 is the equal weighting"
+        try:
+            gate_curves(run0, recs[:-1], B_T)
+            raise AssertionError("records that do not cover the stream must be refused")
+        except ValueError:
+            pass
+        assert np.allclose(ema(np.array([1.0, 0.0, 0.0]), 0.5), [1.0, 0.5, 0.25])
+        run1 = {k: np.where(np.arange(N) >= 15 * IMAGES, 0, v).astype(np.uint8) for k, v in run0.items()}   # collapses when round 2 starts
+        cv1 = gate_curves(run1, recs, B_T)
+        hit = collapse_round(cv1, IMAGES)
+        assert hit is not None and hit[1] == 1 and hit[0] == ["large", "small"], hit
+        assert _who(hit[0]) == "ViT-B/16 and ResNet-50 collapse" and _who(["small"]) == "ResNet-50 collapses"
+        assert collapse_round(cv, IMAGES) is None, "a run whose members do not drop has no collapse round"
+        rows_g = default_rows({"indep": cv1, "joint_dd": cv1}, IMAGES, B_T, 0.5)
+        assert [r["title"][:3] for r in rows_g] == ["(a)", "(b)", "(c)"] and "ViT-B/16 and ResNet-50 collapse" in rows_g[1]["title"]
+        figs_g = plot_gate_reaction(rows_g, tmp / "gate.png", images=IMAGES)
+        assert all(f.stat().st_size > 5000 for f in figs_g)
         if shutil.which("pdflatex"):
             doc = ("\\documentclass{article}\\usepackage{booktabs,graphicx,amsmath}\\usepackage[landscape,margin=1cm]{geometry}"
                    "\\begin{document}\n" + t1 + t2 + "\\end{document}\n")

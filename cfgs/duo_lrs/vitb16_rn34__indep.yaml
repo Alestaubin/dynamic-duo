@@ -1,0 +1,85 @@
+# Learning rates of duo `vitb16_rn34`, INDEP regime: each member adapts on its OWN entropy (engine mode both_indep; Vanilla DD).
+# The one place these numbers live (cfgs/duos/ only names the models). `methods`: what was tuned, per TTA method and per member,
+# recorded by scripts/02_tune_tta.py and 05_select_member_lr.py (src/utils/duo_lrs.py::record_tuned); `defaults`: what a member
+# runs with when nothing is tuned for the method.
+duo: vitb16_rn34
+regime: indep
+engine_mode: both_indep
+defaults:
+  large:
+    model: vit_b_16
+    norm: LN
+    OPTIM:
+      METHOD: SGD
+      STEPS: 1
+      LR: 7.0e-05
+      MOMENTUM: 0.9
+      DAMPENING: 0.0
+      WD: 0.0
+      NESTEROV: false
+    source: placeholder until scripts/02c_tune_indep_pair.py tunes this duo (2026-10-22); never used for results
+  small:
+    model: resnet34
+    norm: BN
+    OPTIM:
+      METHOD: SGD
+      STEPS: 1
+      LR: 0.0005
+      MOMENTUM: 0.9
+      DAMPENING: 0.0
+      WD: 0.0
+      NESTEROV: false
+    source: placeholder until scripts/02c_tune_indep_pair.py tunes this duo (2026-10-22); never used for results
+methods:
+  tent:
+    large:
+      model: vit_b_16
+      norm: LN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 7.0e-05
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02c_tune_indep_pair.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seeds: &id001
+      - 0
+      - 1
+      - 2
+      temperatures: heldout_vitb16_rn34_frozen_2e9fbea79473
+      note: tuned as a PAIR for this duo (static-duo accuracy)
+      duo_macro_accuracy: 0.5594
+      late_duo_accuracy: 0.56833
+      worst_stream_accuracy: 0.36367
+    small:
+      model: resnet34
+      norm: BN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.001
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02c_tune_indep_pair.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seeds: *id001
+      temperatures: heldout_vitb16_rn34_frozen_2e9fbea79473
+      note: tuned as a PAIR for this duo (static-duo accuracy)
+      duo_macro_accuracy: 0.5594
+      late_duo_accuracy: 0.56833
+      worst_stream_accuracy: 0.36367

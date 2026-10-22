@@ -64,7 +64,7 @@ def main() -> int:
     tag = study_tag(args, ap.get_default("duo"))
     save_rows(out / f"{tag}.csv", rows)
     tex = render_table(
-        pd.DataFrame(rows), labels, batch_sizes=batch_sizes, models=model_names(ctx), regime=regime_text(args),
+        pd.DataFrame(rows), labels, batch_sizes=batch_sizes, models=model_names(ctx), regime=regime_text(args, ctx.duo),
         frozen=args.mode == "no_adapt", severity=ctx.g.severity, clean_desc=clean_text(args),
         table_labels=[f"tab:temperatures:{tag}", f"tab:oracles:{tag}"], source="scripts/01_tab_temperatures.py")
     # a capped run (--num_samples, a smoke test) must not overwrite the final tables

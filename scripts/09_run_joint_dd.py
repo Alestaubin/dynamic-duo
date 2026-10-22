@@ -5,7 +5,8 @@ Stage E, live part: Joint Dynamic Duos on the held-out streams, to choose its be
 Joint DD adapts BOTH members on the entropy of the gated prediction (the gate weight is a constant of each step), so it cannot be replayed
 from stored logits: each (proxy, b_t, beta) is a live run over the held-out streams. With beta = 0 it IS the joint duo mode with the fixed combination.
 The members use one base algorithm's settings (Tent, the learning rates given), the temperatures and the source statistics of the stateful proxies
-come from the offline evaluation of that algorithm (its `.temps.json`), and each proxy is run at the b_t that won its Vanilla DD selection.
+come from the offline evaluation of that algorithm (its `.temps.json`: the source statistics of the stateful proxies; the TEMPERATURES are the
+Fixed TS fitted on the frozen models, as everywhere), and each proxy is run at the b_t that won its Vanilla DD selection.
 
     --lr_large LR --lr_small LR   the members' learning rates (SGD, momentum 0.9). Omitted, both are the duo's joint regime
                                   (cfgs/duo_lrs/<duo>__joint.yaml, the pair of 02b_tune_joint_lr.py; NotTuned while pending)
@@ -59,8 +60,9 @@ def main() -> int:
     else:
         ctx = with_optim(ctx, large=sgd_optim(args.lr_large, args.momentum), small=sgd_optim(args.lr_small, args.momentum))
     segments = stream_segments(args.streams, ctx.g)
-    meta = json.loads(Path(f"{args.eval}.temps.json").read_text())
-    T_l, T_s = meta["temps"]["heldout"]
+    meta = json.loads(Path(f"{args.eval}.temps.json").read_text())       # the source statistics of the stateful proxies come from here
+    frozen_ts = AM.resolve_temperatures(ctx, AM.temperature_spec(args.duo, "tent", None, args.num_samples), None, report_only=True)
+    T_l, T_s = frozen_ts.T_l, frozen_ts.T_s                              # the Fixed TS fitted on the frozen models, the same for every method
     stats_l, stats_s = meta["stats"] if meta.get("stats") else (None, None)
     cells = []
     for c in args.cells:
