@@ -1,5 +1,7 @@
 # Design note: reset rules for Dynamic Duos (Phase 4, stage R-A)
 
+> **Scope note, 2026-10-23.** The author narrowed the experiments to the continual stream only (the 15 ImageNet-C corruptions concatenated); the recurring streams below are no longer run, and the lengths and hours of section 4 are superseded by the run list in plan.md, Phase 4.
+
 2026-10-20. Written for the author, before any code of stages R-B to R-E. Nothing was run on a GPU, no job was submitted, no CCC data was generated, and no existing file was changed except `plan.md` (Phase 4 rewritten to the brief).
 
 Everything below was read from the code as it is today (paths are relative to the repo root). Section 0 lists what needs your decision; sections 1 to 5 are the four items of the brief.

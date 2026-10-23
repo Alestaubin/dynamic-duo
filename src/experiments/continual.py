@@ -1,13 +1,13 @@
 """
-recurring.py
+continual.py
 ============
-The CoTTA setting for the duo: ONE long stream through the 15 ImageNet-C corruptions in CoTTA's standard order (cfgs/global.yaml's
-test corruptions: gaussian, shot, impulse, defocus, glass, motion, zoom, snow, frost, fog, brightness, contrast, elastic, pixelate,
-jpeg; or one of its 10 random orders), repeated for R rounds, severity 5, with NO resets (the members start from source weights once
-and adapt for the whole stream). Each corruption
-is visited with `images` images (the CoTTA protocol's 5,000), and every round draws its own images (the loader seed is
-`seed + 1000 * round`, as in docs/design_resets.md D5), so round 0 is the continual stream of that order. The stream length is
-R * 15 * images (default 10 * 15 * 5,000 = 750,000 images, 11,730 steps at batch size 64).
+The continual setting for the duo: ONE long stream made of the 15 ImageNet-C corruptions concatenated one after the other, in CoTTA's
+standard order (cfgs/global.yaml's test corruptions: gaussian, shot, impulse, defocus, glass, motion, zoom, snow, frost, fog,
+brightness, contrast, elastic, pixelate, jpeg; or one of its 10 random orders), severity 5, with NO resets (the members start from
+source weights once and adapt for the whole stream). Each corruption is visited once with `images` images (default 50,000: all of
+it), so the stream is 15 * 50,000 = 750,000 images, 11,730 steps at batch size 64.
+The stream code takes a number of `rounds` (the loader seed is `seed + 1000 * round`, as in docs/design_resets.md D5), but
+scripts/03c_continual_duos.py runs one pass only: `rounds` is 1 and every run's `part_round` is 0.
 
 Three live runs, each over the identical batches (same loader seeds); every run stores, per sample, whether each prediction was
 correct (one byte per sample and series: the plot, the tables and any later window size are sums over it):
@@ -22,7 +22,7 @@ correct (one byte per sample and series: the plot, the tables and any later wind
   frozen     no adaptation (BatchNorm on the test batch's statistics with --bn). Series ts = "Frozen duo", large, small.
 
 The gate is PureProxyGate (the live gate of Joint DD, also what scripts/09 runs): it keeps its buffer across corruptions, so a
-proxy batch may straddle a shift and nothing tells it that one happened (src/reset/live.py's convention). `run_recurring` mirrors
+proxy batch may straddle a shift and nothing tells it that one happened (src/reset/live.py's convention). `run_continual` mirrors
 `src.reset.live.run_stream` without controller or resets and keeps per-sample correctness instead of logits; the self-test checks
 that the two give the same predictions.
 
@@ -56,10 +56,14 @@ class Run:
     engine: str          # MemberRunner mode
     duo_entropy: bool    # adapts on the duo entropy: runs with the joint regime's learning rates
     gated: bool          # has a gate (the frozen run has none)
+    own_rates: bool = False   # adapts on the duo entropy but with the own-entropy (indep regime) rates: a diagnostic, see RUNS
 
 
 RUNS = {r.key: r for r in (Run("indep", "both_indep", False, True), Run("joint_dd", "both_duo", True, True),
-                           Run("frozen", "no_adapt", False, False))}
+                           Run("frozen", "no_adapt", False, False),
+                           # Joint DD at the indep regime's rates: is its collapse the (episodically tuned, much larger) rates or the shared loss?
+                           Run("joint_dd_own_rates", "both_duo", True, True, own_rates=True))}
+MAIN_RUNS = ("indep", "joint_dd", "frozen")          # what the script runs and the report reads unless told otherwise
 
 
 @dataclass(frozen=True)
@@ -74,17 +78,29 @@ class Part:
         return self.segment.label
 
 
-def stream_parts(ctx: Context, *, rounds: int, seed: int, order: int | None = None) -> list[Part]:
-    """The recurring stream: the 15 corruptions in CoTTA's standard order (`order` None) or in one of its 10 random orders
-    (cfgs/protocols.yaml), repeated `rounds` times, one loader seed per round (seed + 1000 * round). Members reset at the start only."""
+def stream_parts(ctx: Context, *, rounds: int, seed: int, order: int | None = None, stream: str = "test") -> list[Part]:
+    """The continual stream: the 15 corruptions concatenated in CoTTA's standard order (`order` None) or in one of its 10 random orders
+    (cfgs/protocols.yaml); `rounds` > 1 repeats them, one loader seed per round (seed + 1000 * round). Members reset at the start only.
+    `stream="heldout"`: the 4 held-out corruptions (speckle noise, gaussian blur, spatter, saturate; where reset rules are calibrated)
+    concatenated, `order` k (default 0) rotating the list left by k."""
     g = ctx.g
-    corruptions = g.test_corruptions if order is None else g.cotta_orders[order]
+    if stream == "heldout":
+        held, k = g.tuning_corruptions, order or 0
+        if not 0 <= k < len(held):
+            raise ValueError(f"a held-out order is a rotation 0..{len(held) - 1}, got {order}")
+        corruptions = held[k:] + held[:k]
+    elif stream == "test":
+        corruptions = g.test_corruptions if order is None else g.cotta_orders[order]
+    else:
+        raise ValueError(f"stream must be 'test' or 'heldout', got {stream!r}")
     segments = [Segment(f"{c}/s{g.severity}", ImageNetC.from_config(g, c, g.severity), i == 0) for i, c in enumerate(corruptions)]
     return [Part(seg, r, seed + 1000 * r) for r in range(rounds) for seg in segments]
 
 
-def stream_tag(duo: str, tta: str, bn: bool, rounds: int, images: int, seed: int, order: int | None = None) -> str:
-    return f"{duo}__{tta}{'_bn' if bn else ''}__R{rounds}_n{images}_{'std' if order is None else f'order{order}'}_seed{seed}"
+def stream_tag(duo: str, tta: str, bn: bool, rounds: int, images: int, seed: int, order: int | None = None, stream: str = "test") -> str:
+    span = "heldout" if stream == "heldout" else "continual" if rounds == 1 else f"R{rounds}"
+    which = f"rot{order or 0}" if stream == "heldout" else "std" if order is None else f"order{order}"
+    return f"{duo}__{tta}{'_bn' if bn else ''}__{span}_n{images}_{which}_seed{seed}"
 
 
 def run_path(directory: Path, tag: str, run: str, proxy: str, b_t: int, beta: float) -> Path:
@@ -92,7 +108,7 @@ def run_path(directory: Path, tag: str, run: str, proxy: str, b_t: int, beta: fl
     return Path(directory) / f"{tag}__{run}{gate}.npz"
 
 
-def run_recurring(runner: MemberRunner, parts: Sequence[Part], *, images: int, batch_size: int, workers: int, T_l: float,
+def run_continual(runner: MemberRunner, parts: Sequence[Part], *, images: int, batch_size: int, workers: int, T_l: float,
                   T_s: float, gate: PureProxyGate | None = None, inside: bool = False, log_every: int = 10,
                   keep_predictions: bool = False) -> dict:
     """Adapt over `parts` (no resets) and return {"correct": {series: uint8 array}, "part_n": [...], "gate_records": [...]}
@@ -196,14 +212,28 @@ if __name__ == "__main__":
         assert [p.label for p in std[:15]] == [f"{c}/s5" for c in g.test_corruptions] and [p.label for p in std[15:]] == [p.label for p in std[:15]]
         assert [p.round for p in std] == [0] * 15 + [1] * 15 and {p.seed for p in std[:15]} == {5} and {p.seed for p in std[15:]} == {1005}
         assert [p.label.split("/")[0] for p in stream_parts(ctx, rounds=1, seed=0, order=3)] == g.cotta_orders[3]
+        assert stream_tag("d", "tent", True, 1, 50000, 0) == "d__tent_bn__continual_n50000_std_seed0"
         assert stream_tag("d", "tent", True, 10, 5000, 0) == "d__tent_bn__R10_n5000_std_seed0"
+        assert stream_tag("d", "tent", True, 1, 50000, 0, 2, "heldout") == "d__tent_bn__heldout_n50000_rot2_seed0"
+        assert stream_tag("d", "tent", True, 1, 50000, 0, None, "heldout") == "d__tent_bn__heldout_n50000_rot0_seed0"
+        held = g.tuning_corruptions
+        assert [p.label.split("/")[0] for p in stream_parts(ctx, rounds=1, seed=0, stream="heldout")] == held
+        assert [p.label.split("/")[0] for p in stream_parts(ctx, rounds=1, seed=0, order=1, stream="heldout")] == held[1:] + held[:1]
+        assert [p.label.split("/")[0] for p in stream_parts(ctx, rounds=1, seed=0, order=3, stream="heldout")] == held[3:] + held[:3]
+        for bad in (dict(order=4, stream="heldout"), dict(stream="other")):
+            try:
+                stream_parts(ctx, rounds=1, seed=0, **bad)
+                raise AssertionError("an unknown held-out order or stream must be refused")
+            except ValueError:
+                pass
+        assert RUNS["joint_dd_own_rates"].duo_entropy and RUNS["joint_dd_own_rates"].own_rates and not RUNS["joint_dd"].own_rates
         assert stream_tag("d", "tent", False, 3, 50000, 1, 4) == "d__tent__R3_n50000_order4_seed1"
 
         results = {}
         for key, run in RUNS.items():
             gate = PureProxyGate("nnn", beta=2.0, b_t=B_T, T_l=T_L, T_s=T_S, num_classes=1000) if run.gated else None
             runner, inside = make_runner(ctx, run, gate)
-            results[key] = run_recurring(runner, parts, images=IMAGES, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, gate=gate,
+            results[key] = run_continual(runner, parts, images=IMAGES, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, gate=gate,
                                          inside=inside, log_every=0, keep_predictions=True)
             res = results[key]
             n = IMAGES * len(parts)
@@ -237,7 +267,7 @@ if __name__ == "__main__":
         # beta = 0 inside the loop is the static duo: the gated series equals the ts series, step for step
         gate0 = PureProxyGate("nnn", beta=0.0, b_t=B_T, T_l=T_L, T_s=T_S, num_classes=1000)
         runner, inside = make_runner(ctx, RUNS["joint_dd"], gate0)
-        flat = run_recurring(runner, parts, images=IMAGES, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, gate=gate0, inside=True,
+        flat = run_continual(runner, parts, images=IMAGES, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, gate=gate0, inside=True,
                              log_every=0, keep_predictions=True)
         assert np.array_equal(flat["predictions"]["gate"], flat["predictions"]["ts"]), "beta = 0: Joint DD predicts the static duo"
         assert not np.array_equal(results["joint_dd"]["predictions"]["gate"], results["joint_dd"]["predictions"]["ts"]), \
@@ -253,9 +283,9 @@ if __name__ == "__main__":
         assert all(np.array_equal(back[s], results["joint_dd"]["correct"][s]) for s in ("ts", "gate", "large", "small"))
         assert not list((tmp / "o").glob(".*tmp*")), "no temp file is left behind"
         try:
-            run_recurring(MemberRunner(ctx.duo, "tent", {}, "both_indep", "cpu", models=copy.deepcopy(base)), parts, images=IMAGES,
+            run_continual(MemberRunner(ctx.duo, "tent", {}, "both_indep", "cpu", models=copy.deepcopy(base)), parts, images=IMAGES,
                           batch_size=BS, workers=0, T_l=T_L, T_s=T_S, gate=gate0, inside=True, log_every=0)
             raise AssertionError("a gate inside the loop must be the loop calibrator")
         except ValueError:
             pass
-    print("recurring self-test passed")
+    print("continual self-test passed")

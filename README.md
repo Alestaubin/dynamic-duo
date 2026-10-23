@@ -26,7 +26,7 @@ The default duo is `vitb16_rn50v1`: torchvision's ViT-B/16 and the *original* (V
 sbatch slurm/job.sh scripts/01_tab_temperatures.py --mode no_adapt --batch_sizes 16 64 128 --bn
 ```
 
-Writes `tab_temperatures__frozen_bn.tex`: per stream (clean, the 4 held-out corruptions, the 15 test corruptions) the NLL-optimal temperatures, the two members, Fixed TS fitted on clean data and on the held-out corruptions, and three oracles (per-corruption, per-batch and per-sample temperatures).
+Writes `tab_temperatures__frozen_bn__<duo>.tex` (`--duo <name>`; default `vitb16_rn50v1`): per stream (clean, the 4 held-out corruptions, the 15 test corruptions) the NLL-optimal temperatures, the two members, Fixed TS fitted on clean data and on the held-out corruptions, and three oracles (per-corruption, per-batch and per-sample temperatures).
 
 **2. Tune Tent's learning rates: each model alone, and the independent duo** (once; the result is stored in `cfgs/duo_lrs/`, so skip this to reuse it)
 
@@ -59,7 +59,9 @@ sbatch --array=0-20 slurm/job.sh scripts/03_tab_adaptation_modes.py --bn --shard
 sbatch slurm/job.sh scripts/03_tab_adaptation_modes.py --bn --report_only           # builds the tables from the cache
 ```
 
-Writes `tab_adaptation_modes__tent_bn.tex` (accuracy per corruption) and `tab_adaptation_modes_summary__tent_bn.tex` (accuracy, ECE, NLL per mode).
+Writes `tab_adaptation_modes__tent__<duo>_bn.tex` (accuracy per corruption) and `tab_adaptation_modes_summary__tent__<duo>_bn.tex` (accuracy, ECE, NLL per mode). Every table and figure is tagged with its models and the time it was generated (the first comment line of a `.tex` file, the footer and metadata of a figure; `src/utils/provenance.py`), and every file name carries the duo, so two duos never share a file.
+
+**Other duos.** The same steps 1 to 4 run for any duo of `cfgs/duos/` with `--duo <name>`: besides the main `vitb16_rn50v1` (ViT-B/16 + ResNet-50), `vitb16_rn34` (ViT-B/16 + ResNet-34) and `convnextb_deits` (ConvNeXt-B + DeiT-S, no BatchNorm layer, so `--bn` changes nothing). A new duo needs `cfgs/duos/<name>.yaml` and its three `cfgs/duo_lrs/<name>__{single,indep,joint}.yaml` files, which `src/utils/duo_lrs.py` can create (`init_single`, `init_indep`, `init_joint`); steps 2 and 3 then fill in the rates. Use `--exclude=kn117` on GPU jobs.
 
 **The gate itself** (proxy, beta and proxy-batch size, Joint DD) is selected by `04_cache_logits.py` to `10_select_joint_dd_beta.py`, run in numerical order; each reads what the one before stored, and each script's docstring has its commands. They write the selection in `results/selection_section45.json`, not a table yet. The tables that use it (main accuracy, beta, proxies, continual streams, ablations) are not written yet: see `plan.md`.
 

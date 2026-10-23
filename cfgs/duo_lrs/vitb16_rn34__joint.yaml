@@ -5,6 +5,43 @@
 duo: vitb16_rn34
 regime: joint
 engine_mode: both_duo
-methods: {}
-pending:
-  tent: 'not tuned yet (2026-10-22 tuning pipeline: 02c then 02b)'
+methods:
+  tent:
+    large:
+      model: vit_b_16
+      norm: LN
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.0016
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: /project/6104790/alxstaub/dynamic-duos/out/results/tune_joint_lr/vitb16_rn34__tent_bn/results.json
+      tuned_on:
+      - gaussian_blur/s5
+      - saturate/s5
+      - spatter/s5
+      - speckle_noise/s5
+      duo_macro_accuracy: 0.6113
+      worst_stream_accuracy: 0.46795
+    small:
+      model: resnet34
+      norm: BN
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.0028
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: /project/6104790/alxstaub/dynamic-duos/out/results/tune_joint_lr/vitb16_rn34__tent_bn/results.json
+      tuned_on:
+      - gaussian_blur/s5
+      - saturate/s5
+      - spatter/s5
+      - speckle_noise/s5
+      duo_macro_accuracy: 0.6113
+      worst_stream_accuracy: 0.46795

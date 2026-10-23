@@ -1,8 +1,8 @@
 """
-recurring_report.py
+continual_report.py
 ===================
-The figure and the tables of scripts/03c_recurring_duos.py, from the per-sample correctness the three runs stored
-(src/experiments/recurring.py). Four lines, in this order and colors (a validated categorical set; the frozen reference is a neutral dashed line):
+The figure and the tables of scripts/03c_continual_duos.py, from the per-sample correctness the three runs stored
+(src/experiments/continual.py). Four lines, in this order and colors (a validated categorical set; the frozen reference is a neutral dashed line):
 
     Frozen duo    frozen run, the static duo (z_L / T_L + z_S / T_S) / 2           gray, dashed
     Fixed TS duo  Independent run (members adapt on their own entropy), same duo   aqua
@@ -13,6 +13,8 @@ Figure (full text width): the whole stream on top (accuracy per block of images/
 every shift is a faint line, every round start a labeled one), and below it the first and the last round zoomed so that all 15
 shifts are labeled with their corruption. Mean over seeds (a band when there are several). Tables, in the layout of CoTTA's
 Table 4: one column per corruption in stream order (accuracy averaged over the rounds), then the mean; and the mean per round.
+The script runs one pass (rounds = 1: the continual stream) and writes the first table only; the zoomed figure and the per-round table
+are for streams of several rounds.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ import numpy as np
 
 from src.experiments import adaptation_modes as AM
 from src.experiments import gated_duos as GD
-from src.experiments import recurring as RC
+from src.experiments import continual as RC
 from src.utils import provenance
 from src.utils.tables import latex_escape, timestamp
 
@@ -41,7 +43,8 @@ INK, INK2, GRID = "#0b0b0b", "#52514e", "#e3e2de"
 SHORT = {"gaussian_noise": "Gaussian", "shot_noise": "shot", "impulse_noise": "impulse", "defocus_blur": "defocus",
          "glass_blur": "glass", "motion_blur": "motion", "zoom_blur": "zoom", "snow": "snow", "frost": "frost", "fog": "fog",
          "brightness": "brightness", "contrast": "contrast", "elastic_transform": "elastic\\_trans", "pixelate": "pixelate",
-         "jpeg_compression": "jpeg"}
+         "jpeg_compression": "jpeg",
+         "speckle_noise": "speckle", "gaussian_blur": "Gaussian blur", "spatter": "spatter", "saturate": "saturate"}
 PLAIN = {k: v.replace("\\_", "_") for k, v in SHORT.items()}
 
 
@@ -256,15 +259,17 @@ def plot_gate_reaction(rows: Sequence[dict], path: Path, *, images: int, n_corru
     Left: per-proxy-batch accuracy of each member (dashed) and of the duos (solid), EMA-smoothed over the faint raw values, and the
     two proxy scores (dotted). Right: the gate weight w_L at every beta (a one-hue ramp, beta = the run's own bold) against the
     members' accuracy (dashed). `rows`: dicts {title, curves (gate_curves), window (first, last sample), beta (the run's), duos:
-    [(series key, label, color)]}."""
+    [(series key, label, color)], mark (optional: (sample, text), a dash-dotted line through both panels where a collapse starts)}."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     plt.rcParams.update({"font.size": 7, "axes.edgecolor": INK2, "axes.labelcolor": INK2, "xtick.color": INK2, "ytick.color": INK2,
                          "axes.linewidth": 0.6, "pdf.fonttype": 42, "font.family": "DejaVu Sans"})
-    fig, axes = plt.subplots(len(rows), 2, figsize=(width, row_height * len(rows) + 0.5), dpi=dpi, facecolor="white", squeeze=False,
-                             gridspec_kw=dict(left=0.07, right=0.975, top=0.93, bottom=0.155, hspace=0.62, wspace=0.17))
+    height = row_height * len(rows) + 0.5
+    inch = 1.0 / height                                                                     # the legends and the footer take fixed inches, whatever the rows
+    fig, axes = plt.subplots(len(rows), 2, figsize=(width, height), dpi=dpi, facecolor="white", squeeze=False,
+                             gridspec_kw=dict(left=0.07, right=0.975, top=0.93, bottom=1.08 * inch, hspace=0.62, wspace=0.17))
     round_len = n_corruptions * images
     for (axl, axr), row in zip(axes, rows):
         c, (a, b) = row["curves"], row["window"]
@@ -284,6 +289,11 @@ def plot_gate_reaction(rows: Sequence[dict], path: Path, *, images: int, n_corru
                            linestyle="--" if new_round else "-", zorder=1)
             ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v / 1000:g}k" if v else "0"))
             ax.set_xlabel("Samples processed", labelpad=1)
+        if row.get("mark") and a <= row["mark"][0] <= b:                                    # where the collapse starts
+            for ax in (axl, axr):
+                ax.axvline(row["mark"][0], color=INK, linewidth=0.8, linestyle=(0, (6, 2, 1, 2)), zorder=6)
+            axl.text(row["mark"][0], 0.99, f" {row['mark'][1]}", ha="left", va="top", fontsize=5.6, color=INK, zorder=7,
+                     transform=axl.get_xaxis_transform())
         n_rounds_shown = (b - a) / round_len
         if n_rounds_shown > 1.5:                                                           # name the rounds of a long window
             for r in range(int(a // round_len), int(np.ceil(b / round_len))):
@@ -323,10 +333,10 @@ def plot_gate_reaction(rows: Sequence[dict], path: Path, *, images: int, n_corru
         for h, l in zip(*axr.get_legend_handles_labels()):
             if l not in seen:
                 right.setdefault(l, h)
-    fig.legend(list(left.values()), list(left), loc="lower left", ncol=4, frameon=False, fontsize=5.8, bbox_to_anchor=(0.06, 0.058),
+    fig.legend(list(left.values()), list(left), loc="lower left", ncol=4, frameon=False, fontsize=5.8, bbox_to_anchor=(0.06, 0.43 * inch),
                handlelength=2.0, columnspacing=1.0)
-    fig.legend(list(right.values()), list(right), loc="lower right", ncol=4, frameon=False, fontsize=5.8, bbox_to_anchor=(0.985, 0.004),
-               handlelength=1.8, columnspacing=1.0)
+    fig.legend(list(right.values()), list(right), loc="lower right", ncol=4, frameon=False, fontsize=5.8, bbox_to_anchor=(0.985, 0.236 * inch),
+               handlelength=1.8, columnspacing=1.0)                                # both above the footer's two lines
     out = provenance.save_figure(fig, path, footer or "unlabeled figure: no run text given", dpi=dpi)
     plt.close(fig)
     return out
@@ -349,31 +359,76 @@ def collapse_round(curves: dict[str, np.ndarray], images: int, n_corruptions: in
     return [k for k, v in first.items() if v == r], r
 
 
+def collapse_visit(run: dict, frozen: dict, drop: float = 0.5) -> tuple[list[str], int] | None:
+    """(the members, the 0-based visit) of the first visit in which a member's accuracy is below `drop` of the FROZEN member's on the
+    very same images, and stays below it in the next visit (the last visit needs no successor): every member that first falls below it
+    in that visit; None if no member ever does. `run`, `frozen`: RC.load_run results of the same stream. Unlike `collapse_round` this
+    needs no second round, so it also reads a single pass over the 15 shifts (the continual stream), where each visit is a corruption."""
+    edges = np.r_[0, np.cumsum(run["part_n"])]
+    n = len(edges) - 1
+    below = {k: np.array([run[k][edges[v]:edges[v + 1]].mean() < drop * frozen[k][edges[v]:edges[v + 1]].mean() for v in range(n)])
+             for k in ("large", "small")}
+    first = {}
+    for k, flags in below.items():
+        sustained = flags & np.append(flags[1:], True)
+        if sustained.any():
+            first[k] = int(np.flatnonzero(sustained)[0])
+    if not first:
+        return None
+    v = min(first.values())
+    return [k for k, w in first.items() if w == v], v
+
+
 def _who(members: list[str]) -> str:
     names = [MEMBER[k][0] for k in members]
     return " and ".join(names) + (" collapse" if len(names) > 1 else " collapses")
 
 
-def default_rows(runs: dict[str, dict], images: int, b_t: int, beta: float, n_corruptions: int = 15) -> list[dict]:
+def default_rows(runs: dict[str, dict], images: int, b_t: int, beta: float, n_corruptions: int = 15,
+                 collapse: dict[str, tuple[list[str], int] | None] | None = None, corruptions: Sequence[str] = ()) -> list[dict]:
     """The rows of the gate-reaction figure for the stored runs: round 1 of Vanilla DD; Vanilla DD around the first collapse of one of
     its members (5 rounds after it, 1 before); Joint DD from the start to one round after its first collapse. `runs`: {"indep": curves,
-    "joint_dd": curves} (gate_curves); a row is left out when its run has no collapse."""
+    "joint_dd": curves} (gate_curves); a row is left out when its run has no collapse.
+    `collapse`: {"indep": hit, "joint_dd": hit} with `collapse_visit`'s hits. Given, the collapse is the one against the frozen members,
+    each row marks its onset and names the corruption it starts in, and a stream of ONE round (the continual stream) shows each run whole;
+    omitted, it is `collapse_round`'s (against the member's own first round: needs two rounds, marks nothing)."""
     rl = n_corruptions * images
     n_rounds = int(runs["indep"]["x"].max() // rl) + 1
+
+    def hit_of(key: str) -> tuple[list[str], int, int | None] | None:
+        """(members, round, onset sample or None)"""
+        if collapse is not None:
+            hit = collapse.get(key)
+            return None if hit is None else (hit[0], hit[1] // n_corruptions, hit[1] * images)
+        hit = collapse_round(runs[key], images, n_corruptions)
+        return None if hit is None else (hit[0], hit[1], None)
+
+    def where(hit, onset: int | None) -> str:
+        if onset is None:
+            return f" in round {hit[1] + 1}"
+        c = PLAIN.get(corruptions[(onset // images) % n_corruptions], "") if corruptions else ""
+        return f" at {c} ({onset // 1000}k samples)" if c else f" after {onset // 1000}k samples"
+
     duos_v = [("ts", "Fixed TS duo", "#1baf7a"), ("gate", "Vanilla DD", "#2a78d6")]
-    rows = [dict(title="(a) Vanilla DD, round 1", curves=runs["indep"], window=(0, rl), beta=beta, duos=duos_v)]
-    hit = collapse_round(runs["indep"], images, n_corruptions)
+    rows = []
+    hit = hit_of("indep")
+    if n_rounds > 1 or not hit:
+        rows.append(dict(title="Vanilla DD, round 1" if n_rounds > 1 else "Vanilla DD", curves=runs["indep"], window=(0, rl), beta=beta, duos=duos_v))
     if hit:
-        members, r = hit
+        members, r, onset = hit
         a, b = max(r - 1, 0), min(r + 5, n_rounds)
-        rows.append(dict(title=f"(b) Vanilla DD, rounds {a + 1}-{b}: the {_who(members)}", curves=runs["indep"],
-                         window=(a * rl, b * rl), beta=beta, duos=duos_v))
+        title = (f"Vanilla DD, rounds {a + 1}-{b}" if n_rounds > 1 else "Vanilla DD, the whole stream") + f": the {_who(members)}"
+        rows.append(dict(title=title + (where(hit, onset) if onset is not None else ""), curves=runs["indep"], window=(a * rl, b * rl), beta=beta,
+                         duos=duos_v, mark=None if onset is None else (onset, _who(members))))
     if "joint_dd" in runs:
-        hit = collapse_round(runs["joint_dd"], images, n_corruptions)
-        b = min(hit[1] + 2, n_rounds) if hit else n_rounds
-        what = f": the {_who(hit[0])} in round {hit[1] + 1}" if hit else ""
-        rows.append(dict(title=f"({'c' if len(rows) > 1 else 'b'}) Joint DD, rounds 1-{b}{what}", curves=runs["joint_dd"],
-                         window=(0, b * rl), beta=beta, duos=[("ts", "Fixed TS (joint members)", "#1baf7a"), ("gate", "Joint DD", "#eb6834")]))
+        hit = hit_of("joint_dd")
+        b = n_rounds if hit is None else min(hit[1] + 2, n_rounds)
+        what = f": the {_who(hit[0])}{where(hit, hit[2])}" if hit else ""
+        rows.append(dict(title=f"Joint DD, rounds 1-{b}{what}" if n_rounds > 1 else f"Joint DD, the whole stream{what}", curves=runs["joint_dd"],
+                         window=(0, b * rl), beta=beta, duos=[("ts", "Fixed TS (joint members)", "#1baf7a"), ("gate", "Joint DD", "#eb6834")],
+                         mark=None if not hit or hit[2] is None else (hit[2], _who(hit[0]))))
+    for letter, row in zip("abcdef", rows):
+        row["title"] = f"({letter}) {row['title']}"
     return rows
 
 
@@ -388,9 +443,10 @@ def _setting(stream: Stream, ctx, duo_ctx, tta: str, temps, proxy: str, beta: fl
     order = stream.meta.get("order")
     order_text = "CoTTA's standard order" if order is None else f"CoTTA order {order}"
     seeds = f" Mean over {stream.seeds} seeds." if stream.seeds > 1 else ""
-    return (f"{AM._models_text(ctx, tta, ctx.g.severity)} The stream visits the 15 corruptions in "
-            f"{order_text} and repeats them for {stream.rounds} rounds, "
-            f"{stream.images} images per corruption and round (every round draws its own images), with no reset: the models "
+    stream_text = (f"concatenates the 15 corruptions in {order_text}, {stream.images} images per corruption" if stream.rounds == 1 else
+                   f"visits the 15 corruptions in {order_text} and repeats them for {stream.rounds} rounds, {stream.images} images "
+                   f"per corruption and round (every round draws its own images)")
+    return (f"{AM._models_text(ctx, tta, ctx.g.severity)} The stream {stream_text}, with no reset: the models "
             f"adapt continually from the source weights. The duos combine the models as $(z_L / T_L + z_S / T_S) / 2$ with "
             f"$T_L = {temps.T_l:.2f}$, $T_S = {temps.T_s:.2f}$, {temps.origin}. \\emph{{Frozen duo}}: no adaptation. "
             f"\\emph{{Fixed TS duo}}: the models adapt on their own entropy. {GD._gate_text(proxy, beta, b_t)} "
@@ -417,8 +473,9 @@ def render_main_table(stream: Stream, ctx, duo_ctx, tta: str, temps, *, proxy: s
     body = [f"Time & \\multicolumn{{{n}}}{{l}}{{$t$\\ \\rightarrowfill}} & \\\\", "\\midrule",
             f"Method & {names} & Mean \\\\", "\\midrule"]
     body += [f"{latex_escape(l)} & " + " & ".join(best[j][i] for j in range(n + 1)) + " \\\\" for i, l in enumerate(labels)]
-    caption = (f"Top-1 accuracy (\\%) in the CoTTA setting on ImageNet-C, severity 5, per corruption (mean over the "
-               f"{stream.rounds} rounds). " + _setting(stream, ctx, duo_ctx, tta, temps, proxy, beta, b_t))
+    over = "" if stream.rounds == 1 else f" (mean over the {stream.rounds} rounds)"
+    caption = (f"Top-1 accuracy (\\%) in the continual setting on ImageNet-C, severity 5, per corruption{over}. "
+               + _setting(stream, ctx, duo_ctx, tta, temps, proxy, beta, b_t))
     return _env(body, "l|" + "c" * n + "|c", caption, label, source, provenance.run_label(ctx.duo, tta, ctx.bn))
 
 
@@ -458,7 +515,7 @@ def accuracy_rows(stream: Stream) -> list[dict]:
 
 
 def report(args, ctx, duo_ctx, temps, proxy: str, seeds: Sequence[int], path_of, out: Path) -> int:
-    """The report step of scripts/03c_recurring_duos.py."""
+    """The report step of scripts/03c_continual_duos.py."""
     import pandas as pd
 
     from src.utils.tables import write_table
@@ -466,27 +523,35 @@ def report(args, ctx, duo_ctx, temps, proxy: str, seeds: Sequence[int], path_of,
     stream = load_stream(path_of, seeds)
     tta = "tent"
     tag = RC.stream_tag(args.duo, tta, args.bn, args.rounds, args.images, seeds[0] if len(seeds) == 1 else "s".join(map(str, seeds)),
-                        args.order) + f"__{proxy}_bt{args.b_t}_beta{args.beta:g}"
+                        args.order, getattr(args, "stream", "test")) + f"__{proxy}_bt{args.b_t}_beta{args.beta:g}"
     print(summary_text(stream))
     pd.DataFrame(accuracy_rows(stream)).to_csv(out / f"{tag}__accuracy.csv", index=False)
-    note = provenance.footer(ctx.duo, tta, args.bn, f"CoTTA {'standard order' if args.order is None else f'order {args.order}'}, {args.rounds} rounds x "
-                             f"{args.images} images, gate {proxy} b_t={args.b_t} beta={args.beta:g}, T_L = {temps.T_l}, T_S = {temps.T_s}")
+    span = "continual" if args.rounds == 1 else f"{args.rounds} rounds"
+    held = getattr(args, "stream", "test") == "heldout"
+    shifts = (f"held-out shifts, rotation {args.order or 0}, 4 corruptions" if held else
+              f"CoTTA {'standard order' if args.order is None else f'order {args.order}'}, 15 corruptions")
+    note = provenance.footer(ctx.duo, tta, args.bn, f"{span}, {shifts} x {args.images} images, gate {proxy} b_t={args.b_t} "
+                             f"beta={args.beta:g}, T_L = {temps.T_l}, T_S = {temps.T_s}")
     figs = plot_stream(stream, out / f"{tag}__accuracy.png", footer=note)
-    dest = out if (args.num_samples or args.out) else ctx.g.path("paper")       # an explicit --out keeps the tables beside the data
-    kw = dict(proxy=proxy, beta=args.beta, b_t=args.b_t, source="scripts/03c_recurring_duos.py")
-    write_table(dest / f"tab_recurring__{tag}.tex", render_main_table(stream, ctx, duo_ctx, tta, temps, label=f"tab:recurring:{tag}", **kw))
-    write_table(dest / f"tab_recurring_rounds__{tag}.tex", render_round_table(stream, ctx, duo_ctx, tta, temps,
-                                                                              label=f"tab:recurring_rounds:{tag}", **kw))
+    dest = out if (args.num_samples or args.out or getattr(args, "stream", "test") != "test") else ctx.g.path("paper")       # --out, and the held-out streams, keep the tables beside the data
+    kw = dict(proxy=proxy, beta=args.beta, b_t=args.b_t, source="scripts/03c_continual_duos.py")
+    write_table(dest / f"tab_continual__{tag}.tex", render_main_table(stream, ctx, duo_ctx, tta, temps, label=f"tab:continual:{tag}", **kw))
+    if stream.rounds > 1:                                                        # a one-pass stream has no per-round table
+        write_table(dest / f"tab_continual_rounds__{tag}.tex", render_round_table(stream, ctx, duo_ctx, tta, temps,
+                                                                                  label=f"tab:continual_rounds:{tag}", **kw))
     for f in figs:
         print(f"wrote {f}")
     try:
-        curves = {}
-        for run in ("indep", "joint_dd"):
-            curves[run] = gate_curves(RC.load_run(path_of(run, seeds[0])), load_gate_records(path_of(run, seeds[0])), args.b_t)
+        raw = {run: RC.load_run(path_of(run, seeds[0])) for run in ("indep", "joint_dd", "frozen")}
+        curves = {run: gate_curves(raw[run], load_gate_records(path_of(run, seeds[0])), args.b_t) for run in ("indep", "joint_dd")}
     except FileNotFoundError as e:
         print(f"no gate figure: {e}")
     else:
-        rows = default_rows(curves, stream.images, args.b_t, args.beta)
+        collapse = {run: collapse_visit(raw[run], raw["frozen"]) for run in curves}
+        for run, hit in collapse.items():
+            print(f"{run}: " + (f"{_who(hit[0])} from visit {hit[1] + 1} ({stream.corruptions[hit[1] % len(stream.corruptions)]}, "
+                                f"{hit[1] * stream.images} samples)" if hit else "no member falls below half of its frozen accuracy"))
+        rows = default_rows(curves, stream.images, args.b_t, args.beta, collapse=collapse, corruptions=stream.corruptions)
         for f in plot_gate_reaction(rows, out / f"{tag}__gate_reaction.png", images=stream.images, footer=note):
             print(f"wrote {f}")
     return 0
@@ -520,7 +585,7 @@ if __name__ == "__main__":
             p = np.clip(p + 0.1 * np.sin(np.arange(N) / 300.0), 0.02, 0.98)
             return (np.random.default_rng(seed * 7 + sum(map(ord, run + series))).random(N) < p).astype(np.uint8)
 
-        for run in RC.RUNS:
+        for run in RC.MAIN_RUNS:
             for seed in range(S):
                 res = {"correct": {s: fake(run, s, seed) for s in RC.SERIES if s != "gate" or RC.RUNS[run].gated},
                        "part_n": [IMAGES] * len(parts), "gate_records": []}
@@ -576,6 +641,10 @@ if __name__ == "__main__":
         plot_stream(one, tmp / "fig1.png")                                                   # one seed: no band
         st1 = Stream({k: v[:, : 15 * IMAGES] for k, v in st.acc.items()}, st.part_n[:15], st.part_label[:15], st.part_round[:15], st.meta)
         plot_stream(st1, tmp / "fig_r1.png")                                                  # one round: a single panel
+        r1_main = render_main_table(st1, ctx, duo_ctx, "tent", temps, label="tab:r1", **kw)    # the continual stream: one round, 15 columns
+        r1_rounds = render_round_table(st1, ctx, duo_ctx, "tent", temps, label="tab:r1r", **kw)
+        assert "Method & 1 & Mean \\\\" in r1_rounds and r1_main.count("\\\\") >= 2 + len(LINES)
+        assert "concatenates the 15 corruptions" in r1_main and "repeats them" not in r1_main and "continual setting" in r1_main
         assert len(accuracy_rows(st)) == len(LINES) * S * R * 15 and "Joint DD" in summary_text(st)
 
         # gate reaction: per-proxy-batch accuracies from the stored correctness, the gate weight at any beta from the stored logits
@@ -604,6 +673,30 @@ if __name__ == "__main__":
         assert [r["title"][:3] for r in rows_g] == ["(a)", "(b)", "(c)"] and "ViT-B/16 and ResNet-50 collapse" in rows_g[1]["title"]
         figs_g = plot_gate_reaction(rows_g, tmp / "gate.png", images=IMAGES)
         assert all(f.stat().st_size > 5000 for f in figs_g)
+
+        # collapse against the frozen members, per visit: needs no second round, and a transient dip is not a collapse
+        parts_n = [IMAGES] * len(parts)
+        frozen_run = {"large": run0["large"], "small": run0["small"], "part_n": parts_n}
+        assert collapse_visit(dict(run1, part_n=parts_n), frozen_run) == (["large", "small"], 15)
+        assert collapse_visit(dict(run0, part_n=parts_n), frozen_run) is None
+        dip = {k: v.copy() for k, v in run0.items()}
+        dip["small"][3 * IMAGES:4 * IMAGES] = 0                                              # one visit down, then back: not a collapse
+        assert collapse_visit(dict(dip, part_n=parts_n), frozen_run) is None
+        late = {k: v.copy() for k, v in run0.items()}
+        late["small"][20 * IMAGES:] = 0
+        assert collapse_visit(dict(late, part_n=parts_n), frozen_run) == (["small"], 20)
+        rows_v = default_rows({"indep": cv1, "joint_dd": cv1}, IMAGES, B_T, 0.5, collapse={"indep": (["small"], 20), "joint_dd": (["large", "small"], 15)},
+                              corruptions=corr)
+        assert [r["title"][:3] for r in rows_v] == ["(a)", "(b)", "(c)"] and rows_v[1]["mark"] == (20 * IMAGES, "ResNet-50 collapses")
+        assert f"collapses at {PLAIN[corr[5]]}" in rows_v[1]["title"] and rows_v[2]["mark"][0] == 15 * IMAGES and rows_v[0].get("mark") is None
+        n1 = 15 * IMAGES                                                                       # the continual stream: one round, each run whole
+        cv_c = gate_curves({k: v[:n1] for k, v in run0.items()}, recs[: -(-n1 // B_T)], B_T)
+        rows_c = default_rows({"indep": cv_c, "joint_dd": cv_c}, IMAGES, B_T, 0.5, collapse={"indep": (["small"], 7), "joint_dd": None}, corruptions=corr)
+        assert [r["title"][:3] for r in rows_c] == ["(a)", "(b)"] and f"collapses at {PLAIN[corr[7]]}" in rows_c[0]["title"]
+        assert rows_c[0]["window"] == (0, n1) and rows_c[0]["mark"][0] == 7 * IMAGES and rows_c[1]["mark"] is None
+        assert [r["title"][:3] for r in default_rows({"indep": cv_c, "joint_dd": cv_c}, IMAGES, B_T, 0.5, collapse={})] == ["(a)", "(b)"]
+        figs_c = plot_gate_reaction(rows_c, tmp / "gate_c.png", images=IMAGES)
+        assert all(f.stat().st_size > 5000 for f in figs_c)
         if shutil.which("pdflatex"):
             doc = ("\\documentclass{article}\\usepackage{booktabs,graphicx,amsmath}\\usepackage[landscape,margin=1cm]{geometry}"
                    "\\begin{document}\n" + t1 + t2 + "\\end{document}\n")
@@ -611,5 +704,5 @@ if __name__ == "__main__":
             r = subprocess.run(["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "t.tex"], cwd=tmp, capture_output=True,
                                text=True, timeout=120)
             assert r.returncode == 0, r.stdout[-1500:]
-            print("recurring_report: generated LaTeX compiles with pdflatex")
-    print("recurring_report self-test passed")
+            print("continual_report: generated LaTeX compiles with pdflatex")
+    print("continual_report self-test passed")

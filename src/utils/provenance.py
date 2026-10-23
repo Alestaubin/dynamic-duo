@@ -52,12 +52,27 @@ def footer(duo: dict, tta: str | None = None, bn: bool = False, extra: str = "")
     return " | ".join(p for p in (run_label(duo, tta, bn), extra, f"generated {timestamp()}") if p)
 
 
+def wrap_footer(text: str, width_chars: int) -> str:
+    """`text` broken at its " | " separators into lines of at most `width_chars` (a single part longer than that stays whole)."""
+    lines, current = [], ""
+    for part in text.split(" | "):
+        if current and len(current) + 3 + len(part) > width_chars:
+            lines.append(current)
+            current = part
+        else:
+            current = f"{current} | {part}" if current else part
+    return "\n".join(lines + [current])
+
+
 def save_figure(fig, path: str | Path, text: str, *, dpi: int = 300, exts: Sequence[str] = ("png", "pdf"), title: str = "") -> list[Path]:
-    """Write `fig` as `path` with each of `exts` (the suffix of `path` is replaced), after drawing `text` as a small footer line at the
-    bottom left; the same text goes into each file's metadata (PNG text chunk, PDF subject). Returns the paths."""
+    """Write `fig` as `path` with each of `exts` (the suffix of `path` is replaced), after drawing `text` as a small footer at the
+    bottom left (broken at its " | " separators where one line would run off the figure); the same one-line text goes into each
+    file's metadata (PNG text chunk, PDF subject). Returns the paths."""
     import matplotlib.pyplot as plt  # noqa: F401  (imported by the caller's backend choice)
 
-    fig.text(0.004, 0.003, text, fontsize=4.8, color="#6b6a66", ha="left", va="bottom")
+    fontsize = 4.8
+    width_chars = int(fig.get_figwidth() * 72 / (fontsize * 0.55))            # DejaVu Sans: about 0.55 em per character
+    fig.text(0.004, 0.003, wrap_footer(text, width_chars), fontsize=fontsize, color="#6b6a66", ha="left", va="bottom")
     out = []
     for ext in exts:
         p = Path(path).with_suffix("." + ext)
@@ -86,6 +101,8 @@ if __name__ == "__main__":
     assert models_label({"LARGE": {"NAME": "x_new"}, "SMALL": {"NAME": "resnet34"}}) == "x_new + ResNet-34"
     f = footer(duo, "tent", True, "T_L = 0.651, T_S = 1.0097")
     assert re.search(r"\| T_L = 0.651, T_S = 1.0097 \| generated \d{4}-\d\d-\d\d \d\d:\d\d:\d\d [+-]\d{4}$", f), f
+    assert wrap_footer("aaa | bbb | ccc", 100) == "aaa | bbb | ccc" and wrap_footer("aaa | bbb | ccc", 8) == "aaa\nbbb\nccc"
+    assert wrap_footer("aaa | bbb | ccc", 9) == "aaa | bbb\nccc" and wrap_footer("x" * 20, 5) == "x" * 20
     with tempfile.TemporaryDirectory() as tmp:
         fig = plt.figure(figsize=(3, 2))
         fig.add_subplot().plot([0, 1], [0, 1])
