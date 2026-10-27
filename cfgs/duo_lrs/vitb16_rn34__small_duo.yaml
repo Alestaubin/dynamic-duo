@@ -1,0 +1,44 @@
+# Learning rate of duo `vitb16_rn34`, SMALL_DUO regime: the SMALL member alone adapts, on the entropy of the duo's combined prediction, while the
+# large member is frozen (engine mode small_duo; script 03's Small adapt). Tuned for that member alone by scripts/02e_tune_small_adapt_lr.py
+# (`--record`, or `python -m src.utils.duo_lrs --import_anchor <results.json>`); never the joint pair's rate. Only the small member has an
+# entry. Until it is tuned, asking for it raises NotTuned.
+duo: vitb16_rn34
+regime: small_duo
+engine_mode: small_duo
+methods:
+  tent:
+    small:
+      model: resnet34
+      norm: BN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.0028
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: /project/6104790/alxstaub/dynamic-duos/out/results/tune_small_adapt_lr/vitb16_rn34__tent_bn/results.json
+      tuned_on:
+      - gaussian_blur/s5
+      - saturate/s5
+      - spatter/s5
+      - speckle_noise/s5
+      seeds:
+      - 0
+      - 1
+      - 2
+      temperatures: heldout_vitb16_rn34_frozen_2e9fbea79473
+      note: the small member adapts on the duo entropy, the other member is frozen
+      duo_macro_accuracy: 0.54484
+      worst_stream_accuracy: 0.35682
+      grid:
+        lrs:
+        - 0.0014
+        - 0.002
+        - 0.0028
+        - 0.004
+        bn: true
+      late_accuracy: 0.54396
+      frozen_duo_macro_accuracy: 0.51703

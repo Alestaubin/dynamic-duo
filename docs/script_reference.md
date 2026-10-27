@@ -33,7 +33,7 @@ Dataset locations, output folders and the protocol constants (severity 5, batch 
 | `src/utils/` | Config loading, one class per dataset, LaTeX table writer, ... |
 | `cfgs/global.yaml` | Shared settings: dataset paths, output folders, protocol constants. |
 | `cfgs/duos/` | The model pairs: which two models, and which norm layers Tent adapts. Nothing else (default `vitb16_rn50v1`, the main duo: ViT-B/16 + ResNet-50 V1). |
-| `cfgs/duo_lrs/` | **The one place the learning rates live**: `<duo>__indep.yaml` (each member on its own entropy: Vanilla DD; the tuned settings per TTA method and member, with the default a member runs with when nothing is tuned) and `<duo>__joint.yaml` (both members on the duo's entropy: Joint DD; the pairs of `02b`). Written by `02`, `02b` and `05` (a joint pair can also be copied in by hand with `python -m src.utils.duo_lrs --import_joint`), read by every other script (`python -m src.utils.duo_lrs --show <duo> indep`). |
+| `cfgs/duo_lrs/` | **The one place the learning rates live**: `<duo>__indep.yaml` (each member on its own entropy: Vanilla DD; the tuned settings per TTA method and member, with the default a member runs with when nothing is tuned) and `<duo>__joint.yaml` (both members on the duo's entropy: Joint DD; the pairs of `02b`), plus `<duo>__large_duo.yaml` and `<duo>__small_duo.yaml` (ONE member adapting on the duo entropy, the other frozen: the single rate each of `02d` / `02e` records, for script 03's Large adapt / Small adapt). Written by `02`, `02b`, `02d`, `02e` and `05` (a joint pair or an anchor rate can also be copied in by hand with `python -m src.utils.duo_lrs --import_joint` / `--import_anchor`), read by every other script (`python -m src.utils.duo_lrs --show <duo> indep`). |
 | `slurm/job.sh`, `slurm/job_cpu.sh` | The launchers for running a script as a SLURM job: with one GPU, and without a GPU (for steps that run no model). |
 | `out/paper/` | The final tables and figures (tracked by git). |
 | `out/results/<script>/` | Each script's CSV files (git-ignored). |
@@ -112,6 +112,7 @@ On this cluster the login node kills processes above 5 GB of memory, so run anyt
 | `01_tab_temperatures.py` | Which temperatures Fixed TS should use, and how much better temperature scaling could possibly be. |
 | `02_tune_tta.py --model NAME` | Tunes Tent's optimizer settings for one model on the 4 held-out corruptions, and records the winner in `cfgs/duo_lrs/` (the indep file of every duo that uses the model). |
 | `02b_tune_joint_lr.py` | Tunes the two members' learning rates **together** for the Joint mode (both adapt on the duo entropy) on the 4 held-out corruptions: a grid over pairs, scored by the duo's accuracy. Records the winning pair in `cfgs/duo_lrs/<duo>__joint.yaml` itself (a full ranking run only); prints the script-03 command that evaluates the winner. |
+| `02d_tune_large_adapt_lr.py`, `02e_tune_small_adapt_lr.py` | Tune the learning rate of the ONE member that adapts in script 03's **Large adapt** / **Small adapt** mode (it minimizes the duo entropy, the other member is frozen), on the 4 held-out corruptions: a 1-D grid from the member's single rate, scored by the duo's accuracy. `--record` writes the winner to `cfgs/duo_lrs/<duo>__large_duo.yaml` / `__small_duo.yaml`, which script 03 reads (never the joint pair's rate). |
 | `03_tab_adaptation_modes.py` | Six ways of adapting the duo (joint, one model adapting, independent), all scored with the same Fixed TS. |
 | `04_cache_logits.py` | Adapts a duo's two members (they never see each other) and stores their logits **per member**, under a key made of that member's own settings, in `cache/logits/`. `--grid` runs the learning-rate sweep (run i uses the i-th value of each model's grid), `--streams` picks held-out / test / clean / the clean training slice / a natural shift. Any large member can be paired with any small one afterwards. Produces no table. |
 | `05_select_member_lr.py` | Reads the sweep that `04` stored for ETA, EATA or SAR and picks each member's learning rate on the held-out streams (the counterpart of `02` for the other algorithms); `--write_tuned` records the winners in `cfgs/duo_lrs/`. |
@@ -225,6 +226,31 @@ All tasks and the ranking run must be given the same grid flags. `--bn` only aff
 
 **It does not touch the indep file of `cfgs/duo_lrs/`**: those rates also set the independent modes, and these rates belong to the Joint mode alone. The last line printed is the command that scores the recorded pair on the 15 test corruptions: script 03 with `--modes joint --temps_checkpoint <the same temperatures>` (no rates needed; `--joint_lr_large X --joint_lr_small Y` would give them by hand).
 
+## Scripts 02d and 02e: tune the learning rate of Large adapt and Small adapt
+
+`02d_tune_large_adapt_lr.py` and `02e_tune_small_adapt_lr.py` ask: when **only one model adapts, on the duo entropy** (script 03's Large adapt / Small adapt: the other model is frozen and its logits are a constant of the loss), **which learning rate is best for that model?** Script 03 used to run these modes at the adapting model's rate of the Joint pair (02b), which was tuned with both models moving. With the partner frozen the duo entropy is another signal, so the best rate is expected to be another number; each mode is therefore tuned for itself, and the winner goes to a regime file of its own, never into the joint file.
+
+**The grid.** One rate, so one axis. By default 0.5, 1, 2, 4, 8, 16, 32 and 64 times the model's **single-regime** rate (`cfgs/duo_lrs/<duo>__single.yaml`: the rate tuned for it alone; the protocol tunes duos upward from the individual rates, and the 0.5 is there so that an optimum below it can be told from one at it). `--mults` changes the multiples, `--lrs` gives explicit rates. Only the learning rate changes. Finished points are reused, so extending a grid only runs the new rates.
+
+**What one run is.** One Large (Small) adapt run over the 4 held-out streams (severity 5, all 50,000 images each), the members reset to source weights before every stream: the very run script 03 makes on the test corruptions (same cache key). The score is the mean over the 4 streams of the accuracy of the static duo `(z_L / T_L + z_S / T_S) / 2`, the prediction script 03's "Duo, duo entropy" row scores. The worst stream, the late accuracy (the last 20% of each stream) and the adapting model's own accuracy are reported next to it. Two references run as well: the frozen duo, and **Independent large (small)**, the same model alone on its *own* entropy at its single rate. The report says what the duo signal buys over the model's own entropy, and what moving the rate buys on top.
+
+**The rules of the tuning protocol** are built in: the temperatures are the Fixed TS fitted on the **frozen** models (never refitted per rate); a rate whose late accuracy is below the frozen duo's is ruled out as drift; the optimum must be **interior** to the grid, so a winner at either end prints a warning (and so does a grid of fewer than three rates); a rate that makes the logits non-finite is recorded as *diverged* and ranks nowhere.
+
+**Running it.** One task per grid point; the two references wrap around onto the first two tasks. Time per point, scaled from script 03's measured 60 minutes (Large adapt) and 37 minutes (Small adapt) for 16 streams, is about 15 and 9 minutes on an L40S (not measured for these scripts):
+
+```bash
+sbatch --exclude=kn117 slurm/job.sh scripts/02d_tune_large_adapt_lr.py --duo vitb16_rn50v1 --bn --temps_only   # once (cached already for existing duos)
+sbatch --exclude=kn117 -t 00:45:00 --array=0-7 slurm/job.sh scripts/02d_tune_large_adapt_lr.py --duo vitb16_rn50v1 --bn --shard auto
+sbatch --exclude=kn117 -t 00:30:00 --array=0-7 slurm/job.sh scripts/02e_tune_small_adapt_lr.py --duo vitb16_rn50v1 --bn --shard auto
+python scripts/02d_tune_large_adapt_lr.py --duo vitb16_rn50v1 --bn --report_only     # rank (no model runs, no GPU)
+```
+
+Use the same `--bn` as script 03: the frozen model is run on the test batch's statistics with it, and the frozen model is part of this mode. The suggested procedure is the one of 02b and 02c: the default ladder on seed 0, a sqrt-2 refinement around the winner (`--lrs`), the finalists on seeds 1 and 2 (`--lrs ... --seeds 1 2 --shard auto`), then `--lrs <the finalists> --seeds 0 1 2 --report_only --record`.
+
+**Recording is explicit.** Nothing is written to `cfgs/duo_lrs/` unless you pass `--record`, and then only for a full run (not `--num_samples`) whose ranking has no open warning: a winner on the edge of the grid, fewer than three rates, no rate that beats the frozen duo. The rate goes to `cfgs/duo_lrs/<duo>__large_duo.yaml` (02d) or `__small_duo.yaml` (02e), with its score, grid, seeds and temperatures, replacing the one that was there (`python -m src.utils.duo_lrs --import_anchor <results.json>` does the same by hand). It touches no other regime file. The last line printed is the script-03 command that scores the rate on the 15 test corruptions.
+
+**Output**, in `out/results/tune_large_adapt_lr/<duo>__<tta>[_bn]/` (`tune_small_adapt_lr` for 02e; a capped run has its own folder): `ranking.csv` (one row per run, references and diverged rates included, accuracies as fractions) and `results.json` (the same rows plus the temperatures, optimizer, grid and the winner).
+
 ## Script 03: ways of adapting the duo
 
 `03_tab_adaptation_modes.py` asks: when both models adapt, **what should they adapt on?** It runs six ways of adapting, plus a frozen reference, and scores every one with the same Fixed TS combination `(z_L / T_L + z_S / T_S) / 2`. The rows then differ only in how the models' weights were adapted.
@@ -245,8 +271,9 @@ The *duo entropy* is the entropy of that combined prediction. In every name belo
 
 **The learning rates.** The two kinds of mode adapt on different signals, and each runs with its own rates (`cfgs/duo_lrs/<duo>__<regime>.yaml`):
 - The modes that adapt on a model's **own entropy** (Independent large / small / both) use the *indep* regime's rates, tuned one model at a time by script 02 (or 05).
-- The modes that adapt on the **duo entropy** (Joint, Large adapt, Small adapt) use the *joint* regime's pair, tuned together by script 02b. Large / Small adapt use the rate of the model that adapts.
-- A duo whose joint pair is not tuned yet makes those three modes an **error** (`NotTuned`), never a silent run at the indep rates. `--joint_lr_large LR --joint_lr_small LR` run them with rates given by hand (both, to skip the file); `--lr_large` / `--lr_small` do the same for the own-entropy modes.
+- **Joint** (both models on the duo entropy) uses the *joint* regime's pair, tuned together by script 02b.
+- **Large adapt** and **Small adapt** (one model on the duo entropy, the other frozen) each use the rate tuned for that mode alone, by scripts 02d and 02e (the *large_duo* and *small_duo* regimes). They do **not** use the joint pair's rate: with the partner frozen the duo entropy is another signal, and the best rate is another number. (Before 2026-10-23 they did; those runs stay in the cache under their own keys and are simply not read.)
+- A duo whose Joint pair, or whose Large / Small adapt rate, is not tuned yet makes that mode an **error** (`NotTuned`), never a silent run at other rates. `--joint_lr_large LR --joint_lr_small LR` run Joint with rates given by hand (both, to skip the file), `--anchor_lr_large LR` / `--anchor_lr_small LR` do it for Large / Small adapt (one rate each: the adapting model's); `--lr_large` / `--lr_small` do the same for the own-entropy modes.
 - Both tables' captions list both sets of rates and say which modes use which. The temperatures stay one pair for every mode (fitted on the indep regime's members, as before).
 
 **Running it.** The work is one job per (mode, seed): 7 modes × 3 seeds = 21 jobs, which is why the array has indices 0 to 20. Fit the temperatures once first, so that the array tasks do not all fit them at the same time:
@@ -337,6 +364,20 @@ Takes the shared flags `--duo`, `--tta`, `--tta_kwargs`, `--seeds` (default `0`)
 
 The number of array tasks is the number of grid points times the number of seeds (the two references wrap around onto the first tasks).
 
+### Scripts 02d and 02e: `02d_tune_large_adapt_lr.py`, `02e_tune_small_adapt_lr.py`
+
+Take the shared flags `--duo`, `--tta`, `--tta_kwargs`, `--seeds` (default `0`), `--num_samples`, `--bn`, `--report_only`, `--shard`, `--only` (labels like `adapt/lr0.00014/seed0`, `frozen/seed0`, `own/seed0`), `--out`, `--global` and `--device`.
+
+| Argument | Meaning | Default |
+|---|---|---|
+| `--mults X [...]` | The grid: these multiples of the adapting model's single-regime learning rate. | `0.5 1 2 4 8 16 32 64` |
+| `--lrs LR [...]` | Explicit learning rates (replaces `--mults`). | from `--mults` |
+| `--temps_checkpoint DIR` | Use the temperatures saved in a `JointFixedTS` checkpoint instead of the frozen-model fit. | the frozen-model fit |
+| `--temps_only` | Fit and save the temperatures, then stop. Run it once before a `--shard` array. | off |
+| `--record` | After the ranking, record the best rate in the duo's `large_duo` / `small_duo` file. Refused while a warning is open, for a capped run, and for an incomplete grid. | off |
+
+The number of array tasks is the number of rates times the number of seeds (the two references wrap around onto the first tasks).
+
 ### Script 03: `03_tab_adaptation_modes.py`
 
 | Argument | Meaning | Default |
@@ -345,9 +386,11 @@ The number of array tasks is the number of grid points times the number of seeds
 | `--temps_checkpoint DIR` | Use the temperatures saved in a `JointFixedTS` checkpoint (a folder with a `config.json`) instead of fitting them on the held-out corruptions. | fit on the held-out corruptions |
 | `--temps_only` | Fit and save the temperatures, then stop. Run it once before a `--shard` array. | off |
 | `--lr_large LR`, `--lr_small LR` | Replace the learning rate of that model in the modes that adapt on its **own** entropy (Independent large / small / both); the rest of its optimizer stays. The rates are part of every cache key, and other own-entropy rates get their own temperatures. | the indep regime's rates |
-| `--joint_lr_large LR`, `--joint_lr_small LR` | The same for the modes that adapt on the **duo** entropy (Joint, Large adapt, Small adapt). With both given, the joint file is not read. | the joint regime's pair (an error while it is pending) |
+| `--joint_lr_large LR`, `--joint_lr_small LR` | The same for the **Joint** mode (both models on the duo entropy). With both given, the joint file is not read. | the joint regime's pair (an error while it is pending) |
+| `--anchor_lr_large LR` | The large model's rate in **Large adapt** (it adapts on the duo entropy, the small model is frozen); the file is not read, the rest of its optimizer is the indep regime's. | the large_duo regime's rate (script 02d; an error until recorded) |
+| `--anchor_lr_small LR` | The same for **Small adapt**: the small model's rate. | the small_duo regime's rate (script 02e) |
 
-With any of these four flags the output files get a `_lrL<large>_S<small>` and/or `_jlrL<large>_S<small>` tag and a time stamp, so they never replace the tuned run's files.
+With any of these flags the output files get a `_lrL<large>_S<small>`, `_jlrL<large>_S<small>` and/or `_alrL<large>_S<small>` tag and a time stamp, so they never replace the tuned run's files.
 
 The number of array tasks is the number of modes times the number of seeds.
 

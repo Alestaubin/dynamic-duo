@@ -60,14 +60,15 @@ DEAD_WINDOW, DEAD_ACC, DEAD_WINDOWS = 5120, 0.05, 4        # 80 batches of 64; b
 
 # ------------------------------------------------------------------------------------------------------------ the stream
 
-def tuning_parts(ctx: Context, *, rounds: int, seed: int) -> list[Part]:
-    """The held-out shifts concatenated `rounds` times, round r rotated left by r (see the module docstring)."""
+def tuning_parts(ctx: Context, *, rounds: int, seed: int, rotation: int = 0) -> list[Part]:
+    """The held-out shifts concatenated `rounds` times, round r rotated left by r (see the module docstring). `rotation` k starts the whole
+    stream k rotations later (round r is rotated by k + r): the same stream with another shift first."""
     g = ctx.g
     held = g.tuning_corruptions
     segments = {c: Segment(f"{c}/s{g.severity}", ImageNetC.from_config(g, c, g.severity), i == 0) for i, c in enumerate(held)}
     parts = []
     for r in range(rounds):
-        k = r % len(held)
+        k = (rotation + r) % len(held)
         parts += [Part(segments[c], r, seed + 1000 * r) for c in held[k:] + held[:k]]
     return parts
 
@@ -310,6 +311,9 @@ if __name__ == "__main__":
         assert [p.round for p in parts] == [0] * 4 + [1] * 4 + [2] * 4 + [3] * 4 and [p.seed for p in parts[::4]] == [7, 1007, 2007, 3007]
         assert all(sum(l == c for l in labels) == 4 for c in held)
         assert {labels[i] for i in range(0, 16, 4)} == set(held), "every shift opens a round once"
+        rot2 = [p.label.split("/")[0] for p in tuning_parts(ctx, rounds=2, seed=7, rotation=2)]
+        assert rot2[:4] == held[2:] + held[:2] and rot2[4:] == held[3:] + held[:3], "a rotation k starts k shifts later and keeps rotating by round"
+        assert [p.label for p in tuning_parts(ctx, rounds=4, seed=7, rotation=0)] == [p.label for p in parts]
 
         segs = [Segment(f"{c}/s5", FakeStream(150, seed=i + 1), i == 0) for i, c in enumerate(held[:3])]
         small = [Part(s_, r, 3 + 1000 * r) for r in range(2) for s_ in segs]

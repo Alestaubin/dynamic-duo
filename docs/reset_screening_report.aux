@@ -1,0 +1,51 @@
+\relax 
+\@writefile{toc}{\contentsline {section}{\numberline {1}Question and setting}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}The rules}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Signals.}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Procedures.}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Controller.}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Grid.}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Data}{1}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Grid of one family; every row is crossed with $W_0 \in \{20, 50\}$.}}{2}{}\protected@file@percent }
+\newlabel{tab:grid}{{1}{2}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces The three sets of runs. S: held-out stream (speckle, Gaussian blur, spatter, saturate; severity 5, 50k images each; 4 rounds, round $r$ rotated by $r$), 4 rotations $\times $ 2 seeds. H: the same stream at full length, rotations 0 and 2, seed 0. T: the test stream, seeds 0--2. A member-batch is one proxy batch of one member (a stream contributes two); ``healthy'' = outside every degraded stretch (see below).}}{2}{}\protected@file@percent }
+\newlabel{tab:data}{{2}{2}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Labels and metrics}{2}{}\protected@file@percent }
+\newlabel{sec:labels}{{4}{2}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Selection protocol}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Screening results}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Budget 1 (Table\nobreakspace  {}3\hbox {}).}{3}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Budget of 1 false alarm per 1,000 member-batches: the setting chosen on the calibration pool (S+H), scored there and, frozen, on the test streams T. Delay in 256-image batches (a miss is charged its whole length), miss = missed events / events, FA = false alarms per 1,000 member-batches. Sorted by calibration delay.}}{3}{}\protected@file@percent }
+\newlabel{tab:b1}{{3}{3}}
+\@writefile{toc}{\contentsline {paragraph}{Selected settings of the leaders (Table\nobreakspace  {}4\hbox {}).}{3}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Frozen settings of the five leaders at budget 1 and their calibration false-alarm rate.}}{3}{}\protected@file@percent }
+\newlabel{tab:sel}{{4}{3}}
+\@writefile{toc}{\contentsline {paragraph}{Across budgets (Table\nobreakspace  {}5\hbox {}).}{3}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Mean delay (256-image batches, misses charged their whole length) of each family's chosen setting at the three budgets, on the calibration pool and, frozen, on the test streams. Best per calibration column in bold; -- = no setting within the budget.}}{4}{}\protected@file@percent }
+\newlabel{tab:bud}{{5}{4}}
+\@writefile{toc}{\contentsline {paragraph}{Per member (Table\nobreakspace  {}6\hbox {}).}{4}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Per member at budget 1: mean delay in batches (missed / events). Calibration: 8 ViT-B/16{} and 18 ResNet-50{} events; test: 5 and 4.}}{4}{}\protected@file@percent }
+\newlabel{tab:mem}{{6}{4}}
+\@writefile{toc}{\contentsline {paragraph}{Label sensitivity (Table\nobreakspace  {}7\hbox {}).}{4}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces The three leaders' frozen settings re-scored on the calibration pool under other degradation labels. Each row changes one label parameter of Section\nobreakspace  {}4\hbox {} from the base row: $M$ = smoothing window (batches), $\delta $ = margin (accuracy points below the frozen member), $L$ = minimum stretch length (batches). Cell = mean delay in 256-image batches / miss rate (missed events / events).}}{5}{}\protected@file@percent }
+\newlabel{tab:sens}{{7}{5}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}Live runs with resets}{5}{}\protected@file@percent }
+\newlabel{sec:live}{{7}{5}}
+\@writefile{toc}{\contentsline {paragraph}{Setup.}{5}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Whole-stream accuracy (Table\nobreakspace  {}8\hbox {}, Figures\nobreakspace  {}1\hbox {} and\nobreakspace  {}2\hbox {}).}{5}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces Live runs, Vanilla DD with Tent, ViT-B/16{} at $1.4{\cdot }10^{-4}$ and ResNet-50{} at $5{\cdot }10^{-4}$, whole streams. Duo = mean accuracy (\%) of Vanilla DD over the whole stream (mean over 2 held-out runs, 3 test seeds; the spread over runs is at most 0.5 points and reflects the data order only); $\Delta $ = gain over the frozen duo on the same images; resets per 1,000 proxy batches as ViT-B/16{} / ResNet-50{}; false = share of resets (\%) of a member that was not below its frozen copy. -- = not run. Rules in the order of Table\nobreakspace  {}3\hbox {}.}}{6}{}\protected@file@percent }
+\newlabel{tab:live}{{8}{6}}
+\@writefile{toc}{\contentsline {paragraph}{What this does and does not show.}{6}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Limits and next steps}{6}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces The members' own accuracy (\%) over the whole stream in the live runs of Table\nobreakspace  {}8\hbox {}; Frozen = the same members without adaptation.}}{7}{}\protected@file@percent }
+\newlabel{tab:livemem}{{9}{7}}
+\@writefile{toc}{\contentsline {paragraph}{Reproduce.}{7}{}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Test stream, seed 0: Vanilla DD (top), the ViT-B/16{} and the ResNet-50{} (below) under every condition, accuracy over windows of 5,120 images; the dashed grey line is the frozen duo / member, dashed lines the references (episodic, oracle). Without a reset (black) both members die (accuracy below 5\% for four windows of 5,120 images): the ResNet-50{} from 158,720 images, the ViT-B/16{} from 430,080. \texttt  {both\_fast\_vs\_slow} (blue) leaves the ResNet-50{} at 0\% until about 400k.}}{8}{}\protected@file@percent }
+\newlabel{fig:overlay-test}{{1}{8}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces As Figure\nobreakspace  {}1\hbox {} on the held-out stream (4 shifts $\times $ 4 rounds, rotation 0).}}{9}{}\protected@file@percent }
+\newlabel{fig:overlay-held}{{2}{9}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \texttt  {gap\_fast\_vs\_slow}, test stream, seed 0: accuracy of the frozen duo, the fixed-TS duo, Vanilla DD and both members; the gate's weight on the ViT-B/16{}; the proxy scores it reads. A triangle marks each reset (dark: ViT-B/16{}, light: ResNet-50{}), a line the same reset in the weight panel. The ResNet-50{} is reset first and the ViT-B/16{} 20--69k images later, six times in a row in the first 400k images.}}{10}{}\protected@file@percent }
+\newlabel{fig:gap}{{3}{10}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \texttt  {own\_fast\_vs\_slow}, test stream, seed 0, as Figure\nobreakspace  {}3\hbox {}. It resets far less often: seven resets in all, the ResNet-50{} at 133k, 278k, 551k and 701k images and the ViT-B/16{} at 345k, 415k and 605k; the shaded band is the ResNet-50{}'s collapse episode, reset at 278k. Between 278k and 551k the ResNet-50{} is not reset.}}{11}{}\protected@file@percent }
+\newlabel{fig:own}{{4}{11}}
+\gdef \@abspage@last{11}

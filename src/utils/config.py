@@ -195,7 +195,9 @@ def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None, t
     in cfgs/duos/ (with or without .yaml) or a path to a duo YAML; it names the two models (NAME, NORM) and nothing else.
 
     Each member's OPTIM comes from cfgs/duo_lrs/<duo>__<regime>.yaml (src/utils/duo_lrs.py): `regime` "indep" (each member on its
-    own entropy: Vanilla DD) or "joint" (both on the duo's entropy: Joint DD, NotTuned while its rates are pending). `tta` = the TTA
+    own entropy: Vanilla DD), "joint" (both on the duo's entropy: Joint DD, NotTuned while its rates are pending), or "large_duo" /
+    "small_duo" (only that member adapts, on the duo's entropy, the other is frozen: its own tuned rate, NotTuned until recorded;
+    the frozen member gets its indep optimizer, which is never built). `tta` = the TTA
     method the run will use: the member's tuned entry for it, else (indep) its default. The entry must have been tuned for the same
     NORM (otherwise the learning rate belongs to a different set of parameters)."""
     from src.utils import duo_lrs

@@ -51,7 +51,18 @@ sbatch slurm/job_cpu.sh scripts/02b_tune_joint_lr.py --bn --lrs_large ... --lrs_
 
 The array tasks must all get the same grid flags; the temperatures are the frozen fit; every point reports its late-stream accuracy and the ones that end below the frozen duo are ruled out. The ranking prints a warning when the best pair sits on the edge of the grid (extend it; finished points are reused).
 
-**4. Table: ways of adapting the duo** (joint, one member adapting, independent; all scored with the same Fixed TS). Needs steps 2 and 3.
+**3b. Tune the learning rate of Large adapt and of Small adapt** (ONE member adapts on the duo's entropy while the other is frozen: its own regime, tuned for that mode alone, NOT the joint pair's rate; the grid starts at step 2's single rate and goes both ways)
+
+```bash
+sbatch --exclude=kn117 -t 00:45:00 --array=0-7 slurm/job.sh scripts/02d_tune_large_adapt_lr.py --bn --shard auto      # Large adapt: one task per rate
+sbatch --exclude=kn117 -t 00:30:00 --array=0-7 slurm/job.sh scripts/02e_tune_small_adapt_lr.py --bn --shard auto      # Small adapt
+python scripts/02d_tune_large_adapt_lr.py --bn --report_only                       # ranks (add --lrs ... to refine, --seeds 0 1 2 for the finalists)
+python scripts/02d_tune_large_adapt_lr.py --bn --lrs ... --seeds 0 1 2 --report_only --record   # records the winner in <duo>__large_duo.yaml
+```
+
+Same rules as steps 2 and 3 (held-out streams, frozen Fixed TS, an interior optimum, a late-stream guard against the frozen duo); `--record` is explicit and refused while a warning is open. Script 03 reads these rates for its Large adapt / Small adapt modes and raises `NotTuned` until they are recorded.
+
+**4. Table: ways of adapting the duo** (joint, one member adapting, independent; all scored with the same Fixed TS). Needs steps 2, 3 and 3b.
 
 ```bash
 sbatch slurm/job.sh scripts/03_tab_adaptation_modes.py --bn --temps_only            # once: fit and save T_L, T_S
@@ -61,7 +72,7 @@ sbatch slurm/job.sh scripts/03_tab_adaptation_modes.py --bn --report_only       
 
 Writes `tab_adaptation_modes__tent__<duo>_bn.tex` (accuracy per corruption) and `tab_adaptation_modes_summary__tent__<duo>_bn.tex` (accuracy, ECE, NLL per mode). Every table and figure is tagged with its models and the time it was generated (the first comment line of a `.tex` file, the footer and metadata of a figure; `src/utils/provenance.py`), and every file name carries the duo, so two duos never share a file.
 
-**Other duos.** The same steps 1 to 4 run for any duo of `cfgs/duos/` with `--duo <name>`: besides the main `vitb16_rn50v1` (ViT-B/16 + ResNet-50), `vitb16_rn34` (ViT-B/16 + ResNet-34) and `convnextb_deits` (ConvNeXt-B + DeiT-S, no BatchNorm layer, so `--bn` changes nothing). A new duo needs `cfgs/duos/<name>.yaml` and its three `cfgs/duo_lrs/<name>__{single,indep,joint}.yaml` files, which `src/utils/duo_lrs.py` can create (`init_single`, `init_indep`, `init_joint`); steps 2 and 3 then fill in the rates. Use `--exclude=kn117` on GPU jobs.
+**Other duos.** The same steps 1 to 4 run for any duo of `cfgs/duos/` with `--duo <name>`: besides the main `vitb16_rn50v1` (ViT-B/16 + ResNet-50), `vitb16_rn34` (ViT-B/16 + ResNet-34) and `convnextb_deits` (ConvNeXt-B + DeiT-S, no BatchNorm layer, so `--bn` changes nothing). A new duo needs `cfgs/duos/<name>.yaml` and its three `cfgs/duo_lrs/<name>__{single,indep,joint}.yaml` files, which `src/utils/duo_lrs.py` can create (`init_single`, `init_indep`, `init_joint`); steps 2 and 3 then fill in the rates, and step 3b creates `<name>__large_duo.yaml` and `<name>__small_duo.yaml` itself. Use `--exclude=kn117` on GPU jobs.
 
 **The gate itself** (proxy, beta and proxy-batch size, Joint DD) is selected by `04_cache_logits.py` to `10_select_joint_dd_beta.py`, run in numerical order; each reads what the one before stored, and each script's docstring has its commands. They write the selection in `results/selection_section45.json`, not a table yet. The tables that use it (main accuracy, beta, proxies, continual streams, ablations) are not written yet: see `plan.md`.
 

@@ -11,6 +11,12 @@ names the two models (NAME, NORM); nothing else holds a learning rate.
           Tuned as PAIRS by scripts/02b_tune_joint_lr.py, which only reports: `--import_joint <results.json>` copies its best
           pair in. Until then the method is `pending:` and asking for it is an ERROR, so a joint run can never silently use the
           indep rates. Only Tent has a joint mode (the ported ETA/EATA/SAR run their members independently).
+  large_duo / small_duo   ONE member adapts on the entropy of the duo's combined prediction while the other is frozen (engine modes
+          `large_duo` / `small_duo`: script 03's Large adapt / Small adapt). Tuned for that member alone by scripts/02d_tune_large_adapt_lr.py
+          and scripts/02e_tune_small_adapt_lr.py (`--record`; `--import_anchor <results.json>` by hand), NOT taken from the joint pair: with a
+          partner frozen the duo entropy is another signal and its best rate is another number. The file holds only the adapting member's
+          entry; the frozen member's optimizer (the indep one, filled in so that a duo dict is complete) is never built and not part of
+          the cache key. Until tuned, asking for it is an ERROR (NotTuned), never the joint or indep rate.
 
 File layout (every OPTIM block complete, exactly as src/tta/tent.py::setup_optimizer reads it, so a run built from it has the same
 cache fingerprint as before: the OPTIM block is part of every member's key):
@@ -57,9 +63,11 @@ DUO_DIR = REPO_ROOT / "cfgs" / "duos"
 # single: each model tuned ALONE (the single-model Tent baseline, an Independent run in which only that member counts); indep: the
 # independent duo's PAIR; joint: the joint duo's pair. A duo with no `single` file reads its `indep` entries for it (before the
 # 2026-10-22 retune the indep entries were the member-by-member winners).
-REGIMES = {"single": "both_indep", "indep": "both_indep", "joint": "both_duo"}
-OPTIONAL_REGIMES = {"single"}
+REGIMES = {"single": "both_indep", "indep": "both_indep", "joint": "both_duo", "large_duo": "large_duo", "small_duo": "small_duo"}
+OPTIONAL_REGIMES = {"single", "large_duo", "small_duo"}
 SIDES = ("large", "small")
+ADAPTING = {"large_duo": "large", "small_duo": "small"}     # the one-member regimes: the member that adapts (the only one with an entry)
+TUNING_SCRIPT = {"large_duo": "scripts/02d_tune_large_adapt_lr.py", "small_duo": "scripts/02e_tune_small_adapt_lr.py"}
 
 _HEADERS = {
     "single": """\
@@ -78,6 +86,18 @@ _HEADERS = {
 # both_duo; the joint mode of scripts/03 and Joint DD). Tuned as PAIRS by scripts/02b_tune_joint_lr.py, which only reports:
 # `python -m src.utils.duo_lrs --import_joint <results.json>` copies the best pair in. A method under `pending:` is being tuned:
 # asking for it raises NotTuned (never the indep rates).
+""",
+    "large_duo": """\
+# Learning rate of duo `{duo}`, LARGE_DUO regime: the LARGE member alone adapts, on the entropy of the duo's combined prediction, while the
+# small member is frozen (engine mode large_duo; script 03's Large adapt). Tuned for that member alone by scripts/02d_tune_large_adapt_lr.py
+# (`--record`, or `python -m src.utils.duo_lrs --import_anchor <results.json>`); never the joint pair's rate. Only the large member has an
+# entry. Until it is tuned, asking for it raises NotTuned.
+""",
+    "small_duo": """\
+# Learning rate of duo `{duo}`, SMALL_DUO regime: the SMALL member alone adapts, on the entropy of the duo's combined prediction, while the
+# large member is frozen (engine mode small_duo; script 03's Small adapt). Tuned for that member alone by scripts/02e_tune_small_adapt_lr.py
+# (`--record`, or `python -m src.utils.duo_lrs --import_anchor <results.json>`); never the joint pair's rate. Only the small member has an
+# entry. Until it is tuned, asking for it raises NotTuned.
 """,
 }
 
@@ -101,9 +121,9 @@ def path(duo: str, regime: str, root=None) -> Path:
 def load(duo: str, regime: str, root=None) -> dict:
     p = path(duo, regime, root)
     if not p.is_file():
-        raise FileNotFoundError(f"{p} does not exist: the learning rates of duo {duo!r} ({regime}) live there. Create it with "
-                                f"`python -m src.utils.duo_lrs {'--init_indep ' + duo if regime == 'indep' else '--init_joint'}` "
-                                f"(single: duo_lrs.init_single)")
+        how = (f"{TUNING_SCRIPT[regime]} --record" if regime in ADAPTING else
+               f"python -m src.utils.duo_lrs {'--init_indep ' + duo if regime == 'indep' else '--init_joint'} (single: duo_lrs.init_single)")
+        raise FileNotFoundError(f"{p} does not exist: the learning rates of duo {duo!r} ({regime}) live there. Create it with {how}")
     doc = yaml.safe_load(p.read_text())
     if doc.get("duo") != duo or doc.get("regime") != regime:
         raise ValueError(f"{p} is for duo {doc.get('duo')!r}, regime {doc.get('regime')!r}")
@@ -120,11 +140,53 @@ def _check_member(entry: dict, spec: dict, where: str, side: str) -> None:
                          f"{spec['NAME']}: retune (scripts/02_tune_tta.py) or fix NORM")
 
 
+def _side_optim(doc: dict, duo_spec: dict, regime: str, tta: str, side: str, where: str, batch_size: int | None) -> dict:
+    """The OPTIM of one member from the loaded file `doc`: its tuned entry for `tta`, else (indep / single) its default."""
+    spec = duo_spec[side.upper()]
+    entry = doc["methods"].get(tta, {}).get(side)
+    if entry is not None:
+        _check_member(entry, spec, f"{where}: {tta}/{side}", side)
+        if entry.get("stale"):
+            warnings.warn(f"{where}: {tta}/{side} is stale: {entry['stale']}")
+        if batch_size is not None and entry.get("batch_size") not in (None, batch_size):
+            warnings.warn(f"{where}: {tta}/{side} was tuned at batch size {entry['batch_size']}, the protocol uses {batch_size}")
+    elif regime in ("indep", "single") and side in doc["defaults"]:
+        entry = doc["defaults"][side]
+        _check_member(entry, spec, f"{where}: defaults/{side}", side)
+    else:
+        raise NotTuned(f"{duo_spec['NAME']} / {regime} / {tta} / {side}: no tuned learning rate and no default in {where}")
+    return copy.deepcopy(entry["OPTIM"])
+
+
+def _resolve_adapting(duo_spec: dict, regime: str, tta: str, root, batch_size: int | None) -> dict[str, dict]:
+    """The one-member regimes (large_duo / small_duo): the adapting member's tuned entry; the other member, which is frozen, gets its
+    indep optimizer so that the duo dict is complete (it is never built, and not part of the cache key)."""
+    name, side = duo_spec["NAME"], ADAPTING[regime]
+    other = SIDES[1 - SIDES.index(side)]
+    try:
+        doc = load(name, regime, root)
+    except FileNotFoundError:
+        doc = None
+    where = f"{path(name, regime, root)}"
+    if doc is None or side not in doc["methods"].get(tta, {}):
+        why = doc and doc["pending"].get(tta)
+        raise NotTuned(f"{name} / {regime} / {tta}: the {side} member's rate for adapting on the duo entropy with the {other} member frozen "
+                       f"is " + (f"not tuned yet ({why})" if why else f"not in {where}" + (f" (tuned there: {sorted(doc['methods'])})"
+                                                                                              if doc and doc["methods"] else ""))
+                       + f". Tune it with {TUNING_SCRIPT[regime]} --record, or pass the rate by hand; the joint pair's rates are NOT "
+                         f"a substitute")
+    out = {other.upper(): _side_optim(load(name, "indep", root), duo_spec, "indep", tta, other, f"{path(name, 'indep', root)}", batch_size)}
+    out[side.upper()] = _side_optim(doc, duo_spec, regime, tta, side, where, batch_size)
+    return {s.upper(): out[s.upper()] for s in SIDES}
+
+
 def resolve(duo_spec: dict, regime: str, tta: str, root=None, batch_size: int | None = None) -> dict[str, dict]:
     """{"LARGE": OPTIM, "SMALL": OPTIM} for `duo_spec` (a cfgs/duos yaml: NAME, LARGE{NAME, NORM}, SMALL{...}). Each member on its own:
-    its tuned entry for `tta`, else (indep) its default. Raises NotTuned for a joint method that is pending or absent, and for an
-    indep member with neither."""
+    its tuned entry for `tta`, else (indep) its default. Raises NotTuned for a joint method that is pending or absent, for an
+    indep member with neither, and for a one-member regime (large_duo / small_duo) whose adapting member is not tuned."""
     name = duo_spec["NAME"]
+    if regime in ADAPTING:
+        return _resolve_adapting(duo_spec, regime, tta, root, batch_size)
     if regime == "single" and not path(name, "single", root).exists():
         return resolve(duo_spec, "indep", tta, root, batch_size)          # no single file: the indep entries are the member-by-member ones
     doc = load(name, regime, root)
@@ -135,23 +197,7 @@ def resolve(duo_spec: dict, regime: str, tta: str, root=None, batch_size: int | 
         raise NotTuned(f"{name} / joint / {tta}: " + (f"not tuned yet ({why}). Pass explicit rates or wait; "
                        f"the indep rates are NOT a substitute" if why else
                        f"no tuned learning rate pair in {where} (tuned there: {sorted(doc['methods']) or 'none'})"))
-    out = {}
-    for side in SIDES:
-        spec = duo_spec[side.upper()]
-        entry = methods.get(side)
-        if entry is not None:
-            _check_member(entry, spec, f"{where}: {tta}/{side}", side)
-            if entry.get("stale"):
-                warnings.warn(f"{where}: {tta}/{side} is stale: {entry['stale']}")
-            if batch_size is not None and entry.get("batch_size") not in (None, batch_size):
-                warnings.warn(f"{where}: {tta}/{side} was tuned at batch size {entry['batch_size']}, the protocol uses {batch_size}")
-        elif regime in ("indep", "single") and side in doc["defaults"]:
-            entry = doc["defaults"][side]
-            _check_member(entry, spec, f"{where}: defaults/{side}", side)
-        else:
-            raise NotTuned(f"{name} / {regime} / {tta} / {side}: no tuned learning rate and no default in {where}")
-        out[side.upper()] = copy.deepcopy(entry["OPTIM"])
-    return out
+    return {side.upper(): _side_optim(doc, duo_spec, regime, tta, side, where, batch_size) for side in SIDES}
 
 
 # ------------------------------------------------------------------------------------------------------ writing
@@ -295,6 +341,42 @@ def import_joint(results_json, root=None, duos_dir=None) -> Path:
     return _write(doc, root)
 
 
+def init_anchor(duo: str, regime: str, root=None) -> Path | None:
+    """A large_duo / small_duo file with no methods; None if the file exists (it may hold a tuned rate)."""
+    if path(duo, regime, root).exists():
+        return None
+    return _write({"duo": duo, "regime": regime, "engine_mode": REGIMES[regime], "defaults": {}, "methods": {}, "pending": {}}, root)
+
+
+def import_anchor(results_json, root=None, duos_dir=None) -> Path:
+    """Copy the best rate of a scripts/02d / 02e run (its results.json) into the duo's large_duo / small_duo file: the entry of the one
+    member that adapts, for that TTA method (replacing the one there)."""
+    r = json.loads(Path(results_json).read_text())
+    if r.get("num_samples"):
+        raise ValueError(f"{results_json} is a capped run (--num_samples {r['num_samples']}); only full runs are imported")
+    duo, tta, side = r["duo"], r["tta"], r["side"]
+    regime = f"{side}_duo"
+    if regime not in ADAPTING:
+        raise ValueError(f"{results_json}: side must be 'large' or 'small', got {side!r}")
+    spec = _duo_spec(duo, duos_dir)
+    init_anchor(duo, regime, root)
+    doc = load(duo, regime, root)
+    entry = {"model": spec[side.upper()]["NAME"], "norm": spec[side.upper()]["NORM"], "batch_size": r.get("batch_size"),
+             "OPTIM": {**r["optim"][side], "LR": float(r["best"]["lr"])},
+             "source": str(results_json), "tuned_on": [s.replace("__", "/") for s in r["streams"]], "seeds": list(r["seeds"]),
+             "temperatures": Path(r["temperatures"]["checkpoint"]).name,
+             "note": f"the {side} member adapts on the duo entropy, the other member is frozen",
+             "duo_macro_accuracy": round(float(r["best"]["duo"]), 5), "worst_stream_accuracy": round(float(r["best"]["worst"]), 5),
+             "grid": {"lrs": list(r["lrs"]), "bn": r.get("bn")}}
+    if r["best"].get("late_duo") is not None:
+        entry["late_accuracy"] = round(float(r["best"]["late_duo"]), 5)
+    if r.get("frozen_duo") is not None:
+        entry["frozen_duo_macro_accuracy"] = round(float(r["frozen_duo"]), 5)
+    doc["methods"][tta] = {side: {k: v for k, v in entry.items() if v is not None}}
+    doc["pending"].pop(tta, None)
+    return _write(doc, root)
+
+
 # ------------------------------------------------------------------------------------------------------ checking
 
 def check(duo: str, root=None, duos_dir=None) -> list[str]:
@@ -327,6 +409,11 @@ def check(duo: str, root=None, duos_dir=None) -> list[str]:
             for tta, m in doc["methods"].items():
                 if not all(s in m for s in SIDES):
                     problems.append(f"{duo}/joint/{tta}: a joint entry needs both members (a pair)")
+        if regime in ADAPTING:
+            for tta, m in doc["methods"].items():
+                if set(m) != {ADAPTING[regime]}:
+                    problems.append(f"{duo}/{regime}/{tta}: only the {ADAPTING[regime]} member adapts here, so it is the only one with an "
+                                    f"entry (found {sorted(m)})")
     return problems
 
 
@@ -356,6 +443,7 @@ def main(argv=None) -> int:
     ap.add_argument("--init_joint", action="store_true", help="create the joint file of every duo that has none")
     ap.add_argument("--pending", nargs=3, metavar=("DUO", "TTA", "REASON"), help="mark a joint method as being tuned")
     ap.add_argument("--import_joint", metavar="RESULTS_JSON", help="copy the best pair of a 02b run into the joint file")
+    ap.add_argument("--import_anchor", metavar="RESULTS_JSON", help="copy the best rate of a 02d / 02e run into the large_duo / small_duo file")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--show", nargs=2, metavar=("DUO", "REGIME"))
     ap.add_argument("--duo", nargs="+", default=None, help="restrict --init_joint / --check to these duos")
@@ -375,6 +463,8 @@ def main(argv=None) -> int:
         set_pending(*a.pending)
     if a.import_joint:
         print(f"wrote {import_joint(a.import_joint)}")
+    if a.import_anchor:
+        print(f"wrote {import_anchor(a.import_anchor)}")
     if a.check:
         for d in duos:
             for p in check(d):
@@ -519,6 +609,52 @@ if __name__ == "__main__":
             pass
         assert check("main", root, duos) == [] and "PENDING" not in describe("main", "joint", root)
         assert "default large" in describe("main", "indep", root)
+
+        # large_duo / small_duo: ONE member adapts on the duo entropy; its rate is its own, never the joint pair's nor the indep one's
+        for regime, side, other in (("large_duo", "large", "small"), ("small_duo", "small", "large")):
+            try:
+                resolve(spec, regime, "tent", root)
+                raise AssertionError("an untuned one-member regime must raise, not fall back to the joint or indep rates")
+            except NotTuned as ex:
+                assert TUNING_SCRIPT[regime] in str(ex) and "NOT a substitute" in str(ex), str(ex)
+            assert check("main", root, duos) == [] or all(regime not in x for x in check("main", root, duos)), "an absent file is fine"
+        for side, lr in (("large", 2e-3), ("small", 8e-3)):
+            f = tmp / f"anchor_{side}.json"
+            f.write_text(json.dumps({"duo": "main", "tta": "tent", "side": side, "bn": True, "seeds": [0, 1], "num_samples": None,
+                                     "batch_size": 64, "streams": ["a__s5", "b__s5"], "temperatures": {"T_l": 0.8, "T_s": 1.0, "checkpoint": "/x/ts_dir"},
+                                     "optim": {side: optim(5e-5)}, "lrs": [1e-3, 2e-3, 4e-3], "frozen_duo": 0.5,
+                                     "best": {"lr": lr, "duo": 0.6, "worst": 0.4, "late_duo": 0.62}}))
+            import_anchor(f, root, duos)
+        want_large, want_small = resolve(spec, "large_duo", "tent", root), resolve(spec, "small_duo", "tent", root)
+        assert want_large["LARGE"] == optim(2e-3) and want_small["SMALL"] == optim(8e-3), "each member's own rate, the rest of its OPTIM kept"
+        assert want_large["SMALL"] == resolve(spec, "indep", "tent", root)["SMALL"] and want_small["LARGE"] == resolve(spec, "indep", "tent", root)["LARGE"], \
+            "the frozen member gets its indep optimizer: inert, it keeps the duo dict complete"
+        assert resolve(spec, "joint", "tent", root) == {"LARGE": optim(1e-4), "SMALL": optim(5e-3)} and resolve(spec, "indep", "tent", root)["LARGE"] == optim(5e-5), \
+            "the regimes do not mix"
+        e = load("main", "large_duo", root)["methods"]["tent"]
+        assert list(e) == ["large"] and e["large"]["temperatures"] == "ts_dir" and e["large"]["late_accuracy"] == 0.62 and e["large"]["seeds"] == [0, 1]
+        assert e["large"]["grid"] == {"lrs": [1e-3, 2e-3, 4e-3], "bn": True} and e["large"]["frozen_duo_macro_accuracy"] == 0.5 and e["large"]["batch_size"] == 64
+        assert "large vit lr 0.002" in describe("main", "large_duo", root)
+        try:
+            resolve(spec, "large_duo", "eta", root)
+            raise AssertionError("another TTA method has no entry")
+        except NotTuned as ex:
+            assert "tuned there: ['tent']" in str(ex), str(ex)
+        import_anchor(tmp / "anchor_large.json", root, duos)                                      # a second import replaces, never duplicates
+        assert list(load("main", "large_duo", root)["methods"]) == ["tent"]
+        bad = json.loads((tmp / "anchor_large.json").read_text())
+        for patch, exc in (({"num_samples": 2000}, ValueError), ({"side": "middle"}, ValueError)):
+            (tmp / "bad.json").write_text(json.dumps({**bad, **patch}))
+            try:
+                import_anchor(tmp / "bad.json", root, duos)
+                raise AssertionError(f"must be refused: {patch}")
+            except exc:
+                pass
+        assert not [x for x in check("main", root, duos) if "duo/" in x or "_duo" in x], check("main", root, duos)
+        doc = load("main", "large_duo", root)
+        doc["methods"]["tent"]["small"] = copy.deepcopy(doc["methods"]["tent"]["large"])
+        _write(doc, root)
+        assert any("only the large member adapts here" in x for x in check("main", root, duos)), "an entry for the frozen member is a mistake"
         # check() finds an OPTIM block left in a duo file, and a missing joint file
         (duos / "main.yaml").write_text(yaml.safe_dump({"NAME": "main", "LARGE": {"NAME": "vit", "NORM": "LN", "OPTIM": adam(1)},
                                                         "SMALL": {"NAME": "rn", "NORM": "BN"}}))

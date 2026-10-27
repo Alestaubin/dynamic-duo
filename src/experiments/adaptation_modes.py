@@ -17,15 +17,17 @@ the table differ only in how the members' weights were adapted. The modes (the m
 The right-hand names are the engine's modes (src/experiments/members.py). One live run per (mode, seed) caches both
 members' logits (src/experiments/cache.py); the duo's accuracy is a replay of the fixed combination on them.
 
-Learning rates. The two kinds of mode adapt on different signals and each has its own rates: the modes that adapt on a
+Learning rates. The kinds of mode adapt on different signals and each has its own rates: the modes that adapt on a
 member's OWN entropy (Independent large / small / both) run with the rates tuned member by member (cfgs/tuned/, the
-indep regime of cfgs/duo_lrs/), the modes that adapt on the DUO entropy (Joint, Large adapt, Small adapt) with the pair
-tuned by scripts/02b_tune_joint_lr.py (the joint regime of cfgs/duo_lrs/; a Large / Small adapt run uses its adapting
-member's rate of that pair); the modes in which ONE member adapts alone on its own entropy (Independent large / small, and so the
-single-model rows) run with the rates tuned for that model alone (the single regime, `single_ctx`). `ctx` is the context of Independent
-both (the independent duo's pair), `duo_ctx` the duo-entropy one; the frozen run
-has no optimizer, so which of them runs it is immaterial (its cache key holds no learning rate). Both sets are listed
-in the tables' captions. The duo's temperatures are shared by every mode and fitted at the own-entropy rates.
+indep regime of cfgs/duo_lrs/), Joint (both members on the DUO entropy) with the pair tuned by scripts/02b_tune_joint_lr.py
+(the joint regime of cfgs/duo_lrs/), and Large adapt / Small adapt (ONE member on the duo entropy, the other frozen) each with the
+rate tuned for that mode alone, by scripts/02d_tune_large_adapt_lr.py / 02e_tune_small_adapt_lr.py (the large_duo / small_duo
+regimes); they do NOT take the joint pair's rate, since with the partner frozen the duo entropy is another signal. The modes in which
+ONE member adapts alone on its own entropy (Independent large / small, and so the single-model rows) run with the rates tuned for
+that model alone (the single regime, `single_ctx`). `ctx` is the context of Independent both (the independent duo's pair),
+`duo_ctx` the Joint one, `anchor_ctx[mode key]` that of Large / Small adapt; the frozen run has no optimizer, so which of them
+runs it is immaterial (its cache key holds no learning rate), and neither has a frozen member's optimizer in its key. All sets are
+listed in the tables' captions. The duo's temperatures are shared by every mode and fitted on the frozen models.
 
 The per-corruption table has one row per (mode, prediction) pair (ROWS), in four sections named by what is scored and
 which entropy the adapting models minimize:
@@ -226,12 +228,17 @@ def job_label(job: tuple[Mode, RunSpec]) -> str:
 
 
 SINGLE_MODES = ("indep_large", "indep_small")      # one member adapts alone on its own entropy: the rates tuned for that model alone
+ANCHOR_SIDE = {"large_anchor": "large", "small_anchor": "small"}    # one member adapts on the DUO entropy: which one (its own tuned rate)
 
 
-def mode_context(mode: Mode, ctx: Context, duo_ctx: Context | None = None, single_ctx: Context | None = None) -> Context:
-    """The context `mode` runs in: `duo_ctx` (the duo-entropy learning rates) for a mode that adapts on the duo entropy, `single_ctx` (the
-    rates tuned for each model alone) for Independent large / small, else `ctx` (the independent duo's pair). A missing context
-    means `ctx`."""
+def mode_context(mode: Mode, ctx: Context, duo_ctx: Context | None = None, single_ctx: Context | None = None,
+                 anchor_ctx: dict[str, Context] | None = None) -> Context:
+    """The context `mode` runs in: `anchor_ctx[mode.key]` (the rate tuned for that mode alone) for Large / Small adapt, `duo_ctx` (the
+    Joint pair) for the other mode that adapts on the duo entropy, `single_ctx` (the rates tuned for each model alone) for Independent
+    large / small, else `ctx` (the independent duo's pair). A missing context means `ctx`; an anchor mode with no `anchor_ctx` entry falls
+    back to `duo_ctx` as before the anchor rates existed (script 03 always passes them, and fails with NotTuned when they are missing)."""
+    if anchor_ctx and mode.key in anchor_ctx:
+        return anchor_ctx[mode.key]
     if mode.duo_entropy:
         return duo_ctx if duo_ctx is not None else ctx
     if mode.key in SINGLE_MODES:
@@ -246,7 +253,7 @@ def single_context(ctx: Context, tta: str) -> Context:
 
 
 def joint_context(ctx: Context, tta: str, lr_large: float | None = None, lr_small: float | None = None) -> Context:
-    """A copy of `ctx` with the learning rates of the modes that adapt on the duo entropy: the duo's joint regime
+    """A copy of `ctx` with the learning rates of the Joint mode (both members on the duo entropy): the duo's joint regime
     (cfgs/duo_lrs/<duo>__joint.yaml: the pair scripts/02b_tune_joint_lr.py found and recorded there), with
     `lr_large` / `lr_small` replacing either member's rate. With both given the file is not read; otherwise a duo whose
     pair is not tuned yet raises `NotTuned` (load_duo), never falling back to the own-entropy rates."""
@@ -255,27 +262,50 @@ def joint_context(ctx: Context, tta: str, lr_large: float | None = None, lr_smal
     return with_learning_rates(ctx, lr_large, lr_small)
 
 
+def anchor_context(ctx: Context, tta: str, key: str, lr: float | None = None) -> Context:
+    """The context of Large adapt (`key` "large_anchor") / Small adapt ("small_anchor"): a copy of `ctx` whose ADAPTING member runs at
+    the rate tuned for this mode alone (cfgs/duo_lrs/<duo>__large_duo.yaml / __small_duo.yaml: scripts/02d, 02e), never the joint pair's.
+    The member that is frozen keeps `ctx`'s optimizer, which is never built and not part of the cache key. An untuned mode raises
+    `NotTuned` (load_duo). `lr` gives the rate by hand instead (the file is not read; the rest of the member's OPTIM is `ctx`'s)."""
+    side = ANCHOR_SIDE[key]
+    if lr is not None:
+        return with_learning_rates(ctx, lr if side == "large" else None, lr if side == "small" else None)
+    tuned = load_duo(ctx.duo["NAME"], ctx.g, tta=tta, regime=f"{side}_duo")
+    duo = copy.deepcopy(ctx.duo)
+    duo[side.upper()]["OPTIM"] = tuned[side.upper()]["OPTIM"]
+    return replace(ctx, duo=duo)
+
+
+def anchor_contexts(ctx: Context, tta: str, keys: Sequence[str], lr_large: float | None = None,
+                    lr_small: float | None = None) -> dict[str, Context]:
+    """{mode key: `anchor_context`} for the Large / Small adapt modes among `keys` (`lr_large` is Large adapt's rate, `lr_small` Small adapt's)."""
+    given = {"large_anchor": lr_large, "small_anchor": lr_small}
+    return {k: anchor_context(ctx, tta, k, given[k]) for k in keys if k in ANCHOR_SIDE}
+
+
 def compute_members(ctx: Context, jobs: Sequence[tuple[Mode, RunSpec]], segments: list[Segment] | None = None,
-                    duo_ctx: Context | None = None, single_ctx: Context | None = None) -> None:
-    """Adapt the members of every job (a GPU job); streams already cached are skipped. `duo_ctx`, `single_ctx`: see `mode_context`."""
+                    duo_ctx: Context | None = None, single_ctx: Context | None = None,
+                    anchor_ctx: dict[str, Context] | None = None) -> None:
+    """Adapt the members of every job (a GPU job); streams already cached are skipped. `duo_ctx`, `single_ctx`, `anchor_ctx`: see `mode_context`."""
     for mode, spec in jobs:
         print(f"== {job_label((mode, spec))}: {mode.label} ({spec.mode})")
-        ensure_members(spec, mode_context(mode, ctx, duo_ctx, single_ctx), segments)
+        ensure_members(spec, mode_context(mode, ctx, duo_ctx, single_ctx, anchor_ctx), segments)
 
 
 def missing(ctx: Context, jobs: Sequence[tuple[Mode, RunSpec]], duo_ctx: Context | None = None,
-            single_ctx: Context | None = None) -> dict[str, list[str]]:
-    return {job_label(j): m for j in jobs if (m := missing_streams(j[1], mode_context(j[0], ctx, duo_ctx, single_ctx)))}
+            single_ctx: Context | None = None, anchor_ctx: dict[str, Context] | None = None) -> dict[str, list[str]]:
+    return {job_label(j): m for j in jobs if (m := missing_streams(j[1], mode_context(j[0], ctx, duo_ctx, single_ctx, anchor_ctx)))}
 
 
 def duo_rows(jobs: Sequence[tuple[Mode, RunSpec]], ctx: Context, temps: Temps,
-             segments: list[Segment] | None = None, duo_ctx: Context | None = None, single_ctx: Context | None = None) -> list[dict]:
+             segments: list[Segment] | None = None, duo_ctx: Context | None = None, single_ctx: Context | None = None,
+             anchor_ctx: dict[str, Context] | None = None) -> list[dict]:
     """One row per (mode, seed, stream, series) from the cached logits: series "duo" is the static duo's
     prediction, "large"/"small" are the members' own predictions under that mode."""
     gate = GateSpec("duo", kind="fixed_ts", fixed_ts=str(temps.folder))
     rows = []
     for mode, spec in jobs:
-        res: EvalResult = evaluate(spec, mode_context(mode, ctx, duo_ctx, single_ctx), [gate], report_only=True, segments=segments)
+        res: EvalResult = evaluate(spec, mode_context(mode, ctx, duo_ctx, single_ctx, anchor_ctx), [gate], report_only=True, segments=segments)
         rows += [{**r, "mode": mode.key, "engine_mode": mode.engine} for r in res.rows]
     return rows
 
@@ -371,37 +401,50 @@ def _optims(ctx: Context) -> tuple[dict, dict]:
     return ctx.duo["LARGE"]["OPTIM"], ctx.duo["SMALL"]["OPTIM"]
 
 
-def _hyperparameters(ctx: Context, duo_ctx: Context | None = None, single_ctx: Context | None = None) -> str:
-    """The batch size and each member's optimizer. Where `duo_ctx` or `single_ctx` have other optimizers than `ctx`, every set is
-    listed and the caption says which modes use which: both models adapting on their own entropy (Independent both) run with `ctx`'s,
-    one model adapting alone on its own entropy (Independent large / small, the single-model rows) with `single_ctx`'s, the models
-    that adapt on the duo entropy with `duo_ctx`'s."""
+_ANCHOR_ROWS = {"large_anchor": ("Large adapt", 0), "small_anchor": ("Small adapt", 1)}     # mode key -> (caption name, index in _optims)
+
+
+def _hyperparameters(ctx: Context, duo_ctx: Context | None = None, single_ctx: Context | None = None,
+                     anchor_ctx: dict[str, Context] | None = None) -> str:
+    """The batch size and each member's optimizer. Where `duo_ctx`, `single_ctx` or `anchor_ctx` have other optimizers than `ctx`, every
+    set is listed and the caption says which modes use which: both models adapting on their own entropy (Independent both) run with
+    `ctx`'s, one model adapting alone on its own entropy (Independent large / small, the single-model rows) with `single_ctx`'s, both
+    models on the duo entropy (Joint) with `duo_ctx`'s, and Large / Small adapt, each with the rate tuned for it, with its own
+    entry of `anchor_ctx` (all of them are listed as soon as one differs; without `anchor_ctx` the one model that adapts on the duo
+    entropy is said to use its optimizer from the Joint list)."""
     large, small = _model_names(ctx)
+    names = (large, small)
     head = f"Hyperparameters of the adapting models: batch size {ctx.batch_size}."
     d_diff = duo_ctx is not None and _optims(duo_ctx) != _optims(ctx)
     s_diff = single_ctx is not None and _optims(single_ctx) != _optims(ctx)
-    if not d_diff and not s_diff:
+    anchors = [(k, c) for k, c in (anchor_ctx or {}).items() if k in _ANCHOR_ROWS]
+    a_diff = any(_optims(c)[_ANCHOR_ROWS[k][1]] != _optims(ctx)[_ANCHOR_ROWS[k][1]] for k, c in anchors)
+    if not d_diff and not s_diff and not a_diff:
         large_opt, small_opt = (_optim_text(o) for o in _optims(ctx))
         return f"{head} {large}: {large_opt}. {small}: {small_opt}."
     text = lambda c: f"{large}: {_optim_text(_optims(c)[0])}. {small}: {_optim_text(_optims(c)[1])}."          # noqa: E731
     if not s_diff:
-        return (f"{head} The optimizer depends on the entropy the models minimize. "
-                f"Models that adapt on their own entropy: {text(ctx)} "
-                f"Models that adapt on the duo entropy: {text(duo_ctx)} "
-                f"With one model adapting on the duo entropy, it uses its optimizer from this list.")
-    parts = [f"{head} The optimizer depends on how the models adapt. "
-             f"One model adapting alone on its own entropy (the single-model rows, Independent large / small): {text(single_ctx)} "
-             f"Both models adapting on their own entropy (Independent both): {text(ctx)}"]
-    if d_diff:
+        parts = [f"{head} The optimizer depends on the entropy the models minimize. Models that adapt on their own entropy: {text(ctx)}"]
+    else:
+        parts = [f"{head} The optimizer depends on how the models adapt. "
+                 f"One model adapting alone on its own entropy (the single-model rows, Independent large / small): {text(single_ctx)} "
+                 f"Both models adapting on their own entropy (Independent both): {text(ctx)}"]
+    if anchors and (a_diff or d_diff):              # the anchors' own rates are authoritative: never "from the Joint list"
+        if d_diff:
+            parts.append(f"Both models adapting on the duo entropy (Joint): {text(duo_ctx)}")
+        for k, c in anchors:
+            label, i = _ANCHOR_ROWS[k]
+            parts.append(f"{label} (one model adapting on the duo entropy, the other frozen): {names[i]}: {_optim_text(_optims(c)[i])}.")
+    elif d_diff:
         parts.append(f"Models that adapt on the duo entropy: {text(duo_ctx)} With one model adapting on the duo entropy, it uses its "
                      f"optimizer from this list.")
     return " ".join(parts)
 
 
 def _setting(ctx: Context, tta: str, temps: Temps, severity: int, duo_ctx: Context | None = None,
-             single_ctx: Context | None = None) -> str:
+             single_ctx: Context | None = None, anchor_ctx: dict[str, Context] | None = None) -> str:
     """The summary table's caption sentences (it has one row per mode, named as in MODES)."""
-    return (f"{_models_text(ctx, tta, severity)} {_hyperparameters(ctx, duo_ctx, single_ctx)} "
+    return (f"{_models_text(ctx, tta, severity)} {_hyperparameters(ctx, duo_ctx, single_ctx, anchor_ctx)} "
             f"The duo's prediction in every mode is the same static duo $(z_L / T_L + z_S / T_S) / 2$ with "
             f"$T_L = {temps.T_l:.2f}$, $T_S = {temps.T_s:.2f}$, {temps.origin}. "
             f"\\emph{{Duo entropy}}: the adapting model(s) minimize the entropy of the duo's combined prediction, "
@@ -423,7 +466,8 @@ def _max_std_points(df: pd.DataFrame, keys: Sequence[str]) -> float | None:
 
 
 def render_corruption_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Temps, *, label: str,
-                            source: str, duo_ctx: Context | None = None, single_ctx: Context | None = None) -> str:
+                            source: str, duo_ctx: Context | None = None, single_ctx: Context | None = None,
+                            anchor_ctx: dict[str, Context] | None = None) -> str:
     """Top-1 accuracy per corruption, one row per (mode, prediction) of ROWS (ImageNet-C paper layout), in sections:
     frozen, a single model adapting on its own entropy, the duo with members adapting on their own entropy, the duo
     with members adapting on the duo's. The clean stream is its own column. Means over seeds, no std in the cells."""
@@ -445,7 +489,7 @@ def render_corruption_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Tem
                  f"$T_S = {temps.T_s:.2f}$, {temps.origin}."
                + (" With both models adapting, the own-entropy and duo-entropy rows are the Independent and Joint "
                   "modes of Section~\\ref{sec:duo_tent}." if {"indep_duo", "joint"} <= modes else "")
-               + f" {_hyperparameters(ctx, duo_ctx, single_ctx)}"
+               + f" {_hyperparameters(ctx, duo_ctx, single_ctx, anchor_ctx)}"
                + (f" \\emph{{Clean}}: the ImageNet validation images the corruptions are rendered from, adapted to like "
                   f"any other stream. It is not part of Avg., the mean over the {n_corr} corruptions." if has_clean else "")
                + (f" Mean over {n_seeds} seeds." + (f" Standard deviations are at most {max_std:.1f} points."
@@ -456,7 +500,8 @@ def render_corruption_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Tem
 
 
 def render_summary_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Temps, *, label: str, source: str,
-                         duo_ctx: Context | None = None, single_ctx: Context | None = None) -> str:
+                         duo_ctx: Context | None = None, single_ctx: Context | None = None,
+                         anchor_ctx: dict[str, Context] | None = None) -> str:
     """Per mode, averaged over the corruptions in `df` (the clean stream is left out): each member's accuracy under
     that mode, then the duo's accuracy, ECE and NLL."""
     df, _ = split_clean(df)
@@ -477,7 +522,7 @@ def render_summary_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Temps,
                      cell(f"{m.key}/duo", "ece", 1, True), cell(f"{m.key}/duo", "nll", 2, False)])
     n_corr, n_seeds = df["segment"].nunique(), df["seed"].nunique()
     caption = (f"Accuracy (\\%) of each member under each way of adapting, and accuracy, ECE (\\%) and NLL of the duo, "
-               f"averaged over the {n_corr} corruptions. " + _setting(ctx, tta, temps, ctx.g.severity, duo_ctx, single_ctx)
+               f"averaged over the {n_corr} corruptions. " + _setting(ctx, tta, temps, ctx.g.severity, duo_ctx, single_ctx, anchor_ctx)
                + (f" Mean $\\pm$ std over {n_seeds} seeds." if n_seeds > 1 else ""))
     return latex_table(header, body, caption=caption, label=label, midrule_before=mid, star=False, resize=False,
                        source=source, models=provenance.run_label(ctx.duo, tta, ctx.bn))
@@ -501,11 +546,17 @@ def add_args(ap) -> None:
                          "so a run with other rates fits its own temperatures and shares no cache with the tuned ones")
     ap.add_argument("--lr_small", type=float, default=None, metavar="LR", help="the same for the small member")
     ap.add_argument("--joint_lr_large", type=float, default=None, metavar="LR",
-                    help="replace the large member's learning rate in the modes that adapt on the DUO entropy (Joint, Large "
-                         "adapt, Small adapt), whose rates are those of the joint regime of cfgs/duo_lrs/ (a pair tuned "
-                         "by 02b_tune_joint_lr.py). Given with --joint_lr_small, the joint file is not read, which is how "
-                         "to run before the pair is imported")
+                    help="replace the large member's learning rate in the Joint mode (both members on the DUO entropy), whose rates "
+                         "are those of the joint regime of cfgs/duo_lrs/ (a pair tuned by 02b_tune_joint_lr.py). Given with "
+                         "--joint_lr_small, the joint file is not read, which is how to run before the pair is imported")
     ap.add_argument("--joint_lr_small", type=float, default=None, metavar="LR", help="the same for the small member")
+    ap.add_argument("--anchor_lr_large", type=float, default=None, metavar="LR",
+                    help="the learning rate of the large member in Large adapt (it adapts on the duo entropy, the small member is "
+                         "frozen), whose rate is the one in the large_duo regime of cfgs/duo_lrs/ (tuned for that mode alone by "
+                         "02d_tune_large_adapt_lr.py, NOT the joint pair's). Given, the file is not read, which is how to run before it "
+                         "is recorded (the rest of the member's OPTIM is the indep regime's)")
+    ap.add_argument("--anchor_lr_small", type=float, default=None, metavar="LR",
+                    help="the same for Small adapt: the small member's rate (small_duo regime, 02e_tune_small_adapt_lr.py)")
 
 
 def with_learning_rates(ctx: Context, lr_large: float | None, lr_small: float | None) -> Context:
@@ -527,11 +578,13 @@ def output_tag(args, default_duo: str, stamp: str | None = None) -> str:
     """File-name tag: the TTA method, `__<duo>` (always), `_bn` with --bn (the frozen members'
     BatchNorm statistics change the numbers, so the two settings must not overwrite each other). With --lr_large /
     --lr_small it adds `_lrL<large>_S<small>` (the own-entropy rates given), with --joint_lr_large / --joint_lr_small
-    `_jlrL<large>_S<small>` (the duo-entropy ones), and `_<stamp>` after them, so that a run with other learning
+    `_jlrL<large>_S<small>` (the Joint ones), with --anchor_lr_large / --anchor_lr_small `_alrL<large>_S<small>` (Large /
+    Small adapt's), and `_<stamp>` after them, so that a run with other learning
     rates never overwrites a table of the tuned ones, nor an earlier run of its own."""
     tag = args.tta + f"__{args.duo}" + bn_tag(args)                     # every file names its duo (author's rule, 2026-10-22)
     overridden = False
-    for prefix, large, small in (("_lr", "lr_large", "lr_small"), ("_jlr", "joint_lr_large", "joint_lr_small")):
+    for prefix, large, small in (("_lr", "lr_large", "lr_small"), ("_jlr", "joint_lr_large", "joint_lr_small"),
+                                 ("_alr", "anchor_lr_large", "anchor_lr_small")):
         lrs = [(k, v) for k, v in (("L", getattr(args, large, None)), ("S", getattr(args, small, None))) if v is not None]
         if lrs:
             tag += prefix + "_".join(f"{k}{_lr_text(v)}" for k, v in lrs)
@@ -766,6 +819,10 @@ if __name__ == "__main__":
                           "d", "T1") == "tent__d_bn_jlrL0p0005_T1"
         assert output_tag(NS(tta="tent", duo="d", bn=True, lr_large=2.5e-4, lr_small=None, joint_lr_large=2e-3, joint_lr_small=4e-3),
                           "d", "T1") == "tent__d_bn_lrL0p00025_jlrL0p002_S0p004_T1"
+        assert output_tag(NS(tta="tent", duo="d", bn=True, anchor_lr_large=3e-3, anchor_lr_small=None), "d", "T1") == "tent__d_bn_alrL0p003_T1"
+        assert output_tag(NS(tta="tent", duo="d", bn=True, joint_lr_large=2e-3, joint_lr_small=4e-3, anchor_lr_large=3e-3, anchor_lr_small=6e-3),
+                          "d", "T1") == "tent__d_bn_jlrL0p002_S0p004_alrL0p003_S0p006_T1"
+        assert output_tag(NS(tta="tent", duo="d", bn=True), "d", "T1") == "tent__d_bn", "no anchor flags: the name is as it was"
         # the duo-entropy rates come from the joint regime's file (a temporary one), and a pair not tuned yet is an error
         from src.utils import config as C, duo_lrs
         lrs_dir, duos_dir = tmp / "duo_lrs", tmp / "duos"
@@ -803,6 +860,72 @@ if __name__ == "__main__":
                                       "small": {"model": "tiny_bn", "norm": "BN", "OPTIM": tuned(9e-5), "source": "test"}}
             duo_lrs._write(doc, lrs_dir)
             assert rates(single_context(ctx, "tent")) == [7e-5, 9e-5] and rates(ctx) == [1e-2, 1e-2]
+
+            # ---- Large / Small adapt: each its own rate (large_duo / small_duo regimes), never the joint pair's ---------------
+            anchor_modes = ("large_anchor", "small_anchor")
+            AM_SIDE = ANCHOR_SIDE
+            for key in anchor_modes:
+                try:
+                    anchor_context(ctx, "tent", key)
+                    raise AssertionError("an untuned anchor mode must raise NotTuned, not fall back to the joint pair or the indep rates")
+                except duo_lrs.NotTuned as ex:
+                    assert "NOT a substitute" in str(ex) and f"{AM_SIDE[key]}_duo" in str(ex), str(ex)
+            assert anchor_contexts(ctx, "tent", ["joint", "indep_duo", "frozen"]) == {}, "only Large / Small adapt need an anchor rate"
+            try:
+                anchor_contexts(ctx, "tent", MODE_KEYS)
+                raise AssertionError("one untuned anchor makes the whole request an error")
+            except duo_lrs.NotTuned:
+                pass
+            for side, lr in (("large", 3e-3), ("small", 6e-3)):
+                duo_lrs.init_anchor("tiny", f"{side}_duo", lrs_dir)
+                doc = duo_lrs.load("tiny", f"{side}_duo", lrs_dir)
+                doc["methods"]["tent"] = {side: {"model": f"tiny_{'ln' if side == 'large' else 'bn'}", "norm": "LN" if side == "large" else "BN",
+                                                 "OPTIM": tuned(lr), "source": "test"}}
+                duo_lrs._write(doc, lrs_dir)
+            ac = anchor_contexts(ctx, "tent", MODE_KEYS)
+            assert set(ac) == set(anchor_modes) and rates(ctx) == [1e-2, 1e-2], "ctx is untouched"
+            assert rates(ac["large_anchor"]) == [3e-3, 1e-2] and rates(ac["small_anchor"]) == [1e-2, 6e-3], \
+                "the member that adapts has its own rate; the frozen one keeps ctx's optimizer"
+            assert rates(joint_context(ctx, "tent")) == [2e-3, 4e-3], "the joint pair is not touched by the anchors"
+            assert rates(anchor_context(ctx, "eata", "large_anchor", 5e-3)) == [5e-3, 1e-2] and \
+                rates(anchor_context(ctx, "eata", "small_anchor", 5e-3)) == [1e-2, 5e-3], "a rate by hand needs no file: one rate, the adapting member's"
+            a_spec = mode_jobs("tiny", "tent", None, [0], None, temps, ["large_anchor"])[0][1]
+            assert run_dir(a_spec, ac["large_anchor"]) != run_dir(a_spec, duo_ctx), "the anchor's own rate is part of its cache key"
+            assert run_dir(a_spec, with_learning_rates(ac["large_anchor"], None, 9e-9)) == run_dir(a_spec, ac["large_anchor"]), \
+                "the frozen member's optimizer is not part of the key"
+            for m in MODES:
+                want = ac[m.key] if m.key in ac else duo_ctx if m.duo_entropy else single_ctx if m.key in SINGLE_MODES else ctx
+                assert mode_context(m, ctx, duo_ctx, single_ctx, ac) is want, m.key
+            assert mode_context(MODE_BY_KEY["large_anchor"], ctx, duo_ctx) is duo_ctx, "no anchor contexts given: as before they existed"
+            j3 = mode_jobs("tiny", "tent", None, [3], None, temps, ["large_anchor", "small_anchor", "joint"])
+            compute_members(ctx, j3, test, duo_ctx=duo_ctx, anchor_ctx=ac)
+            for m, sp in j3:
+                mine, other = (ac[m.key], duo_ctx) if m.key in ac else (duo_ctx, ac["large_anchor"])
+                assert all(MemberCache(run_dir(sp, mine)).has(x.file_stem) for x in test), m.key
+                assert not any(MemberCache(run_dir(sp, other)).has(x.file_stem) for x in test), m.key
+            rows3 = duo_rows(j3, ctx, temps, test, duo_ctx=duo_ctx, anchor_ctx=ac)
+            assert {r["mode"] for r in rows3} == {"large_anchor", "small_anchor", "joint"} and len(rows3) == 3 * len(test) * 3
+            # the captions: Joint's pair and each anchor's rate, and no "from this list" (the anchors do not use the Joint list)
+            cap_a = [cap(render_summary_table(df, label="x", duo_ctx=duo_ctx, anchor_ctx=ac, **kw)),
+                     cap(render_corruption_table(df, label="x", duo_ctx=duo_ctx, anchor_ctx=ac, **kw))]
+            for c in cap_a:
+                assert c.index("Both models adapting on the duo entropy (Joint): ") < c.index("Large adapt (one model adapting on the duo entropy, the "
+                                                                                              "other frozen): ") < c.index("Small adapt (one model")
+                assert "from this list" not in c and c.count("$") % 2 == 0
+                for key in anchor_modes:
+                    label, i = _ANCHOR_ROWS[key]
+                    assert f"{label} (one model adapting on the duo entropy, the other frozen): " \
+                           f"{_model_names(ctx)[i]}: {_optim_text(ac[key].duo[('LARGE', 'SMALL')[i]]['OPTIM'])}." in c, key
+            only_anchor = cap(render_summary_table(df[df["mode"].isin(anchor_modes)], label="x", anchor_ctx=ac, **kw))
+            assert "Both models adapting on the duo entropy (Joint)" not in only_anchor and "Large adapt (one model" in only_anchor, \
+                "no Joint rates when Joint does not run (no duo_ctx), the anchors' rates are still listed"
+            same = {k: with_learning_rates(ctx, None, None) for k in anchor_modes}
+            assert cap(render_corruption_table(df, label="x", anchor_ctx=same, **kw)) == cap(t1), "anchors at ctx's rates: the one-set caption"
+            assert cap(render_summary_table(df, label="x", anchor_ctx=same, single_ctx=single_ctx, **kw)) == \
+                cap(render_summary_table(df, label="x", single_ctx=single_ctx, **kw)), "equal anchors add nothing to the single-set caption"
+            assert "Models that adapt on the duo entropy" not in cap_a[0] and "Large adapt (one model" in cap_a[0]
+            assert cap(render_summary_table(df, label="x", duo_ctx=duo_ctx, anchor_ctx=same, **kw)).count("Large adapt (one model") == 1, \
+                "Joint differs, anchors equal to ctx: the anchors are still named, so Large / Small adapt are not read as Joint's"
         finally:
             C.DUO_DIR = saved_duo_dir
         sub = render_summary_table(df[df["mode"].isin(["joint", "indep_duo"])], label="x", **kw)
