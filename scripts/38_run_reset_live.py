@@ -5,20 +5,17 @@ with a TRIGGER deciding when a member goes back to source (src/reset/live_runs.p
 ResNet 5e-4: both collapse without a reset), so the comparison is between the ways of deciding a reset. Conditions (`--conditions`):
 
     none            no reset
-    <family>        a screened rule, e.g. own_fast_vs_slow: the (configuration, threshold) that scripts/37b_screen_resets_stress.py chose at
-                    `--budget` false alarms per 1,000 proxy batches (read from `--screen_json`; label-free)
-    <family>@<thr>  the same rule with its detection threshold replaced (delta of fast_vs_slow / imm_vs_ema, h of cusum, tau of level, gamma of slope),
-                    every other parameter as screened: the threshold ladder of the tuning (src/reset/tuning.py)
-    own_fast_vs_slow@pmL<af>-<as>-<W0>-<d>_S<af>-<as>-<W0>-<d>   own_fast_vs_slow with PER-MEMBER settings (averaging speeds, warm-up, threshold of the large and the
-                    small member; src/reset/member_rules.py): the default of the per-member tuning (scripts/40_tune_reset.py member)
+    own_fast_vs_slow       the rule: the (configuration, threshold) that scripts/37b_screen_resets_stress.py chose at `--budget` false alarms per
+                    1,000 proxy batches (read from `--screen_json`; label-free), ONE setting for both members
+    own_fast_vs_slow@<d>   the same with its threshold delta replaced, every other parameter as screened
+    own_fast_vs_slow@pmL<af>-<as>-<W0>-<d>_S<af>-<as>-<W0>-<d>   PER-MEMBER settings (averaging speeds, warm-up, threshold of the large and the
+                    small member; src/reset/member_rules.py): the default of the tuning (scripts/40_tune_reset.py member)
     fixed<N>        both members every N adaptation steps (fixed1000 = RDumb's schedule; label-free and blind)
-    staggered<N>    the ResNet every N steps and the ViT N/2 steps after each ResNet reset (never together; the control for the gap rule's alternation)
     random~<cond>~d<D>   the control for detection: each member is reset as often as in the run of condition <cond> (same stream, rates, seed; it must exist),
                     at random steps (draw D), at least 80 steps apart
     boundary        both members, and the gate, at every shift boundary: the episodic protocol as one stream (a reference: it is told the shifts)
-    oracle          a member is reset once it has stayed 1 point below its FROZEN copy for 16 proxy batches (smoothed over 8): labels and frozen
-                    copies online (a reference; slower, it steps the frozen pair in lockstep)
     frozen          no adaptation, the same images (the label reference; cheap)
+(The other rules, the staggered schedule and the oracle trigger were dropped with their code: git tag `pre-reset-cleanup`.)
 
 Streams: `--stream heldout` (the 4 held-out shifts x 4 rounds, `--rotations K ...` picks the opening shift) or `--stream test` (the 15 corruptions
 once, CoTTA's standard order; `--order K` one of its random orders). `--lrs LR_L LR_S` may be repeated: one run per rate pair (the ladders of the tuning).
@@ -78,40 +75,32 @@ def rate_str(lr: float) -> str:
     return f"{mant.rstrip('0').rstrip('.')}e{int(exp)}"
 
 
-THRESHOLD_OF = {"fast_vs_slow": "delta", "imm_vs_ema": "delta", "cusum": "h", "level": "tau", "slope": "gamma"}
-
-
-def with_threshold(spec: RuleSpec, thr: float) -> RuleSpec:
-    """`spec` with the detection threshold of every part replaced by `thr` (nothing else changes)."""
+def with_threshold(spec: RuleSpec, delta: float) -> RuleSpec:
+    """`spec` with the detection threshold delta replaced (nothing else changes)."""
     j = spec.to_json()
-    for part in j["parts"].values():
-        part[THRESHOLD_OF[part["kind"]]] = float(thr)
+    j["parts"]["own"]["delta"] = float(delta)
     return RuleSpec.from_json(j)
 
 
 def split_condition(name: str) -> tuple[str, float | None]:
-    """'own_cusum@0.5' -> ('own_cusum', 0.5); 'own_cusum' -> ('own_cusum', None)."""
+    """'own_fast_vs_slow@0.7' -> ('own_fast_vs_slow', 0.7); 'own_fast_vs_slow' -> ('own_fast_vs_slow', None)."""
     base, _, thr = name.partition("@")
     return base, (float(thr) if thr else None)
 
 
-def make_trigger(name: str, rules: dict[str, RuleSpec], b_t: int) -> LR.Trigger:
+def make_trigger(name: str, rules: dict[str, RuleSpec]) -> LR.Trigger:
     if name == "none":
         return LR.NoTrigger()
     if name == "boundary":
         return LR.BoundaryTrigger()
-    if name == "oracle":
-        return LR.OracleTrigger(b_t=b_t)
     if (m := re.fullmatch(r"fixed(\d+)", name)):
         return LR.ScheduleTrigger(int(m.group(1)))
-    if (m := re.fullmatch(r"staggered(\d+)", name)):
-        return LR.StaggeredScheduleTrigger(int(m.group(1)))
     if MR.parse_condition(name) is not None:                      # per-member settings of own_fast_vs_slow (src/reset/member_rules.py)
         return LR.RuleTrigger(MR.specs_of(name, rules[MR.FAMILY]), name=name)
     base, thr = split_condition(name)
     if base in rules:
         return LR.RuleTrigger(rules[base] if thr is None else with_threshold(rules[base], thr), name=name)
-    raise ValueError(f"unknown condition {name!r}: none, boundary, oracle, frozen, fixed<N> or one of {sorted(rules)} (optionally family@threshold)")
+    raise ValueError(f"unknown condition {name!r}: none, boundary, frozen, fixed<N>, random~<cond>~d<D> or {MR.FAMILY}[@threshold]")
 
 
 def main() -> int:
@@ -155,7 +144,7 @@ def main() -> int:
     screen_path = Path(args.screen_json) if args.screen_json else Path(DEFAULT_SCREEN.format(out=ctx.g.path("out"), duo=args.duo))
     rules: dict[str, RuleSpec] = {}
     rule_names = sorted({(MR.FAMILY if MR.parse_condition(c) else split_condition(c)[0]) for c in args.conditions
-                         if c not in ("none", "boundary", "oracle", "frozen") and not re.fullmatch(r"fixed\d+|staggered\d+", c) and not c.startswith("random~")})
+                         if c not in ("none", "boundary", "frozen") and not re.fullmatch(r"fixed\d+", c) and not c.startswith("random~")} & {MR.FAMILY})
     if rule_names:
         if not screen_path.is_file():
             raise SystemExit(f"{screen_path} is missing: run scripts/37b_screen_resets_stress.py first (or pass --screen_json)")
@@ -172,7 +161,7 @@ def main() -> int:
             if not re.fullmatch(r"random~[^~]+~d\d+", c):
                 raise SystemExit(f"{c!r}: write random~<reference condition>~d<draw>")
         elif c != "frozen":
-            make_trigger(c, rules, args.b_t)
+            make_trigger(c, rules)
 
     pairs = list(dict.fromkeys(tuple(p) for p in (args.lrs or [[1.4e-4, 5e-4]])))
 
@@ -228,9 +217,8 @@ def main() -> int:
                     ref_meta = RC.load_run(ref_path)["meta"]
                     trigger = LR.RandomTrigger(ref_meta["n_resets"], ref_meta["seen"] // rctx.batch_size, draw=int(draw[1:]), name=cond)
                 else:
-                    trigger = make_trigger(cond, rules, args.b_t)
-                frozen = RC.make_runner(ctx, RC.RUNS["frozen"], None, tta)[0] if trigger.needs_frozen else None
-                res = LR.run_live(runner, parts, trigger=trigger, gate=gate, frozen=frozen, max_images=args.max_images, extra_gates=extra, **common)
+                    trigger = make_trigger(cond, rules)
+                res = LR.run_live(runner, parts, trigger=trigger, gate=gate, max_images=args.max_images, extra_gates=extra, **common)
                 meta["trigger"] = res["trigger"]
             meta.update(seconds=time.time() - t0, seen=res["seen"], stopped=res["stopped"], resets=res["resets"],
                         n_resets={s: sum(r["member"] == s for r in res["resets"]) for s in SIDES})

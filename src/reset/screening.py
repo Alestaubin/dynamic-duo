@@ -1,21 +1,22 @@
 """
 screening.py
 ============
-Offline screening of the reset rules (Phase 4, stage R-D): every rule is REPLAYED over the stored no-reset proxy sequences of the
-continual runs (src/experiments/continual.py: the gate's `.gate.json`, one record per proxy batch, and the per-sample correctness),
-to find which rule detects a member's collapse soon and rarely cries wolf, before any live run.
+Offline screening of the `own_fast_vs_slow` detector (Phase 4, stage R-D): a setting is REPLAYED over the stored no-reset proxy
+sequences of the continual runs (src/experiments/continual.py: the gate's `.gate.json`, one record per proxy batch, and the per-sample
+correctness), to find which setting detects a member's collapse soon and rarely cries wolf, before any live run. (Fifteen families
+of rules were screened this way to choose the rule; the other fourteen were dropped, with their code: git tag `pre-reset-cleanup`.)
 
     streams = [ScreenStream.load(run_npz, frozen_npz, b_t=256, name="heldout0/indep"), ...]
-    row = evaluate(spec, streams)                    # delay, miss rate, false alarms per 1,000 proxy batches of one rule
-    rows = sweep(streams)                            # the grid of `families()` crossed with their threshold sweeps
-    best = select(rows, budget=1.0)                  # per family: the lowest delay at <= 1 false alarm per 1,000 batches
+    row = evaluate(spec, streams)                    # delay, miss rate, false alarms per 1,000 proxy batches of one setting
+    rows = sweep(streams)                            # the grid below: speeds x warm-up x threshold
+    best = select(rows, budget=1.0)                  # the lowest delay at <= 1 false alarm per 1,000 batches
 
 **Degradation labels** (evaluation only; they never reach a rule). Member m is DEGRADED at proxy batch t if its accuracy minus its
 FROZEN accuracy on the same samples, smoothed over a centred window of M batches, is below -margin (M = 8, margin = 1 point). A
 degraded STRETCH lasting at least L batches (16) is a collapse; its first batch is the ONSET. `label_sensitivity` repeats a rule's score
 for other (M, margin, L).
 
-**Replay protocol.** The controller of src/reset/controller.py is fed the proxy sequence; on each alarm it restarts the detectors and
+**Replay protocol.** The controller of src/reset/controller.py is fed the proxy sequence; on each alarm it restarts the detector and
 starts the cooldown exactly as the live rule does, but the TRAJECTORY IS NOT CHANGED: the reset model cannot be simulated offline, so
 after an alarm the stored (collapsed) sequence goes on. A documented approximation: a rule's later alarms in the same stretch are
 neither delays nor false alarms.
@@ -25,15 +26,13 @@ neither delays nor false alarms.
 charged its whole length as delay (`delay`; `delay_detected` averages the detected ones only); FALSE ALARMS are the alarms outside
 every stretch (less the tolerance before each onset), per 1,000 proxy batches.
 
-**Matched budget.** `families()` lists the own / gap / both (gap OR own with the same parameters) versions of the five procedures, each with
-at most 12 configurations of its non-threshold parameters, and a threshold sweep. `select` takes, per family and false-alarm budget,
-the (configuration, threshold) with the lowest delay (then fewest misses, then fewest false alarms); the caller picks on the tuning
-(held-out) streams, freezes it and runs `evaluate` on the test streams.
+**Matched budget.** `candidates()` lists the grid: 3 speed pairs x warm-up W0 in (20, 50) x a threshold sweep. `select` takes, per
+false-alarm budget, the (configuration, threshold) with the lowest delay (then fewest misses, then fewest false alarms); the caller
+picks on the calibration (held-out) streams, freezes it and runs `evaluate` on the test streams.
 """
 
 from __future__ import annotations
 
-import itertools
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -99,9 +98,9 @@ class ScreenStream:
         return self._cache[key]
 
 
-def replay(spec: RuleSpec, stream: ScreenStream, c: float = 0.0) -> dict[str, list[int]]:
+def replay(spec: RuleSpec, stream: ScreenStream) -> dict[str, list[int]]:
     """The proxy batches at which `spec` (one rule for both members) flags each member, trajectory unchanged (see the module text)."""
-    ctl = ResetController(spec, c=c)
+    ctl = ResetController(spec)
     for r_l, r_s in zip(stream.r_l, stream.r_s):
         ctl.update(float(r_l), float(r_s))
     alarms = {m: [] for m in MEMBERS}
@@ -146,51 +145,27 @@ def evaluate(spec: RuleSpec, streams: Sequence[ScreenStream], label: tuple = LAB
 
 # ----------------------------------------------------------------------------------------------------------- the grid
 
-# kind -> (non-threshold parameter grid, the threshold's name and sweep). The five procedures of src/reset/detectors.py; W0 and K = W0 are
-# the controller's (RuleSpec). "level" alarms below tau (negative), the others above their threshold in noise units.
+# The grid of the detector (src/reset/detectors.py): the two averaging speeds (alpha_fast, alpha_slow), the warm-up W0 (cooldown K = W0) and the
+# threshold delta in noise units. The order of the loops is the order of the rows, which breaks ties in `select`.
+FAMILY = "own_fast_vs_slow"
 W0S = (20, 50)
-KINDS = {
-    "level": ({}, "tau", (-1.0, -1.5, -2.0, -3.0, -4.0, -5.0, -6.0, -8.0)),
-    "imm_vs_ema": ({"alpha": (0.01, 0.05, 0.1)}, "delta", (1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0)),
-    "fast_vs_slow": ({"speed": ((0.05, 0.005), (0.1, 0.01), (0.2, 0.02))}, "delta", (1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0)),
-    "slope": ({"W": (16, 32, 64), "k": (1, 4)}, "gamma", (0.005, 0.01, 0.02, 0.05, 0.1, 0.2)),
-    "cusum": ({"nu": (0.25, 0.5, 1.0)}, "h", (2.0, 4.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0)),
-}
-QUANTITIES = {"own": ("own",), "gap": ("gap",), "both": ("gap", "own")}      # both: gap OR own, same parameters
-
-
-def part_params(kind: str, config: dict, threshold_name: str, threshold: float) -> dict:
-    p = {"kind": kind, threshold_name: threshold}
-    for k, v in config.items():
-        if k == "speed":
-            p["alpha_fast"], p["alpha_slow"] = v
-        else:
-            p[k] = v
-    return p
-
-
-def configs(kind: str) -> list[dict]:
-    """Every configuration of `kind`'s non-threshold parameters, crossed with the warm-up W0 (at most 12)."""
-    grid = KINDS[kind][0]
-    out = [dict(zip(grid, combo), W0=w0) for w0 in W0S for combo in itertools.product(*grid.values())]
-    assert len(out) <= 12, (kind, len(out))
-    return out
+SPEEDS = ((0.05, 0.005), (0.1, 0.01), (0.2, 0.02))
+DELTAS = (1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0)
 
 
 def families() -> list[str]:
-    return [f"{q}_{k}" for q in QUANTITIES for k in KINDS]
+    return [FAMILY]
 
 
-def candidates(family: str) -> Iterator[tuple[dict, float, RuleSpec]]:
-    """(configuration, threshold, rule) for every point of `family`'s grid."""
-    quantity, kind = family.split("_", 1)
-    _, thr_name, thresholds = KINDS[kind]
-    for config in configs(kind):
-        config = dict(config)
-        w0 = config.pop("W0")
-        for thr in thresholds:
-            parts = {q: part_params(kind, config, thr_name, thr) for q in QUANTITIES[quantity]}
-            yield dict(config, W0=w0), thr, RuleSpec.of(**parts, W0=w0)
+def candidates(family: str = FAMILY) -> Iterator[tuple[dict, float, RuleSpec]]:
+    """(configuration, threshold, rule) for every point of the grid."""
+    if family != FAMILY:
+        raise ValueError(f"only {FAMILY!r} is kept, got {family!r} (the other families are in git at the tag pre-reset-cleanup)")
+    for w0 in W0S:
+        for speed in SPEEDS:
+            for delta in DELTAS:
+                own = dict(kind="fast_vs_slow", delta=delta, alpha_fast=speed[0], alpha_slow=speed[1])
+                yield {"speed": speed, "W0": w0}, delta, RuleSpec.of(own=own, W0=w0)
 
 
 def sweep(streams: Sequence[ScreenStream], fams: Sequence[str] | None = None, label: tuple = LABEL) -> list[dict]:
@@ -278,30 +253,33 @@ if __name__ == "__main__":
 
     streams = [stream("a", 200, 1), stream("b", 150, 2), stream("calm", None, 3)]
     assert [len(x.stretches("small")) for x in streams] == [1, 1, 0] and all(len(x.stretches("large")) == 0 for x in streams)
-    cusum = RuleSpec.of(own=dict(kind="cusum", nu=0.5, h=8.0), W0=20)
-    row = evaluate(cusum, streams)
+    rule = RuleSpec.of(own=dict(kind="fast_vs_slow", delta=3.0, alpha_fast=0.2, alpha_slow=0.02), W0=20)
+    row = evaluate(rule, streams)
     assert row["events"] == 2 and row["misses"] == 0 and row["fa"] <= 1.0 and 0 <= row["delay"] <= 15, row
-    assert evaluate(RuleSpec.of(own=dict(kind="cusum", nu=0.5, h=1e9), W0=20), streams)["miss_rate"] == 1.0, "an unreachable threshold misses"
-    flood = evaluate(RuleSpec.of(own=dict(kind="level", tau=0.0), W0=20), streams)
-    assert flood["fa"] > 20, "a level threshold at the warm-up mean alarms as often as warm-up and cooldown (about 20 batches each) allow"
+    assert evaluate(RuleSpec.of(own=dict(kind="fast_vs_slow", delta=1e9, alpha_fast=0.2, alpha_slow=0.02), W0=20), streams)["miss_rate"] == 1.0, "an unreachable threshold misses"
+    flood = evaluate(RuleSpec.of(own=dict(kind="fast_vs_slow", delta=-1e9, alpha_fast=0.2, alpha_slow=0.02), W0=20), streams)
+    assert flood["fa"] > 20, "a threshold below every statistic alarms as often as warm-up and cooldown (about 20 batches each) allow"
 
-    # the grid: five procedures x own / gap / both, at most 12 configurations each, and every rule builds
-    assert len(families()) == 15
-    for fam in families():
-        pts = list(candidates(fam))
-        kind = fam.split("_", 1)[1]
-        assert len(pts) == len(configs(kind)) * len(KINDS[kind][2]) and len(configs(kind)) <= 12
-        pts[0][2].build()
-    assert len(configs("slope")) == 12 and len(configs("level")) == 2
-    rows = sweep(streams, ["own_cusum", "gap_cusum", "both_cusum", "own_level"])
-    assert {r["family"] for r in rows} == {"own_cusum", "gap_cusum", "both_cusum", "own_level"}
+    # the grid: speeds x warm-up x threshold, every rule builds, other families are refused
+    assert families() == [FAMILY]
+    pts = list(candidates())
+    assert len(pts) == len(SPEEDS) * len(W0S) * len(DELTAS) == 48
+    assert [p[0]["W0"] for p in pts[:len(SPEEDS) * len(DELTAS)]] == [W0S[0]] * (len(SPEEDS) * len(DELTAS)), "warm-up is the outer loop (it fixes the order of the rows)"
+    pts[0][2].build()
+    try:
+        list(candidates("own_cusum"))
+        raise AssertionError("a dropped family must be refused")
+    except ValueError:
+        pass
+    rows = sweep(streams)
+    assert {r["family"] for r in rows} == {FAMILY} and len(rows) == 48
     best = select(rows, 1.0)
-    assert best["own_cusum"] is not None and best["own_cusum"]["fa"] <= 1.0
-    assert best["own_cusum"]["delay"] == min(r["delay"] for r in rows if r["family"] == "own_cusum" and r["fa"] <= 1.0)
-    assert select(rows, -1.0)["own_cusum"] is None, "no point meets an impossible budget"
-    fr = curve(rows, "own_cusum")
+    assert best[FAMILY] is not None and best[FAMILY]["fa"] <= 1.0
+    assert best[FAMILY]["delay"] == min(r["delay"] for r in rows if r["fa"] <= 1.0)
+    assert select(rows, -1.0)[FAMILY] is None, "no point meets an impossible budget"
+    fr = curve(rows, FAMILY)
     assert all(fr[i][0] < fr[i + 1][0] and fr[i][1] > fr[i + 1][1] for i in range(len(fr) - 1)), "a frontier strictly improves with more false alarms"
-    sens = label_sensitivity(cusum, streams)
+    sens = label_sensitivity(rule, streams)
     assert len(sens) == 7 and sens[0]["M"] == 8
     json.dumps(rows[:3])                                    # the rows are plain JSON
 

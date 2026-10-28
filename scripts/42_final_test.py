@@ -6,8 +6,8 @@ in the standard order and in CoTTA's random orders, with the gate at beta 0.5. N
 
     <out>/results/reset_tune/final_configs.json
         {"methods": [{"name": "no_reset_tuned", "cond": "none", "lrs": [1.75e-5, 3.1e-5], "label": "No reset (tuned)", "kind": "baseline"}, ...],
-         "control": {"rule": "own_cusum", "draws": [0]}}
-        kind: baseline (no reset) / schedule / rule. `cond` is a condition of scripts/38_run_reset_live.py (`own_cusum@2`, `fixed500`, ...).
+         "control": {"rule": "own_fast_vs_slow", "draws": [0]}}
+        kind: baseline (no reset) / schedule / rule. `cond` is a condition of scripts/38_run_reset_live.py (`own_fast_vs_slow@0.7`, `fixed500`, ...).
         `control`: the random-matched trigger of the named rule (it resets each member as often as the rule's run of the same order, at random steps): one run per
         draw and order, submitted with a dependency on the rule's run of that order (it reads that run's reset counts).
 

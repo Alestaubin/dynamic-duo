@@ -1,21 +1,20 @@
 """
 tuning.py
 =========
-The selection rules of the reset tuning (plan.md, "Reset tuning and evaluation protocol"), as code, so that no choice is made by eye.
+The selection rules of the reset tuning of `own_fast_vs_slow`, as code, so that no choice is made by eye (the protocol in prose: docs/reset_tuning.md).
 Every rule is fixed BEFORE the runs and is applied to the stored live runs of scripts/38_run_reset_live.py on the held-out stream.
 
-What is tuned: the two members' rates, then the detection threshold of a rule (the schedules' periods are fixed by the author: 500 and 1,000).
-What is scored: the whole-stream accuracy of a run averaged over the tuning rotations (0 and 2; 1 and 3 only validate), from the per-visit
+The unit is a MEMBER. Under `own_fast_vs_slow` (and the no-reset baseline and the fixed schedules) a member's trajectory depends only on its own
+learning rate and its own reset times, so one run measures BOTH members at their rates, whatever the partner's rate or setting is, and each member is
+tuned alone, on its own accuracy.
+
+What is tuned, per member: the learning rate and the detector setting (alpha_fast, alpha_slow, W0, delta; src/reset/member_rules.py).
+What is scored: the whole-stream accuracy of the member, averaged over the tuning rotations (0 and 2; 1 and 3 only validate), from the per-visit
 accuracies (16 visits of 50,000 images per rotation).
 
-    series        what the objective reads
-    "large"/"small"  a member's own accuracy: for the methods whose reset decisions of one member do not depend on the other (no reset, the
-                     schedules, the `own_*` rules): a member's trajectory then depends only on its own rate and its own reset times, so one run
-                     gives the accuracy of BOTH members at their rungs, whatever the partner's rate
-    "gate"        the gated duo at beta 0.5: for the coupled rule (`gap_*`, whose ViT resets depend on the ResNet's proxy) and for thresholds
-
-Rungs: the sqrt-2 grid of the 04b tuner, rate(side, k) = anchor * 2**(k / 2) rounded to 3 digits (ViT anchor 7e-5, ResNet 5e-4). The first ladder uses
-every second rung (X2): ViT 3.5e-5 .. 2.8e-4, ResNet 1.25e-4 .. 1e-3. The rules (`plan_1d`; `plan_pair` is their two-dimensional version):
+Rungs: the sqrt-2 grid of the 04b tuner, rate(side, k) = anchor * 2**(k / 2) rounded to 3 digits (ViT anchor 7e-5, ResNet 5e-4). The first ladder
+uses every second rung (X2): ViT 3.5e-5 .. 2.8e-4, ResNet 1.25e-4 .. 1e-3. The rules of ONE ladder (`plan_1d`; the threshold uses the same rules on
+its own sqrt-2 grid):
 
   1. Start: the X2 ladder on rotation 0.
   2. Refine: the argmax of rotation 0 must have BOTH its sqrt-2 neighbours tried (they are run if not); the argmax is then recomputed, until
@@ -28,10 +27,11 @@ every second rung (X2): ViT 3.5e-5 .. 2.8e-4, ResNet 1.25e-4 .. 1e-3. The rules 
      ends (a rate or threshold that does not matter) is reported as such, not chased.
   6. Guard: a configuration in which the member is DEAD (four consecutive 5,120-image windows below 5%, CT.dead_onset) on a tuning rotation is excluded.
 
-`plan_*` return {"requests": [(key, rotation), ...] still to run, "chosen": key or None, "table": rows, "notes": [...]}; run the requests, call again.
+`plan_member` is the whole search of one member: a rate ladder for each candidate detector setting, the best candidate, then its threshold and its
+rate alternately until neither moves (the rules above at every step). The comparison baselines (no reset, fixed schedules) have only the rate:
+`plan_1d` alone.
 
-`plan_member` is the per-member version for the default pipeline (src/reset/member_rules.py): each member's own learning rate AND its own detector setting
-(alpha_fast, alpha_slow, W0, delta) are tuned independently, over the member's candidate settings, by the same rules.
+`plan_*` return a plan with the runs still to run, the choice once it is made, a table and notes: run the requests, call again.
 """
 
 from __future__ import annotations
@@ -48,6 +48,7 @@ import numpy as np
 SIDES = ("large", "small")
 ANCHOR = {"large": 7e-5, "small": 5e-4}
 X2 = {"large": (-2, 0, 2, 4), "small": (-4, -2, 0, 2)}          # ViT 3.5e-5, 7e-5, 1.4e-4, 2.8e-4; ResNet 1.25e-4, 2.5e-4, 5e-4, 1e-3
+START_MEMBER = {"large": (2, 4, 6, 8), "small": (-6, -4, -2, 0)}      # start rungs of a candidate setting's rate ladder: around the shared optima (ViT 5.6e-4, ResNet 8.84e-5)
 TUNING_ROTS, VALIDATION_ROTS = (0, 2), (1, 3)
 MAX_EXTEND = 2
 DEAD_WINDOW, DEAD_ACC, DEAD_WINDOWS = 5120, 0.05, 4
@@ -146,183 +147,6 @@ class Store:
         return None
 
 
-# ------------------------------------------------------------------------------------------------------------ the rules
-
-def paired_se(a: np.ndarray, b: np.ndarray) -> float:
-    d = np.asarray(a) - np.asarray(b)
-    return float(d.std(ddof=1) / math.sqrt(len(d))) if len(d) > 1 else float("inf")
-
-
-def choose(cands: Mapping[Hashable, tuple[np.ndarray, float]], tie_order: Callable[[Hashable], float]) -> tuple[Hashable, list[Hashable]]:
-    """Rule 4. `cands`: key -> (per-visit accuracies pooled over the tuning rotations, resets per 1,000 proxy batches). Returns the chosen key and
-    the keys within one paired standard error of the best."""
-    best = max(cands, key=lambda k: float(cands[k][0].mean()))
-    top = float(cands[best][0].mean())
-    tied = [k for k in cands if k == best or top - float(cands[k][0].mean()) <= paired_se(cands[best][0], cands[k][0])]
-    return min(tied, key=lambda k: (round(cands[k][1], 6), tie_order(k))), tied
-
-
-@dataclass
-class Plan:
-    requests: list[tuple[Hashable, int]] = field(default_factory=list)
-    chosen: Hashable | None = None
-    table: list[dict] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
-
-    @property
-    def done(self) -> bool:
-        return self.chosen is not None and not self.requests
-
-
-def plan_1d(*, start: Sequence[int], neighbours: Callable[[int], tuple[int, int]], cell_of: Callable[[int, int], Cell | None], series: str, side: str | None = None,
-            tie_order: Callable[[int], float] = float, rots: Sequence[int] = TUNING_ROTS, extend_cap: int = MAX_EXTEND) -> Plan:
-    """Rules 1 to 6 over one ordered ladder of integer rungs. `cell_of(k, rot)`: the stored run (None if not run yet); `neighbours(k)`: (k below, k above)
-    on the finer grid; `series`: what is scored; `side`: the member whose dead flag is the guard (None: both)."""
-    plan = Plan()
-    first, second = rots[0], rots[1]
-
-    def alive(c: Cell) -> bool:
-        return not (c.dead[side] if side else any(c.dead.values()))
-
-    def need(k: int, rot: int) -> bool:
-        if cell_of(k, rot) is None:
-            if (k, rot) not in plan.requests:
-                plan.requests.append((k, rot))
-            return True
-        return False
-
-    if any([need(k, first) for k in start]):
-        plan.notes.append("the starting ladder is not complete on rotation 0")
-        return plan
-    for _ in range(40):                                                          # rule 2: refine until the argmax has both neighbours tried
-        tried = sorted({k for k in _all_keys(cell_of, start, neighbours, first)})
-        ok = [k for k in tried if (c := cell_of(k, first)) is not None and alive(c)]
-        if not ok:
-            plan.notes.append("every rung is dead on rotation 0")
-            return plan
-        best = max(ok, key=lambda k: cell_of(k, first).mean(series))
-        lo, hi = neighbours(best)
-        # the extension cap of rule 5 bounds this refinement too: a ladder that keeps creeping up by hundredths per rung is a plateau, not chased
-        # (the cap was only enforced after a choice until 2026-10-27, when own_cusum's threshold ladder crept below the cap)
-        wanted = [k for k in (lo, hi) if min(start) - 2 * extend_cap <= k <= max(start) + 2 * extend_cap]
-        if any([need(k, first) for k in wanted]):
-            plan.notes.append(f"argmax of rotation {first} is rung {best}; its neighbours {lo} and {hi} are run first")
-            return plan
-        if max(ok, key=lambda k: cell_of(k, first).mean(series)) == best:
-            break
-    cand = [k for k in (lo, best, hi) if (c := cell_of(k, first)) is not None and alive(c)]
-    if any([need(k, second) for k in cand]):
-        plan.notes.append(f"the argmax {best} and its neighbours are run on rotation {second}")
-        return plan
-    cand = [k for k in cand if alive(cell_of(k, second))]
-    pooled = {k: (np.concatenate([cell_of(k, r).acc[series] for r in rots]), float(np.mean([cell_of(k, r).resets[side] if side else
-              sum(cell_of(k, r).resets.values()) for r in rots]))) for k in cand}
-    chosen, tied = choose(pooled, tie_order)
-    tried = sorted({k for k in _all_keys(cell_of, start, neighbours, first)})
-    plan.table = [{"rung": k, "acc": float(pooled[k][0].mean()) if k in pooled else None, "acc_rot%d" % first: cell_of(k, first).mean(series),
-                   "resets": pooled[k][1] if k in pooled else None, "tied": k in tied, "chosen": k == chosen} for k in tried if cell_of(k, first) is not None]
-    ends = (tried[0], tried[-1])
-    if chosen in ends:                                                          # rule 5
-        direction = -1 if chosen == ends[0] else 1
-        beyond = neighbours(chosen)[0 if direction < 0 else 1]
-        n_ext = len([k for k in tried if k < min(start)]) if direction < 0 else len([k for k in tried if k > max(start)])
-        if n_ext >= extend_cap * 2:                                              # an extension is one x2 step = two sqrt-2 rungs
-            plan.notes.append(f"the choice stays at the {'low' if direction < 0 else 'high'} end after {extend_cap} extensions: a plateau, reported as such")
-            plan.chosen = chosen
-            return plan
-        for r in rots:
-            need(beyond, r)
-        plan.notes.append(f"chosen rung {chosen} is the {'lowest' if direction < 0 else 'highest'} tried: rung {beyond} is run")
-        return plan
-    plan.chosen = chosen
-    plan.notes.append(f"chosen rung {chosen}; within one paired SE of the best: {tied}")
-    return plan
-
-
-def _all_keys(cell_of, start, neighbours, rot) -> list[int]:
-    """Every rung with a stored run on `rot`: the start ladder, then outwards through the neighbours."""
-    seen, frontier = set(), list(start)
-    while frontier:
-        k = frontier.pop()
-        if k in seen or cell_of(k, rot) is None:
-            continue
-        seen.add(k)
-        frontier += [n for n in neighbours(k)]
-    return sorted(seen)
-
-
-# ------------------------------------------------------------------------------------------------------------ the coupled rule
-
-def pair_neighbourhood(kv: int, ks: int) -> list[tuple[int, int]]:
-    """The cells that must be tried around a pair: the cross (one member's rung up or down, the other's fixed) and the two cells that scale both
-    members together (the direction of the starting ladder). The two off-diagonal corners of the full 3 x 3 are not run."""
-    return [(kv - 1, ks), (kv + 1, ks), (kv, ks - 1), (kv, ks + 1), (kv - 1, ks - 1), (kv + 1, ks + 1)]
-
-
-def plan_pair(*, cell_of: Callable[[tuple[int, int], int], Cell | None], series: str = "gate", rots: Sequence[int] = TUNING_ROTS,
-              start: Sequence[tuple[int, int]] | None = None) -> Plan:
-    """The rules of `plan_1d` for a method whose two members are coupled (the gap rule): a pair of rungs (ViT k, ResNet k') is one cell, scored by the
-    gated duo. Start: the diagonal of the X2 ladders; refine until the argmax of rotation 0 has all of `pair_neighbourhood` tried; run the argmax and
-    its two best neighbours on rotation 2; choose by `choose` (ties: fewest resets of both members, then the lowest rungs); the chosen cell must have
-    its neighbourhood tried too (run if not)."""
-    plan = Plan()
-    first, second = rots[0], rots[1]
-    start = list(start or zip(X2["large"], (k - 2 for k in X2["large"])))
-
-    def need(cell, rot) -> bool:
-        if cell_of(cell, rot) is None:
-            if (cell, rot) not in plan.requests:
-                plan.requests.append((cell, rot))
-            return True
-        return False
-
-    if any([need(c, first) for c in start]):
-        plan.notes.append("the diagonal ladder is not complete on rotation 0")
-        return plan
-
-    def tried() -> list[tuple[int, int]]:
-        seen, frontier = set(), list(start)
-        while frontier:
-            c = frontier.pop()
-            if c in seen or cell_of(c, first) is None:
-                continue
-            seen.add(c)
-            frontier += pair_neighbourhood(*c)
-        return sorted(seen)
-
-    for _ in range(40):
-        ok = [c for c in tried() if not any(cell_of(c, first).dead.values())]
-        if not ok:
-            plan.notes.append("every cell is dead on rotation 0")
-            return plan
-        best = max(ok, key=lambda c: cell_of(c, first).mean(series))
-        if any([need(c, first) for c in pair_neighbourhood(*best)]):
-            plan.notes.append(f"argmax of rotation {first} is {best}: its neighbourhood is run first")
-            return plan
-        if max(ok, key=lambda c: cell_of(c, first).mean(series)) == best:
-            break
-    near = sorted((c for c in pair_neighbourhood(*best) if not any(cell_of(c, first).dead.values())), key=lambda c: -cell_of(c, first).mean(series))[:2]
-    cand = [best] + near
-    if any([need(c, second) for c in cand]):
-        plan.notes.append(f"the argmax {best} and its two best neighbours are run on rotation {second}")
-        return plan
-    cand = [c for c in cand if not any(cell_of(c, second).dead.values())]
-    pooled = {c: (np.concatenate([cell_of(c, r).acc[series] for r in rots]), float(np.mean([sum(cell_of(c, r).resets.values()) for r in rots]))) for c in cand}
-    chosen, tied = choose(pooled, lambda c: float(c[0] + c[1]))
-    plan.table = [{"cell": c, "acc": float(pooled[c][0].mean()), "resets": pooled[c][1], "tied": c in tied, "chosen": c == chosen} for c in cand]
-    if any([need(c, first) for c in pair_neighbourhood(*chosen)]):
-        plan.notes.append(f"chosen cell {chosen}: its neighbourhood is run first")
-        return plan
-    plan.chosen = chosen
-    plan.notes.append(f"chosen cell {chosen}; within one paired SE of the best: {tied}")
-    return plan
-
-
-# ------------------------------------------------------------------------------------------------------------ per-member settings
-
-START_MEMBER = {"large": (2, 4, 6, 8), "small": (-6, -4, -2, 0)}      # start rungs of a candidate's rate ladder: around the shared optima (ViT 5.6e-4, ResNet 8.84e-5)
-
-
 class MemberStore(Store):
     """The runs of `own_fast_vs_slow` with per-member settings (condition `own_fast_vs_slow@pmL...-..._S...`): a member's cell for (setting, rate) is ANY run with that
     member at that setting and rate, whatever the partner does (own rule, gate outside the loop). The SHARED setting's cells are the plain `own_fast_vs_slow@<delta>` runs
@@ -355,6 +179,112 @@ class MemberStore(Store):
         return None
 
 
+# ------------------------------------------------------------------------------------------------------------ the rules
+
+def paired_se(a: np.ndarray, b: np.ndarray) -> float:
+    d = np.asarray(a) - np.asarray(b)
+    return float(d.std(ddof=1) / math.sqrt(len(d))) if len(d) > 1 else float("inf")
+
+
+def choose(cands: Mapping[Hashable, tuple[np.ndarray, float]], tie_order: Callable[[Hashable], float]) -> tuple[Hashable, list[Hashable]]:
+    """Rule 4. `cands`: key -> (per-visit accuracies pooled over the tuning rotations, resets per 1,000 proxy batches). Returns the chosen key and
+    the keys within one paired standard error of the best."""
+    best = max(cands, key=lambda k: float(cands[k][0].mean()))
+    top = float(cands[best][0].mean())
+    tied = [k for k in cands if k == best or top - float(cands[k][0].mean()) <= paired_se(cands[best][0], cands[k][0])]
+    return min(tied, key=lambda k: (round(cands[k][1], 6), tie_order(k))), tied
+
+
+@dataclass
+class Plan:
+    requests: list[tuple[Hashable, int]] = field(default_factory=list)
+    chosen: Hashable | None = None
+    table: list[dict] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def done(self) -> bool:
+        return self.chosen is not None and not self.requests
+
+
+def plan_1d(*, side: str, start: Sequence[int], neighbours: Callable[[int], tuple[int, int]], cell_of: Callable[[int, int], Cell | None],
+            tie_order: Callable[[int], float] = float, rots: Sequence[int] = TUNING_ROTS, extend_cap: int = MAX_EXTEND) -> Plan:
+    """Rules 1 to 6 over one ordered ladder of integer rungs, scored by the accuracy of member `side` (whose dead flag is the guard).
+    `cell_of(k, rot)`: the stored run (None if not run yet); `neighbours(k)`: (k below, k above) on the finer grid; `tie_order(k)`: the last tie-break."""
+    plan = Plan()
+    first, second = rots[0], rots[1]
+
+    def alive(c: Cell) -> bool:
+        return not c.dead[side]
+
+    def need(k: int, rot: int) -> bool:
+        if cell_of(k, rot) is None:
+            if (k, rot) not in plan.requests:
+                plan.requests.append((k, rot))
+            return True
+        return False
+
+    if any([need(k, first) for k in start]):
+        plan.notes.append("the starting ladder is not complete on rotation 0")
+        return plan
+    for _ in range(40):                                                          # rule 2: refine until the argmax has both neighbours tried
+        tried = sorted({k for k in _all_keys(cell_of, start, neighbours, first)})
+        ok = [k for k in tried if (c := cell_of(k, first)) is not None and alive(c)]
+        if not ok:
+            plan.notes.append("every rung is dead on rotation 0")
+            return plan
+        best = max(ok, key=lambda k: cell_of(k, first).mean(side))
+        lo, hi = neighbours(best)
+        # the extension cap of rule 5 bounds this refinement too: a ladder that keeps creeping up by hundredths per rung is a plateau, not chased
+        # (the cap was only enforced after a choice until 2026-10-27, when own_cusum's threshold ladder crept below the cap)
+        wanted = [k for k in (lo, hi) if min(start) - 2 * extend_cap <= k <= max(start) + 2 * extend_cap]
+        if any([need(k, first) for k in wanted]):
+            plan.notes.append(f"argmax of rotation {first} is rung {best}; its neighbours {lo} and {hi} are run first")
+            return plan
+        if max(ok, key=lambda k: cell_of(k, first).mean(side)) == best:
+            break
+    cand = [k for k in (lo, best, hi) if (c := cell_of(k, first)) is not None and alive(c)]
+    if any([need(k, second) for k in cand]):
+        plan.notes.append(f"the argmax {best} and its neighbours are run on rotation {second}")
+        return plan
+    cand = [k for k in cand if alive(cell_of(k, second))]
+    pooled = {k: (np.concatenate([cell_of(k, r).acc[side] for r in rots]), float(np.mean([cell_of(k, r).resets[side] for r in rots]))) for k in cand}
+    chosen, tied = choose(pooled, tie_order)
+    tried = sorted({k for k in _all_keys(cell_of, start, neighbours, first)})
+    plan.table = [{"rung": k, "acc": float(pooled[k][0].mean()) if k in pooled else None, "acc_rot%d" % first: cell_of(k, first).mean(side),
+                   "resets": pooled[k][1] if k in pooled else None, "tied": k in tied, "chosen": k == chosen} for k in tried if cell_of(k, first) is not None]
+    ends = (tried[0], tried[-1])
+    if chosen in ends:                                                          # rule 5
+        direction = -1 if chosen == ends[0] else 1
+        beyond = neighbours(chosen)[0 if direction < 0 else 1]
+        n_ext = len([k for k in tried if k < min(start)]) if direction < 0 else len([k for k in tried if k > max(start)])
+        if n_ext >= extend_cap * 2:                                              # an extension is one x2 step = two sqrt-2 rungs
+            plan.notes.append(f"the choice stays at the {'low' if direction < 0 else 'high'} end after {extend_cap} extensions: a plateau, reported as such")
+            plan.chosen = chosen
+            return plan
+        for r in rots:
+            need(beyond, r)
+        plan.notes.append(f"chosen rung {chosen} is the {'lowest' if direction < 0 else 'highest'} tried: rung {beyond} is run")
+        return plan
+    plan.chosen = chosen
+    plan.notes.append(f"chosen rung {chosen}; within one paired SE of the best: {tied}")
+    return plan
+
+
+def _all_keys(cell_of, start, neighbours, rot) -> list[int]:
+    """Every rung with a stored run on `rot`: the start ladder, then outwards through the neighbours."""
+    seen, frontier = set(), list(start)
+    while frontier:
+        k = frontier.pop()
+        if k in seen or cell_of(k, rot) is None:
+            continue
+        seen.add(k)
+        frontier += [n for n in neighbours(k)]
+    return sorted(seen)
+
+
+# ------------------------------------------------------------------------------------------------------------ the search of one member
+
 @dataclass
 class MemberPlan:
     requests: list[tuple[object, int, int]] = field(default_factory=list)     # (Setting, rate rung, rotation) still to run
@@ -382,7 +312,7 @@ def plan_member(side: str, cell_of: Callable[[object, int, int], Cell | None], s
     ladders = {}
     for c in settings:
         start = X2[side] if c is shared else START_MEMBER[side]
-        pl = plan_1d(start=start, neighbours=lambda k: (k - 1, k + 1), series=side, side=side, rots=rots, cell_of=lambda k, rot, c=c: cell_of(c, k, rot))
+        pl = plan_1d(side=side, start=start, neighbours=lambda k: (k - 1, k + 1), rots=rots, cell_of=lambda k, rot, c=c: cell_of(c, k, rot))
         ladders[c] = pl
         add(pl.requests, c)
     if plan.requests:
@@ -399,7 +329,7 @@ def plan_member(side: str, cell_of: Callable[[object, int, int], Cell | None], s
     plan.notes.append(f"best candidate {tuple(best)} at rung {ladders[best].chosen}; within one paired SE of the best: {[tuple(c) for c in tied]}")
     k = ladders[best].chosen
     for _ in range(max_rounds):
-        pd = plan_1d(start=(-1, 0, 1), neighbours=lambda j: (j - 1, j + 1), series=side, side=side, rots=rots, tie_order=lambda j: -j,
+        pd = plan_1d(side=side, start=(-1, 0, 1), neighbours=lambda j: (j - 1, j + 1), rots=rots, tie_order=lambda j: -j,
                      cell_of=lambda j, rot, k=k: cell_of(delta_setting(best, j), k, rot))
         for j, r in pd.requests:
             if (delta_setting(best, j), k, r) not in plan.requests:
@@ -408,7 +338,7 @@ def plan_member(side: str, cell_of: Callable[[object, int, int], Cell | None], s
             plan.notes.append("threshold ladder not complete")
             return plan
         chosen = delta_setting(best, pd.chosen)
-        pr = plan_1d(start=(k - 1, k, k + 1), neighbours=lambda q: (q - 1, q + 1), series=side, side=side, rots=rots, cell_of=lambda q, rot, c=chosen: cell_of(c, q, rot))
+        pr = plan_1d(side=side, start=(k - 1, k, k + 1), neighbours=lambda q: (q - 1, q + 1), rots=rots, cell_of=lambda q, rot, c=chosen: cell_of(c, q, rot))
         add(pr.requests, chosen)
         if plan.requests:
             plan.notes.append("rate recheck at the chosen threshold not complete")
@@ -452,7 +382,7 @@ if __name__ == "__main__":
 
     def drive(lad: Ladder, **kw) -> Plan:
         for _ in range(30):
-            p = plan_1d(start=X2["large"], neighbours=lambda k: (k - 1, k + 1), cell_of=lad.get, series="large", side="large", **kw)
+            p = plan_1d(side="large", start=X2["large"], neighbours=lambda k: (k - 1, k + 1), cell_of=lad.get, **kw)
             if not p.requests:
                 return p
             for k, r in p.requests:
@@ -488,21 +418,6 @@ if __name__ == "__main__":
                 self.have[(k, rot)].dead["large"] = True
     p = drive(Dead(peak=3))
     assert p.chosen is not None and p.chosen <= 2, (p.chosen, p.notes)
-    # the coupled rule: a 2-D surface with its peak off the diagonal
-    have2: dict = {}
-
-    def run2(c, rot):
-        kv, ks = c
-        acc = 0.6 - 0.01 * (kv - 1) ** 2 - 0.01 * (ks + 1) ** 2 + np.random.default_rng(7 * rot + 31 * kv + 101 * ks + 9999).normal(0, 0.002, 16)
-        have2[(c, rot)] = Cell({"gate": acc, "large": acc, "small": acc}, {"large": 2.0, "small": 2.0}, {"large": False, "small": False}, 800000)
-
-    for _ in range(40):
-        p2 = plan_pair(cell_of=lambda c, r: have2.get((c, r)))
-        if not p2.requests:
-            break
-        for c, r in p2.requests:
-            run2(c, r)
-    assert p2.chosen == (1, -1) and p2.done, (p2.chosen, p2.notes)
     # the per-member search: the shared setting and two candidates; candidate 1 is the best family, its best threshold is one rung above its own and its best rate rung is 5
     from src.reset.member_rules import Setting
     S0, C1, C2 = Setting(0.05, 0.005, 20, 0.7), Setting(0.1, 0.01, 50, 1.4), Setting(0.1, 0.025, 50, 1.4)

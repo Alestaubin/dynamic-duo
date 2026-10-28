@@ -86,7 +86,7 @@ def run_stem(cond: str, *, stream: str, rot: int, seed: int, lrs: Sequence[float
     return f"live-{cond}{where}__L{lrs[0]:g}_S{lrs[1]:g}__{proxy}_bt{b_t}_beta{beta:g}{cut}__seed{seed}"
 
 
-NAMES = {"none": "No reset", "boundary": "At every shift (episodic)", "oracle": "Oracle trigger (labels)", "frozen": "Frozen"}
+NAMES = {"none": "No reset", "boundary": "At every shift (episodic)", "frozen": "Frozen"}
 
 
 def pretty(cond: str) -> str:
@@ -126,8 +126,8 @@ def latex_table(rows: Sequence[dict], caption: str, label: str, frozen: float | 
 def plot_overlay(runs: Mapping[str, Mapping], frozen: Mapping, path: Path, *, names: Mapping[str, str], title: str, footer: str, window: int = 5120,
                  dpi: int = 300) -> list[Path]:
     """Three rows (Vanilla DD, the large member, the small member): the accuracy over windows of `window` images of every condition in `runs`
-    ({condition: load_run result}); the frozen duo / members dashed in grey. Lines of the label-free rules in colour, references (no reset, episodic,
-    oracle) in greys and black so the eye finds the rules."""
+    ({condition: load_run result}); the frozen duo / members dashed in grey. Lines of the label-free rules in colour, references (no reset, episodic)
+    in greys and black so the eye finds the rules."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -139,7 +139,7 @@ def plot_overlay(runs: Mapping[str, Mapping], frozen: Mapping, path: Path, *, na
     plt.rcParams.update({"font.size": 7, "axes.edgecolor": INK2, "axes.labelcolor": INK2, "xtick.color": INK2, "ytick.color": INK2, "axes.linewidth": 0.6,
                          "pdf.fonttype": 42, "font.family": "DejaVu Sans"})
     palette = ["#2a78d6", "#eb6834", "#1baf7a", "#a05cc4", "#c9a227", "#d6428a", "#3aa7b8", "#7a5230"]
-    refs = {"none": ("#0b0b0b", "-", 1.2), "boundary": ("#6b6a66", (0, (5, 2)), 1.0), "oracle": ("#9a9992", (0, (1.5, 1.5, 5, 1.5)), 1.0)}
+    refs = {"none": ("#0b0b0b", "-", 1.2), "boundary": ("#6b6a66", (0, (5, 2)), 1.0)}
     first = next(iter(runs.values()))
     n = min(len(r["large"]) for r in runs.values())
     window = max(min(window, n // 12), 256)                 # a short (smoke) stream still gets a line
@@ -195,8 +195,8 @@ if __name__ == "__main__":
     run = {"large": frozen["large"].copy(), "small": frozen["small"].copy(), "ts": frozen["ts"].copy(), "gate": frozen["gate"] if "gate" in frozen else frozen["ts"].copy(),
            "part_n": np.array([10_240, 10_240]), "part_label": np.array(["gaussian_noise/s5", "shot_noise/s5"])}
     run["small"][8_192:12_288] = (rng.random(4_096) < 0.05).astype(np.uint8)             # the small member collapses over 8,192..12,288
-    resets = [{"member": "small", "position": 10_240, "why": "own_cusum"},               # inside the collapse (2,048 images of it behind it): justified
-              {"member": "large", "position": 10_240, "why": "own_cusum"},               # the large member is fine: false
+    resets = [{"member": "small", "position": 10_240, "why": "own_fast_vs_slow"},               # inside the collapse (2,048 images of it behind it): justified
+              {"member": "large", "position": 10_240, "why": "own_fast_vs_slow"},               # the large member is fine: false
               {"member": "small", "position": 16_384, "why": "fixed"},                   # after the collapse: false
               {"member": "large", "position": 100, "why": "fixed"}]                      # less than a proxy batch behind it: false
     run["meta"] = {"resets": resets, "seen": n}
@@ -206,18 +206,18 @@ if __name__ == "__main__":
     assert abs(s["mean"]["large"] - s["frozen"]["large"]) < 1e-9 and s["mean"]["small"] < s["frozen"]["small"] - 3
     assert abs(s["per_1000_batches"]["small"] - 1000 * 2 / 80) < 1e-9 and len(s["resets"]) == 4
     quiet = {**run, "meta": {"resets": [], "seen": n}}
-    rows = table_rows({"none": [summarize(quiet, frozen, b_t), summarize(quiet, frozen, b_t)], "own_cusum": [s]})
+    rows = table_rows({"none": [summarize(quiet, frozen, b_t), summarize(quiet, frozen, b_t)], "own_fast_vs_slow": [s]})
     assert rows[0]["resets_small"] == 0 and rows[0]["false_share"] != rows[0]["false_share"] and rows[1]["false_share"] == 0.75 and rows[0]["runs"] == 2
     assert abs(rows[0]["gain_vs_frozen_duo"]) < 1e-9 and rows[0]["gate_sd"] == 0.0
     kw = dict(stream="heldout", rot=2, seed=0, lrs=(1.4e-4, 5e-4), proxy="nnn", b_t=256, beta=2.0)
-    assert run_stem("own_cusum", **kw) == "live-own_cusum__heldout__rot2__L0.00014_S0.0005__nnn_bt256_beta2__seed0"
+    assert run_stem("own_fast_vs_slow", **kw) == "live-own_fast_vs_slow__heldout__rot2__L0.00014_S0.0005__nnn_bt256_beta2__seed0"
     assert run_stem("frozen", **{**kw, "rot": 0}) == "live-frozen__heldout__seed0" and run_stem("none", **{**kw, "stream": "test", "rot": 0, "max_images": 100}).endswith("beta2__first100__seed0")
     assert run_stem("none", **{**kw, "stream": "test", "rot": 0, "order": 3}) == "live-none__order3__L0.00014_S0.0005__nnn_bt256_beta2__seed0" and run_stem("none", **{**kw, "stream": "test", "rot": 0}).startswith("live-none__L")
-    assert [pretty(c) for c in ("none", "fixed1000", "own_fast_vs_slow", "gap_cusum")] == ["No reset", "Every 1,000 steps", "own fast/slow", "gap cusum"]
+    assert [pretty(c) for c in ("none", "fixed1000", "own_fast_vs_slow")] == ["No reset", "Every 1,000 steps", "own fast/slow"]
     tex = latex_table(rows, "caption", "tab:reset_live", frozen=50.0)
-    assert tex.startswith("% Generated by") and "\\label{tab:reset_live}" in tex and "No reset" in tex and "own cusum" in tex and tex.count("\\\\") >= 4
+    assert tex.startswith("% Generated by") and "\\label{tab:reset_live}" in tex and "No reset" in tex and "own fast/slow" in tex and tex.count("\\\\") >= 4
     with tempfile.TemporaryDirectory() as tmp:
-        written = plot_overlay({"none": quiet, "own_cusum": run, "fixed1000": run}, frozen, Path(tmp) / "overlay.png", names={"large": "ViT-B/16", "small": "ResNet-50"},
+        written = plot_overlay({"none": quiet, "own_fast_vs_slow": run, "fixed1000": run}, frozen, Path(tmp) / "overlay.png", names={"large": "ViT-B/16", "small": "ResNet-50"},
                                title="self-test", footer="self-test", window=1024)
         assert [p.suffix for p in written] == [".png", ".pdf"] and all(p.stat().st_size > 5000 for p in written)
     print("live_report self-test passed")

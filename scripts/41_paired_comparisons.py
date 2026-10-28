@@ -8,7 +8,7 @@ the noise floor below which a difference should not be read, not a confidence in
     held-out: the visits of rotations 0 and 2 are pooled (32 visits; each rotation's visits are paired with the same rotation's)
     test:     the visits of seeds 0 1 2 are averaged per visit first (the same 15 shifts, loaders seeded differently), then paired (15 visits)
 
-    python scripts/41_paired_comparisons.py --stream heldout --pairs gap_fast_vs_slow:fixed1000 gap_fast_vs_slow:boundary
+    python scripts/41_paired_comparisons.py --stream heldout --pairs own_fast_vs_slow@0.7:fixed1000 own_fast_vs_slow@0.7:boundary
     python scripts/41_paired_comparisons.py --stream test --lrs 1.4e-4 5e-4 --beta 2 --pairs ...
 
 Series: `gate` (Vanilla DD, the gated duo), `ts` (the fixed-TS duo), `large`, `small`. A condition may be `frozen`. Writes <out>/results/reset_live/<duo>/paired__<stream>.json.

@@ -10,7 +10,7 @@ turns their logits into the duo's prediction, and a controller may reset members
 
     runner = MemberRunner(duo, "tent", {}, "both_indep", device, models=models)
     gate   = PureProxyGate("nnn", beta=0.5, b_t=128, T_l=0.82, T_s=1.04)
-    ctl    = ResetController(RuleSpec.of(gap=dict(kind="cusum", nu=0.5, h=8.0), own=dict(kind="cusum", nu=0.5, h=8.0)))
+    ctl    = ResetController(RuleSpec.of(own=dict(kind="fast_vs_slow", alpha_fast=0.05, alpha_slow=0.005, delta=0.7)))
     res    = run_stream(runner, parts, batch_size=64, workers=8, gate=gate, controller=ctl)
 
 Per adaptation batch: step both members (the returned logits are the PRE-update ones), score the duo, collect the proxy batches the
@@ -165,9 +165,9 @@ if __name__ == "__main__":
         ok = len(a.z_l) == len(b.z_l) > 0 and all(x.equal(y) for x, y in zip(a.z_l, b.z_l)) and all(x.equal(y) for x, y in zip(a.z_s, b.z_s))
         return ok and (not duo or all(x.equal(y) for x, y in zip(a.z_duo, b.z_duo)))
 
-    # the weak rule that fires on every batch after its warm-up: level on the raw s of each member, tau far above anything
-    always = RuleSpec.of(own=dict(kind="level", tau=1e9, standardize=False), W0=2, K=1)
-    never = RuleSpec.of(own=dict(kind="cusum", nu=0.5, h=float("inf")), gap=dict(kind="cusum", nu=0.5, h=float("inf")), W0=2)
+    # the weak rule that fires on every batch after its warm-up: a threshold far below any statistic, on the raw s of each member
+    always = RuleSpec.of(own=dict(kind="fast_vs_slow", alpha_fast=0.2, alpha_slow=0.02, delta=-1e9), W0=2, K=1, standardize=False)
+    never = RuleSpec.of(own=dict(kind="fast_vs_slow", alpha_fast=0.2, alpha_slow=0.02, delta=float("inf")), W0=2)
 
     for mode in ("vanilla", "joint"):
         print(f"  {mode} DD")
@@ -221,7 +221,7 @@ if __name__ == "__main__":
         runner, gate = make(mode)
         ctl = ResetController({"large": always, "small": never})
         trig = run_stream(runner, parts, batch_size=BS, gate=gate, controller=ctl, keep_logits=True)
-        assert trig.events and {e.member for e in trig.events} == {"large"} and all(r["why"] == "own_level" for r in trig.resets)
+        assert trig.events and {e.member for e in trig.events} == {"large"} and all(r["why"] == "own_fast_vs_slow" for r in trig.resets)
         assert [e.position for e in trig.events] == sorted(e.position for e in trig.events) and trig.events[0].position > 0
         sched = {}
         for r in trig.resets:

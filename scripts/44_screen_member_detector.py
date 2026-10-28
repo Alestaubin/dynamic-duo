@@ -14,10 +14,9 @@ parameters, to find out whether the ResNet's gradual decay wants other settings 
     noise floor       the screen reports whether the best setting's delay at budget 1 is at least 20% below the shared setting's (the screen's noise floor); the live
                       tuning (scripts/40_tune_reset.py member) decides on the live runs either way: per-member settings are the default, the shared setting is a candidate
 
-    diagnostics       (always, a few seconds) the best setting of each of the five families on the same member (own signal, budget 1), for the ResNet and the
-                      ViT, and per degraded stretch of the member the batch at which its proxy first falls 2 standard deviations below its level in the 50
-                      batches before the onset (the proxy's lag), with the mean standardized proxy inside the stretch (positive: the proxy ROSE while the
-                      accuracy fell)
+    diagnostics       (always, a few seconds) per degraded stretch of the member the batch at which its proxy first falls 2 standard deviations below its
+                      level in the 50 batches before the onset (the proxy's lag), with the mean standardized proxy inside the stretch (positive: the proxy
+                      ROSE while the accuracy fell)
 
     python scripts/44_screen_member_detector.py --duo vitb16_rn50v1 --bn --member small
 
@@ -65,21 +64,6 @@ def score_one(spec: RuleSpec, streams: list[SC.ScreenStream], member: str) -> di
     return {"events": events, "misses": misses, "false": false, "batches": batches, "fa": 1000.0 * false / max(batches, 1),
             "miss_rate": misses / events if events else nan, "delay": float(np.mean(delays)) if delays else nan,
             "delay_detected": float(np.mean(detected)) if detected else nan}
-
-
-def family_table(streams: list[SC.ScreenStream], member: str, budget: float) -> dict:
-    """The best (configuration, threshold) of each of the five detector families on `member` (own signal) within `budget` false alarms per 1,000 batches."""
-    out = {}
-    for kind in SC.KINDS:
-        best = None
-        for config, thr, sp in SC.candidates(f"own_{kind}"):
-            r = score_one(sp, streams, member)
-            if r["fa"] <= budget and r["events"] > 0:
-                k = (r["delay"], r["miss_rate"], r["fa"])
-                if best is None or k < best[0]:
-                    best = (k, config, thr, r)
-        out[kind] = None if best is None else {"config": best[1], "threshold": best[2], **best[3]}
-    return out
 
 
 def proxy_lag(streams: list[SC.ScreenStream], member: str, pre: tuple[int, int] = (60, 10), z: float = 2.0) -> list[dict]:
@@ -175,11 +159,6 @@ def main() -> int:
         print(f"\nshared setting at its own best delta within the budget: {show(ref_best)}")
         print(f"best setting overall: {show(ok1[0])}\nrelative delay reduction {100 * gain:.0f}% (the screen's noise floor is about {100 * GO_MARGIN:.0f}%: {'above' if gain >= GO_MARGIN else 'below'} it)")
         print("live candidates (distinct speed pairs, other than the shared one): " + "; ".join(show(c) for c in candidates))
-    families = {mm: family_table(calib, mm, b1) for mm in ("small", "large")}
-    for mm, name in (("small", "ResNet"), ("large", "ViT")):
-        print(f"\nbest of each family on the {name} alone (own signal, budget {b1:g}):")
-        for kind, r in families[mm].items():
-            print(f"  {kind:13s} " + ("no point within the budget" if r is None else f"delay {r['delay']:6.1f} (detected {r['delay_detected']:6.1f}) miss {r['miss_rate']:.2f} ({r['misses']}/{r['events']}) FA {r['fa']:.2f}  {r['config']} thr {r['threshold']}"))
     lag = proxy_lag(calib, m)
     print(f"\nthe {'ResNet' if m == 'small' else 'ViT'}'s proxy around its {len(lag)} degraded stretches (first batch after the onset at which the proxy is 2 sd below its pre-onset level; mean standardized proxy inside):")
     for r in sorted(lag, key=lambda r: r["length"]):
@@ -188,7 +167,7 @@ def main() -> int:
     print(f"{len(short)} of {len(lag)} stretches are shorter than 100 batches; proxy never falls 2 sd in {sum(r['first_below'] is None for r in lag)}; mean z positive in {sum(r['mean_z'] > 0 for r in lag)}")
     tag = f"member_detector__{m}"
     (out / f"{tag}.json").write_text(json.dumps({"member": m, "streams": [s.name for s in calib], "events": n_events, "grid": {"speeds": SPEEDS, "W0": W0S, "delta": DELTAS},
-                                                 "reference": ref, "selected": {str(b): r for b, r in selected.items()}, "candidates": candidates, "verdict": verdict, "families": families, "proxy_lag": lag, "rows": rows}, default=float, indent=1))
+                                                 "reference": ref, "selected": {str(b): r for b, r in selected.items()}, "candidates": candidates, "verdict": verdict, "proxy_lag": lag, "rows": rows}, default=float, indent=1))
     df.to_csv(out / f"{tag}.csv", index=False)
     print(f"\nwrote {out / f'{tag}.json'}")
     return 0

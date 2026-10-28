@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Status, selection and launch commands of the reset tuning (plan.md, "Reset tuning and evaluation protocol"; the rules are src/reset/tuning.py).
+Status, selection and launch commands of the reset tuning (docs/reset_tuning.md; the rules are src/reset/tuning.py).
 It reads the stored live runs of scripts/38_run_reset_live.py on the held-out stream (gate beta 0.5), applies the pre-registered rules and prints what is
 chosen and what still has to be run. `--submit` submits those runs (one array per condition and rotation, QOS high from slurm/job.sh); without it the
-sbatch commands are only printed.
+sbatch commands are only printed. Repeat the command after each wave finishes: it prints the next wave until the final choice appears.
 
-    python scripts/40_tune_reset.py rates --cond fixed1000                       # decoupled: the members' rates, one ladder per member
-    python scripts/40_tune_reset.py rates --cond own_fast_vs_slow@0.7
-    python scripts/40_tune_reset.py rates --cond gap_fast_vs_slow@1 --coupled    # the pair of rates, scored by the gated duo
+    python scripts/40_tune_reset.py member                                       # own_fast_vs_slow: each member's detector setting AND rate (the pipeline)
+    python scripts/40_tune_reset.py confirm --cond <cond> --rates LR_L LR_S      # the chosen configuration on all four rotations (1 and 3 only validate)
+
+The comparison baselines have only the rate to tune (one ladder per member):
+
+    python scripts/40_tune_reset.py rates --cond fixed1000                       # also fixed500, and own_fast_vs_slow@0.7 (the shared setting)
+    python scripts/40_tune_reset.py rates --cond own_fast_vs_slow@0.5 --around 1.4e-4 5e-4   # recheck the rates one rung either side of a pair
     python scripts/40_tune_reset.py baseline2                                    # the no-reset baseline: the 04b ladder plus rotation 2
-    python scripts/40_tune_reset.py threshold --family own_fast_vs_slow --base 0.7   # the threshold ladder at the chosen rates (Stage 3)
-    python scripts/40_tune_reset.py rates --cond own_fast_vs_slow@0.5 --around 1.4e-4 5e-4   # recheck the rates one rung either side (Stage 3)
-    python scripts/40_tune_reset.py confirm --cond fixed1000                     # the chosen pair on all four rotations (rotations 1, 3 validate)
 
-A condition is what scripts/38 takes: noreset is `none`, a schedule `fixed<N>`, a rule `family@threshold` (the threshold replaces the screened one).
-Repeat the command after each wave finishes: it prints the next wave until `chosen` appears. Writes <out>/results/reset_tune/<cond>__<command>.json.
+A condition is what scripts/38 takes: no reset is `none`, a schedule `fixed<N>`, the rule `own_fast_vs_slow@<threshold>` (shared setting) or
+`own_fast_vs_slow@pmL..._S...` (per member). Writes <out>/results/reset_tune/<cond>__<command>.json.
 """
 
 from __future__ import annotations
@@ -134,17 +135,13 @@ def member_main(args, g, folder: Path, outdir: Path) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("what", choices=("rates", "baseline2", "confirm", "threshold", "member"))
+    ap.add_argument("what", choices=("member", "rates", "baseline2", "confirm"))
     ap.add_argument("--cond", default=None)
-    ap.add_argument("--coupled", action="store_true", help="the members are coupled (the gap rule): tune the pair on the gated duo")
     ap.add_argument("--duo", default="vitb16_rn50v1")
     ap.add_argument("--submit", action="store_true")
     ap.add_argument("--force", action="store_true", help="member: submit although a wave was submitted less than 15 minutes ago")
-    ap.add_argument("--rates", type=float, nargs=2, default=None, metavar=("LR_L", "LR_S"), help="confirm / threshold: the pair (default: the chosen one of the rates run)")
+    ap.add_argument("--rates", type=float, nargs=2, default=None, metavar=("LR_L", "LR_S"), help="confirm: the pair (default: the chosen one of the rates run)")
     ap.add_argument("--around", type=float, nargs=2, default=None, metavar=("LR_L", "LR_S"), help="rates: start the ladders one rung either side of this pair instead of the x2 ladder")
-    ap.add_argument("--family", default=None, help="threshold: the rule family, e.g. own_fast_vs_slow")
-    ap.add_argument("--base", type=float, default=None, help="threshold: the screened threshold the sqrt-2 grid is anchored at")
-    ap.add_argument("--rung", type=int, nargs="+", default=[-2, -1, 0, 1], help="threshold: the starting rungs of the ladder (default %(default)s: thresholds base * 2**(k/2))")
     ap.add_argument("--shared", type=float, nargs=4, default=[0.05, 0.005, 20, 0.7], metavar=("AF", "AS", "W0", "DELTA"), help="member: the shared setting (a candidate of both members)")
     ap.add_argument("--shared_cond", default="own_fast_vs_slow@0.7", help="member: the plain condition whose runs are the shared setting's cells")
     ap.add_argument("--candidates", default=None, help="member: folder of member_detector__<side>.json (default <out>/results/screen_resets_stress)")
@@ -175,7 +172,7 @@ def main() -> int:
 
         needs, plans = {}, {}
         for side in TU.SIDES:
-            plans[side] = TU.plan_1d(start=tuple(range(n)), neighbours=lambda i: (i - 1, i + 1), cell_of=cell_of(side), series=side, side=side)
+            plans[side] = TU.plan_1d(side=side, start=tuple(range(n)), neighbours=lambda i: (i - 1, i + 1), cell_of=cell_of(side))
             needs[side] = plans[side].requests
             print(f"{side}: " + "; ".join(plans[side].notes))
             for r in plans[side].table:
@@ -193,34 +190,17 @@ def main() -> int:
     if args.what == "member":
         return member_main(args, g, folder, outdir)
 
-    if not args.cond and args.what != "threshold":
+    if not args.cond:
         ap.error("--cond is required")
     store = TU.Store(folder, gate=f"nnn_bt256_beta{BETA:g}")
     cond = args.cond
     state = outdir / f"{cond}__rates.json"
 
-    if args.what == "rates" and args.coupled:
-        plan = TU.plan_pair(cell_of=lambda c, rot: store.cell(cond, rot, large=TU.rate("large", c[0]), small=TU.rate("small", c[1])))
-        print(f"{cond} (coupled): " + "; ".join(plan.notes))
-        for r in plan.table:
-            print(f"    cell {r['cell']}  ViT {TU.rate('large', r['cell'][0]):.3g} ResNet {TU.rate('small', r['cell'][1]):.3g}  acc(0+2) {100 * r['acc']:6.2f}  resets/1000 {r['resets']:6.2f}"
-                  + ("  tied" if r["tied"] else "") + ("  <- chosen" if r["chosen"] else ""))
-        by_rot: dict[int, list[tuple[float, float]]] = {}
-        for (kv, ks), rot in plan.requests:
-            by_rot.setdefault(rot, []).append((TU.rate("large", kv), TU.rate("small", ks)))
-        if by_rot:
-            launch(args, args.duo, cond, by_rot, f"tune_{cond.split('@')[0]}")
-        elif plan.chosen is not None:
-            kv, ks = plan.chosen
-            print(f"\nchosen: ViT {TU.rate('large', kv):g}, ResNet {TU.rate('small', ks):g}")
-            state.write_text(json.dumps({"cond": cond, "coupled": True, "chosen": [TU.rate("large", kv), TU.rate("small", ks)], "table": plan.table}, default=float, indent=1))
-        return 0
-
     if args.what == "rates":
         needs, plans = {}, {}
         for side in TU.SIDES:
             k0 = TU.rung(side, args.around[TU.SIDES.index(side)]) if args.around else None
-            plans[side] = TU.plan_1d(start=TU.X2[side] if k0 is None else (k0 - 1, k0, k0 + 1), neighbours=lambda k: (k - 1, k + 1), series=side, side=side,
+            plans[side] = TU.plan_1d(side=side, start=TU.X2[side] if k0 is None else (k0 - 1, k0, k0 + 1), neighbours=lambda k: (k - 1, k + 1),
                                      cell_of=lambda k, rot, side=side: store.cell(cond, rot, **{side: TU.rate(side, k)}))
             needs[side] = plans[side].requests
             show_member(plans[side], side, TU.rate)
@@ -230,33 +210,7 @@ def main() -> int:
         elif all(plans[s].chosen is not None for s in TU.SIDES):
             chosen = [TU.rate(s, plans[s].chosen) for s in TU.SIDES]
             print(f"\nchosen: ViT {chosen[0]:g}, ResNet {chosen[1]:g} (each member on its own accuracy); the pair is confirmed with `confirm`")
-            state.write_text(json.dumps({"cond": cond, "coupled": False, "chosen": chosen, "tables": {s: plans[s].table for s in TU.SIDES}}, default=float, indent=1))
-        return 0
-
-    if args.what == "threshold":
-        if not (args.family and args.base):
-            ap.error("threshold needs --family and --base")
-        pair = args.rates or json.loads((outdir / f"{args.family}@{args.base:g}__rates.json").read_text())["chosen"]
-        cond_of = lambda k: f"{args.family}@{TU.threshold(args.base, k):g}"
-        plan = TU.plan_1d(start=args.rung, neighbours=lambda k: (k - 1, k + 1), series="gate", side=None, tie_order=lambda k: -k,
-                          cell_of=lambda k, rot: store.cell(cond_of(k), rot, large=pair[0], small=pair[1]))
-        print(f"{args.family} thresholds at ViT {pair[0]:g}, ResNet {pair[1]:g}: " + "; ".join(plan.notes))
-        for r in plan.table:
-            print(f"    rung {r['rung']:3d}  threshold {TU.threshold(args.base, r['rung']):g}  acc(rot0) {100 * r['acc_rot0']:6.2f}  acc(0+2) " + (f"{100 * r['acc']:6.2f}" if r["acc"] is not None else "     -")
-                  + f"  resets/1000 " + (f"{r['resets']:6.2f}" if r["resets"] is not None else "     -") + ("  tied" if r["tied"] else "") + ("  <- chosen" if r["chosen"] else ""))
-        by_rot: dict[int, list[str]] = {}
-        for k, rot in plan.requests:
-            by_rot.setdefault(rot, []).append(cond_of(k))
-        for rot, conds in sorted(by_rot.items()):
-            c = (f"sbatch --array=0-{len(conds) - 1} -t {TIME} -J thr_{args.family}_r{rot} --exclude=kn117,kn101 slurm/job.sh scripts/38_run_reset_live.py --duo {args.duo} --bn "
-                 f"--stream heldout --rotations {rot} --conditions {' '.join(conds)} --beta {BETA:g} --lrs {rate_g(pair[0])} {rate_g(pair[1])} --shard auto")
-            print(("SUBMIT  " if args.submit else "to run  ") + c)
-            if args.submit:
-                print("   ->", subprocess.run(c, shell=True, capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1]).stdout.strip())
-        if plan.chosen is not None and not by_rot:
-            thr = TU.threshold(args.base, plan.chosen)
-            print(f"\nchosen threshold: {thr:g} (rung {plan.chosen})")
-            (outdir / f"{args.family}__threshold.json").write_text(json.dumps({"family": args.family, "base": args.base, "chosen_rung": plan.chosen, "threshold": thr, "pair": pair, "table": plan.table}, default=float, indent=1))
+            state.write_text(json.dumps({"cond": cond, "chosen": chosen, "tables": {s: plans[s].table for s in TU.SIDES}}, default=float, indent=1))
         return 0
 
     # confirm: the chosen pair on all four rotations; 1 and 3 are validation only

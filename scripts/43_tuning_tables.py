@@ -3,12 +3,11 @@
 The tables of the reset tuning (scripts/40_tune_reset.py, src/reset/tuning.py) for the report, written to docs/tables/ as LaTeX fragments from the STORED runs and the
 states the selection saved (out/results/reset_tune/*.json): no number is typed by hand.
 
-    tuning_rates_large.tex / tuning_rates_small.tex   rate ladders of the decoupled methods (the schedules and the own_* rules): one row per rung of the sqrt-2 grid, one
-                                                      column per method, the member's OWN whole-stream accuracy on held-out rotation 0 (and rotation 2 where it was run);
-                                                      the chosen rung in bold, a dagger where the member died (four 5,120-image windows below 5%)
-    tuning_rates_gap.tex                              the coupled rule: one row per (ViT, ResNet) cell tried, the gated duo (beta 0.5) on rotations 0 and 2
+    tuning_rates_large.tex / tuning_rates_small.tex   rate ladders of the decoupled methods (the schedules and the shared-setting rule): one row per rung of the sqrt-2
+                                                      grid, one column per method, the member's OWN whole-stream accuracy on held-out rotation 0 (and rotation 2 where it was
+                                                      run); the chosen rung in bold, a dagger where the member died (four 5,120-image windows below 5%)
     tuning_noreset.tex                                the no-reset baseline's ladder (the 04b tuner's runs, rotation 0) and its rotation-2 runs
-    tuning_thresholds.tex                             the threshold ladders (stage 3) at the tuned rates: the gated duo on rotations 0 and 2, resets per 1,000 batches
+    tuning_thresholds.tex                             the threshold ladder (stage 3) of the shared setting at the tuned rates: the gated duo on rotations 0 and 2, resets per 1,000 batches
     tuning_confirm.tex                                the chosen configurations on all four rotations (1 and 3 are validation only)
 
     python scripts/43_tuning_tables.py                # every table that has data
@@ -30,14 +29,14 @@ from src.reset import live_report as LV
 from src.reset import tuning as TU
 from src.utils.config import load_global
 
-DECOUPLED = ("fixed500", "fixed1000", "own_fast_vs_slow@0.7", "own_cusum@2", "own_cusum@0.25")
-RULES = {"own_fast_vs_slow": 0.7, "own_cusum": 2.0, "gap_fast_vs_slow": 1.0}
+DECOUPLED = ("fixed500", "fixed1000", "own_fast_vs_slow@0.7")
+RULES = {"own_fast_vs_slow": 0.7}
 
 
 def pretty(cond: str) -> str:
     base, _, thr = cond.partition("@")
     name = LV.pretty(base)
-    sym = {"own_fast_vs_slow": r"$\delta$", "own_cusum": "$h$", "gap_fast_vs_slow": r"$\delta$"}.get(base)
+    sym = {"own_fast_vs_slow": r"$\delta$"}.get(base)
     return f"{name} ({sym}={thr})" if thr and sym else name
 
 
@@ -112,28 +111,6 @@ def main() -> int:
                  "rotation 0 / rotation 2 (rotation 2 only for the argmax and its neighbours). Bold: the chosen rung (tie-break included); $^\\dagger$: the member died. "
                  "Produced by \\rl{scripts/43\\_tuning\\_tables.py}.}", f"  \\label{{tab:tune_rates_{side}}}", "\\end{table}"]
         write(tex / f"tuning_rates_{side}.tex", lines)
-
-    # ---- the coupled rule: cells
-    cond = "gap_fast_vs_slow@1"
-    st = state(outdir, f"{cond}__rates.json")
-    seen = []
-    for rl, rs, path in ((l, s, p) for r0, l, s, p in store.paths(cond) if r0 == 0):
-        seen.append((rl, rs))
-    if seen:
-        rows = []
-        for rl, rs in sorted(set(seen)):
-            c0, c2 = store.cell(cond, 0, large=rl, small=rs), store.cell(cond, 2, large=rl, small=rs)
-            ch = st is not None and all(math.isclose(a, b, rel_tol=1e-3) for a, b in zip(st["chosen"], (rl, rs)))
-            s0 = f"{100 * c0.mean('gate'):.2f}" + ("$^\\dagger$" if any(c0.dead.values()) else "")
-            s2 = "--" if c2 is None else f"{100 * c2.mean('gate'):.2f}" + ("$^\\dagger$" if any(c2.dead.values()) else "")
-            res = f"{c0.resets['large']:.1f} / {c0.resets['small']:.1f}"
-            row = f"    {fmt_rate(rl)} & {fmt_rate(rs)} & {s0} & {s2} & {res} \\\\"
-            rows.append(row.replace(f"{s2} &", f"\\textbf{{{s2}}} &") if ch and s2 != "--" else row)
-        write(tex / "tuning_rates_gap.tex", ["\\begin{table}[t]", "  \\centering\\small", "  \\begin{tabular}{@{}lcccc@{}}", "    \\toprule",
-                                                "    ViT rate & ResNet rate & Duo, rotation 0 & Duo, rotation 2 & Resets/1,000 (rot 0) \\\\", "    \\midrule"] + rows +
-              ["    \\bottomrule", "  \\end{tabular}",
-               "  \\caption{The coupled rule (gap fast/slow, $\\delta=1$): the gated duo's accuracy (\\%, $\\beta=0.5$) at each (ViT, ResNet) pair tried, since its ViT resets "
-               "depend on the ResNet's proxy and the members cannot be tuned separately. Bold: the chosen pair; $^\\dagger$: a member died.}", "  \\label{tab:tune_rates_gap}", "\\end{table}"])
 
     # ---- no-reset baseline (04b ladder + rotation 2)
     nr = state(outdir, "none__baseline2.json")

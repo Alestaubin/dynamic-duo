@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Offline screening of the reset rules at FIXED STRESS RATES (Phase 4, R-D; src/reset/screening.py): both members at a rate that collapses it
-(ViT 1.4e-4, ResNet 5e-4: both die on the held-out stream and on the test stream), Vanilla DD, no reset. 37_screen_resets.py does the same for the
-episodic-tuned rates; this one reads the runs of scripts/04c_gate_stress.py (the gate attached, the frozen run over the same images):
+Offline screening of the `own_fast_vs_slow` detector at FIXED STRESS RATES (Phase 4, R-D; src/reset/screening.py): both members at a rate that
+collapses it (ViT 1.4e-4, ResNet 5e-4: both die on the held-out stream and on the test stream), Vanilla DD, no reset. It reads the runs of
+scripts/04c_gate_stress.py (the gate attached, the frozen run over the same images):
 
     S   stress pair on the held-out stream (the 4 held-out shifts x 4 rounds, rotations 0..3, seeds 0 1): stops once both members are dead.
         The CALIBRATION streams: their collapses are the events, their healthy stretches before them count for false alarms.
@@ -16,18 +16,17 @@ episodic-tuned rates; this one reads the runs of scripts/04c_gate_stress.py (the
     python scripts/04c_gate_stress.py ... --stream test --extra T:1.4e-4:5e-4 --seeds 0 1 2 --stop_when all --after 20000 --shard auto   # array 0-2
     sbatch -t 00:40:00 slurm/job_cpu.sh scripts/37b_screen_resets_stress.py --duo vitb16_rn50v1 --bn
 
-Per rule family (own / gap / both x level, imm_vs_ema, fast_vs_slow, slope, cusum) and false-alarm budget (0.5, 1, 2 per 1,000 proxy batches) it
-picks on the calibration streams the configuration and threshold with the lowest delay, freezes it and scores it on the test streams, pooled and per
-member (ViT = large, ResNet = small). The replay does not change the trajectory (the reset model cannot be simulated offline), so only the FIRST
-collapse of a member is measured: the live runs rank the finalists. Writes <paths.out>/results/screen_resets_stress/<tag>.{json,csv}, the budget table
-and the delay-against-false-alarm curves.
+Per false-alarm budget (0.5, 1, 2 per 1,000 proxy batches) it picks on the calibration streams the configuration and threshold with the lowest
+delay, freezes it and scores it on the test streams, pooled and per member (ViT = large, ResNet = small). The replay does not change the trajectory
+(the reset model cannot be simulated offline), so only the FIRST collapse of a member is measured. The budget-1 choice is the SHARED setting of the two
+members (scripts/38 reads it as `own_fast_vs_slow`); scripts/44_screen_member_detector.py screens per member. (Fifteen families of rules were screened
+here to choose the rule; the others were dropped with their code: git tag `pre-reset-cleanup`.) Writes <paths.out>/results/screen_resets_stress/<tag>.{json,csv}.
 """
 
 from __future__ import annotations
 
 import argparse
 import glob
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -41,10 +40,6 @@ from src.experiments.cli import add_common_args, setup
 from src.reset import screening as SC
 from src.reset.controller import MEMBERS, RuleSpec
 from src.utils import provenance
-
-_spec = importlib.util.spec_from_file_location("screen37", Path(__file__).with_name("37_screen_resets.py"))
-_screen37 = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_screen37)                 # its plot_curves (a script name that starts with digits cannot be imported)
 
 
 def member_scores(spec: RuleSpec, streams: list[SC.ScreenStream]) -> dict[str, dict]:
@@ -69,7 +64,6 @@ def main() -> int:
     ap.add_argument("--beta", type=float, default=2.0, help="the gate beta of those runs (in their file names; the proxy sequences do not depend on it)")
     ap.add_argument("--b_t", type=int, default=256)
     ap.add_argument("--budgets", type=float, nargs="+", default=list(SC.BUDGETS), help="false alarms per 1,000 proxy batches")
-    ap.add_argument("--families", nargs="+", default=None, help="default: all 15 (own / gap / both x the five procedures)")
     args = ap.parse_args()
     tta = "tent"
 
@@ -103,8 +97,7 @@ def main() -> int:
     print(f"\ncalibration: {len(tuning)} stress + {len(healthy)} healthy streams, {sum(s.n for s in calib)} proxy batches, "
           f"{sum(len(s.stretches(m)) for s in calib for m in MEMBERS)} degraded stretches; test: {len(test)} streams")
 
-    fams = args.families or SC.families()
-    rows = SC.sweep(calib, fams)
+    rows = SC.sweep(calib)
     selected = {b: SC.select(rows, b) for b in args.budgets}
     test_scores = {(b, fam): SC.evaluate(RuleSpec.from_json(row["spec"]), test) for b, sel in selected.items() for fam, row in sel.items() if row is not None and test}
     members = {(b, fam): {"tune": member_scores(RuleSpec.from_json(row["spec"]), calib),
@@ -128,10 +121,9 @@ def main() -> int:
     table = pd.DataFrame(table).sort_values("tune_delay", na_position="last")
     print(f"\nbudget {b1:g} false alarms per 1,000 proxy batches (delays in proxy batches of {args.b_t} images; a miss counts its whole stretch): "
           f"the rule is chosen on the calibration streams, then scored on the test streams\n" + table.drop(columns="config").round(2).to_string(index=False))
-    top = [r for r in table["rule"] if selected[b1][r] is not None][:3]
-    sensitivity = {r: SC.label_sensitivity(RuleSpec.from_json(selected[b1][r]["spec"]), calib) for r in top}
-    print(f"\ntop three on the calibration streams: {top}")
-    for r in top:
+    screened = [r for r in table["rule"] if selected[b1][r] is not None]
+    sensitivity = {r: SC.label_sensitivity(RuleSpec.from_json(selected[b1][r]["spec"]), calib) for r in screened}
+    for r in screened:
         print(f"label sensitivity of {r}: " + "; ".join(f"M{s['M']}/m{s['margin']:g}/L{s['L']}: delay {s['delay']:.1f} miss {s['miss_rate']:.2f}" for s in sensitivity[r]))
 
     tag = f"{tta}__{args.duo}{'_bn' if args.bn else ''}__{args.stress}{args.healthy}{args.test}__nnn_bt{args.b_t}__n{len(calib)}"
@@ -143,8 +135,6 @@ def main() -> int:
         "per_member": {f"{b}|{fam}": v for (b, fam), v in members.items()}, "sensitivity": sensitivity, "rows": rows}, default=float))
     pd.DataFrame(rows).drop(columns="spec").to_csv(out / f"{tag}.csv", index=False)
     table.to_csv(out / f"{tag}__budget{b1:g}.csv", index=False)
-    for f in _screen37.plot_curves(rows, selected[b1], out / f"{tag}__curves.png", note):
-        print(f"wrote {f}")
     print(f"wrote {out / f'{tag}.json'}")
     return 0
 

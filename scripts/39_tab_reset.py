@@ -49,8 +49,6 @@ def order(conds: list[str]) -> list[str]:
     def key(c: str):
         if c == "none":
             return (0, 0, c)
-        if c == "oracle":
-            return (4, 0, c)
         if c == "boundary":
             return (3, 0, c)
         if re.fullmatch(r"fixed\d+", c):
