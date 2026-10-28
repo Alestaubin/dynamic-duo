@@ -9,6 +9,8 @@ ResNet 5e-4: both collapse without a reset), so the comparison is between the wa
                     `--budget` false alarms per 1,000 proxy batches (read from `--screen_json`; label-free)
     <family>@<thr>  the same rule with its detection threshold replaced (delta of fast_vs_slow / imm_vs_ema, h of cusum, tau of level, gamma of slope),
                     every other parameter as screened: the threshold ladder of the tuning (src/reset/tuning.py)
+    own_fast_vs_slow@pmL<af>-<as>-<W0>-<d>_S<af>-<as>-<W0>-<d>   own_fast_vs_slow with PER-MEMBER settings (averaging speeds, warm-up, threshold of the large and the
+                    small member; src/reset/member_rules.py): the default of the per-member tuning (scripts/40_tune_reset.py member)
     fixed<N>        both members every N adaptation steps (fixed1000 = RDumb's schedule; label-free and blind)
     staggered<N>    the ResNet every N steps and the ViT N/2 steps after each ResNet reset (never together; the control for the gap rule's alternation)
     random~<cond>~d<D>   the control for detection: each member is reset as often as in the run of condition <cond> (same stream, rates, seed; it must exist),
@@ -29,6 +31,15 @@ live-<condition>[__heldout][__rot<K>]__L<lr>_S<lr>__<proxy>_bt<b_t>_beta<beta>__
     python scripts/38_run_reset_live.py --duo vitb16_rn50v1 --bn --stream heldout --rotations 0 2 --conditions ... --report_only    # the table
 
 `--max_images N` stops each run after N images (smoke tests, parity checks); a run that stopped early is saved under a name that says so.
+
+`--extra_gates NAME ...` (or `default`) scores more gates on the same members' logits in the same run (src/reset/gate_variants.py: other betas, routing after a reset,
+another proxy), outside the loop, so they change nothing in the run (self-tested); the members' logits are not stored, which is why it has to happen in the run. Their
+correctness is stored as the series `gate__<name>` (`continual.load_run(path, extra=True)`), in <paths.out>/results/reset_gates/<duo>__tent_bn/ (the same file names as
+the stored runs, hence a folder of their own), read by `scripts/45_gate_ablation.py --multigate`. One call is one (condition, rates, order); slurm/gate_routing.sh submits
+the set of the final test's rules:
+
+    sbatch -t 01:50:00 slurm/job.sh scripts/38_run_reset_live.py --duo vitb16_rn50v1 --bn --stream test --beta 0.5 --conditions own_cusum@0.25 --lrs 0.00028 0.001 \\
+        --order 0 --extra_gates default
 """
 
 from __future__ import annotations
@@ -52,7 +63,9 @@ from src.experiments.grids import sgd_optim
 from src.experiments.joint_dd import PureProxyGate
 from src.experiments.logit_runs import with_optim
 from src.reset import live_report as LV
+from src.reset import gate_variants as GV
 from src.reset import live_runs as LR
+from src.reset import member_rules as MR
 from src.reset.controller import RuleSpec
 from src.utils import provenance
 
@@ -93,6 +106,8 @@ def make_trigger(name: str, rules: dict[str, RuleSpec], b_t: int) -> LR.Trigger:
         return LR.ScheduleTrigger(int(m.group(1)))
     if (m := re.fullmatch(r"staggered(\d+)", name)):
         return LR.StaggeredScheduleTrigger(int(m.group(1)))
+    if MR.parse_condition(name) is not None:                      # per-member settings of own_fast_vs_slow (src/reset/member_rules.py)
+        return LR.RuleTrigger(MR.specs_of(name, rules[MR.FAMILY]), name=name)
     base, thr = split_condition(name)
     if base in rules:
         return LR.RuleTrigger(rules[base] if thr is None else with_threshold(rules[base], thr), name=name)
@@ -115,6 +130,7 @@ def main() -> int:
     ap.add_argument("--proxy", default=None)
     ap.add_argument("--beta", type=float, default=2.0)
     ap.add_argument("--b_t", type=int, default=256)
+    ap.add_argument("--extra_gates", nargs="+", default=[], metavar="GATE", help="more gates scored on the same logits (see above); `default` = " + " ".join(GV.DEFAULT_SET))
     ap.add_argument("--momentum", type=float, default=0.9)
     ap.add_argument("--temps_checkpoint", default=None, metavar="DIR")
     args = ap.parse_args()
@@ -122,15 +138,23 @@ def main() -> int:
     if any(not 0 <= k < 4 for k in args.rotations) or (args.stream == "test" and args.rotations != [0]):
         ap.error("--rotations are 0..3 and only for --stream heldout")
 
+    args.extra_gates = list(dict.fromkeys(n for g in args.extra_gates for n in (GV.DEFAULT_SET if g == "default" else (g,))))
+    for n in args.extra_gates:
+        try:
+            GV.parse(n)
+        except ValueError as e:
+            ap.error(str(e))
+    if args.extra_gates and any(c.startswith("random~") for c in args.conditions):
+        ap.error("--extra_gates cannot go with a random~ condition (its reference run is in the other folder)")
     tag = f"{args.duo}__{tta}{bn_tag(args)}"
-    ctx, seeds, out = setup(args, f"reset_live/{tag}", default_seeds=[0])
+    ctx, seeds, out = setup(args, f"{'reset_gates' if args.extra_gates else 'reset_live'}/{tag}", default_seeds=[0])
     proxy = args.proxy or ctx.g.gate["proxy"]
     proxy = {"nuclear_norm": "nnn", "ac_mc": "msp"}.get(proxy, proxy)
     temps = AM.resolve_temperatures(ctx, AM.temperature_spec(args.duo, tta, None, None), args.temps_checkpoint, report_only=True)
 
     screen_path = Path(args.screen_json) if args.screen_json else Path(DEFAULT_SCREEN.format(out=ctx.g.path("out"), duo=args.duo))
     rules: dict[str, RuleSpec] = {}
-    rule_names = sorted({split_condition(c)[0] for c in args.conditions
+    rule_names = sorted({(MR.FAMILY if MR.parse_condition(c) else split_condition(c)[0]) for c in args.conditions
                          if c not in ("none", "boundary", "oracle", "frozen") and not re.fullmatch(r"fixed\d+|staggered\d+", c) and not c.startswith("random~")})
     if rule_names:
         if not screen_path.is_file():
@@ -185,7 +209,7 @@ def main() -> int:
             meta = {"duo": ctx.duo["NAME"], "tta": tta, "bn": ctx.bn, "seed": seed, "stream": args.stream, "rounds": args.rounds if args.stream == "heldout" else 1,
                     "rotation": rot if args.stream == "heldout" else None, "order": args.order, "images": args.images, "max_images": args.max_images,
                     "condition": cond, "lrs": list(lrs), "momentum": args.momentum, "proxy": proxy, "beta": args.beta, "b_t": args.b_t,
-                    "T_l": temps.T_l, "T_s": temps.T_s, "batch_size": rctx.batch_size, "budget": args.budget,
+                    "T_l": temps.T_l, "T_s": temps.T_s, "batch_size": rctx.batch_size, "budget": args.budget, "extra_gates": args.extra_gates,
                     "screen_json": str(screen_path) if rules else None,
                     "optim": {s.lower(): rctx.duo[s]["OPTIM"] for s in ("LARGE", "SMALL")}, "models": {s.lower(): rctx.duo[s]["NAME"] for s in ("LARGE", "SMALL")}}
             if cond == "frozen":
@@ -194,6 +218,7 @@ def main() -> int:
                 res["resets"] = []
             else:
                 gate = PureProxyGate(proxy, beta=args.beta, b_t=args.b_t, T_l=temps.T_l, T_s=temps.T_s, num_classes=1000)
+                extra = {n: GV.make_gate(n, gate, T_l=temps.T_l, T_s=temps.T_s, b_t=args.b_t) for n in args.extra_gates}
                 runner, _ = RC.make_runner(rctx, RC.RUNS["indep"], gate, tta)
                 if cond.startswith("random~"):
                     _, ref, draw = cond.split("~")
@@ -205,7 +230,7 @@ def main() -> int:
                 else:
                     trigger = make_trigger(cond, rules, args.b_t)
                 frozen = RC.make_runner(ctx, RC.RUNS["frozen"], None, tta)[0] if trigger.needs_frozen else None
-                res = LR.run_live(runner, parts, trigger=trigger, gate=gate, frozen=frozen, max_images=args.max_images, **common)
+                res = LR.run_live(runner, parts, trigger=trigger, gate=gate, frozen=frozen, max_images=args.max_images, extra_gates=extra, **common)
                 meta["trigger"] = res["trigger"]
             meta.update(seconds=time.time() - t0, seen=res["seen"], stopped=res["stopped"], resets=res["resets"],
                         n_resets={s: sum(r["member"] == s for r in res["resets"]) for s in SIDES})
@@ -230,7 +255,7 @@ def main() -> int:
                 print(f"\n== {args.stream}{f' rotation {rot}' if args.stream == 'heldout' else ''}, seed {seed}, rates {where}: mean accuracy over the whole stream (%), resets per member")
                 print(f"{'condition':22s} {'duo (gate)':>10s} {'fixed TS':>9s} {'ViT':>6s} {'ResNet':>7s}   resets (ViT / ResNet)")
                 for cond in args.conditions:
-                    run = RC.load_run(path_of(cond, seed, rot, lrs))
+                    run = RC.load_run(path_of(cond, seed, rot, lrs), extra=bool(args.extra_gates))
                     m = run["meta"]
                     key = f"{cond}/seed{seed}/rot{rot}" + (f"/{where}" if len(pairs) > 1 else "")
                     if cond == "frozen":
@@ -240,6 +265,9 @@ def main() -> int:
                     print(f"{cond:22s} {100 * run['gate'].mean():10.1f} {100 * run['ts'].mean():9.1f} {100 * run['large'].mean():6.1f} {100 * run['small'].mean():7.1f}"
                           f"   {m['n_resets']['large']:4d} / {m['n_resets']['small']:4d}")
                     summary[key] = {s: float(run[s].mean() * 100) for s in ("gate", "ts", "large", "small")} | {"n_resets": m["n_resets"]}
+                    for n in args.extra_gates:
+                        summary[key][f"gate__{n}"] = float(run[f"gate__{n}"].mean() * 100)
+                        print(f"  {'gate ' + n:20s} {summary[key][f'gate__{n}']:10.2f} {summary[key][f'gate__{n}'] - summary[key]['ts']:+9.2f} vs the fixed-TS duo")
     (out / f"summary__{args.stream}.json").write_text(json.dumps(summary, indent=1))
     print(f"\nwrote {out / f'summary__{args.stream}.json'}")
     return 0

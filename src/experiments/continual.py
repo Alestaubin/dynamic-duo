@@ -175,9 +175,13 @@ def save_run(path: Path, result: dict, parts: Sequence[Part], meta: dict) -> Pat
     return path
 
 
-def load_run(path: Path) -> dict:
+def load_run(path: Path, extra: bool = False) -> dict:
+    """A run's four series (SERIES), the parts and the meta; `extra`: also the series of the extra gates of a multi-gate live run (`gate__<name>`,
+    src/reset/gate_variants.py), which no other reader wants."""
     d = np.load(path, allow_pickle=False)
     out = {s: d[s] for s in SERIES if s in d.files}
+    if extra:
+        out.update({s: d[s] for s in d.files if s.startswith("gate__")})
     out.update(part_n=d["part_n"], part_round=d["part_round"], part_label=d["part_label"].astype(str),
                meta=json.loads(str(d["meta"])))
     return out

@@ -22,6 +22,9 @@ Triggers (what decides a reset; every reset is the full reset of actions.reset_m
                    reference too, and it cannot act before it has seen `L` degraded batches). After a reset its history is cleared and it waits `K`.
 A flag is applied after the adaptation batch that completed the proxy batch, before the next one (the gate's own rule). The gate is not reset
 when a member is (design note, 1.2).
+
+`extra_gates` ({name: gate}, src/reset/gate_variants.py) score the same logits with other gates, outside the loop like the main one: their predictions are stored as the
+series `gate__<name>`, and a gate with a `notify_reset(member, position)` is told of every reset. They change nothing in the run.
 """
 
 from __future__ import annotations
@@ -62,7 +65,8 @@ class NoTrigger(Trigger):
 
 
 class RuleTrigger(Trigger):
-    def __init__(self, spec: RuleSpec, name: str = "rule", c: float = 0.0):
+    def __init__(self, spec: RuleSpec | Mapping[str, RuleSpec], name: str = "rule", c: float = 0.0):
+        """`spec`: one rule for both members, or {"large": RuleSpec, "small": RuleSpec} (src/reset/member_rules.py: per-member settings)."""
         self.spec, self.name, self.ctl = spec, name, ResetController(spec, c=c)
 
     def after_batch(self, *, step, position, records, correct):
@@ -72,7 +76,8 @@ class RuleTrigger(Trigger):
         return out
 
     def summary(self) -> dict:
-        return {"trigger": self.name, "spec": self.spec.to_json(), "events": [e.to_json() for e in self.ctl.events]}
+        spec = {m: sp.to_json() for m, sp in self.spec.items()} if isinstance(self.spec, Mapping) else self.spec.to_json()
+        return {"trigger": self.name, "spec": spec, "events": [e.to_json() for e in self.ctl.events]}
 
 
 class ScheduleTrigger(Trigger):
@@ -188,21 +193,25 @@ def _batches(runner, dataset, *, batch_size: int, workers: int, seed: int, num_s
 
 
 def run_live(runner, parts, *, trigger: Trigger, images: int, batch_size: int, workers: int, T_l: float, T_s: float, gate, frozen=None,
-             max_images: int | None = None, log_every: int = 1000, log=print) -> dict:
+             max_images: int | None = None, log_every: int = 1000, log=print, extra_gates: Mapping[str, object] | None = None) -> dict:
     """Adapt over `parts` (continual.Part: segment, round, seed) with `trigger` deciding the resets. `frozen`: a runner in mode no_adapt over the
     same weights, stepped on the same batches (required by the oracle trigger; its correctness is stored as frozen_large / frozen_small).
+    `extra_gates`: more gates to score on the same logits (module text); their series are `gate__<name>`; they must be called after `gate` (followers read its cache).
     Returns {"correct": {series: uint8 array}, "part_n", "gate_records", "seen", "stopped", "resets", "trigger"}."""
     if trigger.needs_frozen and frozen is None:
         raise ValueError(f"the {trigger.name} trigger needs a frozen copy (frozen=...)")
     if not hasattr(gate, "records"):
         raise ValueError("a live run needs a gate that records its proxy batches (PureProxyGate)")
-    names = ["ts", "large", "small", "gate"] + (["frozen_large", "frozen_small"] if frozen is not None else [])
+    extra = dict(extra_gates or {})
+    names = ["ts", "large", "small", "gate"] + [f"gate__{k}" for k in extra] + (["frozen_large", "frozen_small"] if frozen is not None else [])
     correct = {s: [] for s in names}
     resets, part_n, seen, step, seen_rec, stopped = [], [], 0, 0, 0, None
     n_total = sum(min(images, len(p.segment.dataset)) for p in parts)
     gate.records = []
     # the gate is told where the stream starts and how long it is; the episodic protocol (boundary trigger) gives every part its own gate, so the first one too
-    gate.set_corruption(parts[0].label, total_samples=min(images, len(parts[0].segment.dataset)) if trigger.new_gate_per_part else n_total)
+    first_total = min(images, len(parts[0].segment.dataset)) if trigger.new_gate_per_part else n_total
+    for g in (gate, *extra.values()):
+        g.set_corruption(parts[0].label, total_samples=first_total)
 
     def apply(flags) -> None:
         done = set()
@@ -212,15 +221,19 @@ def run_live(runner, parts, *, trigger: Trigger, images: int, batch_size: int, w
             done.add(side)
             reset_member(runner, side)
             resets.append({"step": step, "position": seen, "member": side, "why": why})
+            for g in extra.values():
+                if hasattr(g, "notify_reset"):
+                    g.notify_reset(side, seen)
 
     t0 = time.time()
     for i, part in enumerate(parts):
         ds = part.segment.dataset
         if i:
-            if trigger.new_gate_per_part:
-                gate.set_corruption(part.label, total_samples=min(images, len(ds)))
-            else:
-                gate.mark_segment(part.label)                    # between parts only the label: the buffer stays
+            for g in (gate, *extra.values()):
+                if trigger.new_gate_per_part:
+                    g.set_corruption(part.label, total_samples=min(images, len(ds)))
+                else:
+                    g.mark_segment(part.label)                   # between parts only the label: the buffer stays
             apply(trigger.start_part(i))
         n = 0
         for x_l, x_s, y in _batches(runner, ds, batch_size=batch_size, workers=workers, seed=part.seed, num_samples=images):
@@ -228,6 +241,7 @@ def run_live(runner, parts, *, trigger: Trigger, images: int, batch_size: int, w
             y = y.to(z_l.device)
             with torch.no_grad():
                 preds = {"ts": (z_l / T_l + z_s / T_s).argmax(1), "large": z_l.argmax(1), "small": z_s.argmax(1), "gate": gate.calibrate(z_l, z_s).argmax(1)}
+                preds.update({f"gate__{k}": g.calibrate(z_l, z_s).argmax(1) for k, g in extra.items()})
                 if frozen is not None:
                     f_l, f_s = frozen.step_tensors(x_l, x_s, ds)
                     preds["frozen_large"], preds["frozen_small"] = f_l.argmax(1), f_s.argmax(1)
@@ -346,6 +360,44 @@ if __name__ == "__main__":
     alone = CT.run_until(frozen_runner(), parts, images=N, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, log_every=0)
     assert np.array_equal(with_frozen["correct"]["frozen_large"], alone["correct"]["large"]) and np.array_equal(with_frozen["correct"]["frozen_small"], alone["correct"]["small"])
     print("  frozen copy: stepped in lockstep, equal to the standalone frozen run; the adapting run is unchanged")
+
+    # ---- extra gates: scored on the same logits, change nothing, are told every reset at the stream position it acts from ------------------------------
+    from src.reset import gate_variants as GV
+
+    class Probe:
+        """A stand-in gate: counts the samples it is given and writes down what notify_reset tells it."""
+        def __init__(self):
+            self.n, self.told, self.corruptions = 0, [], []
+
+        def set_corruption(self, label, total_samples=None):
+            self.corruptions.append(label)
+
+        mark_segment = set_corruption
+
+        def calibrate(self, z_l, z_s):
+            self.n += z_l.shape[0]
+            return z_l
+
+        def notify_reset(self, member, position):
+            self.told.append((member, position, self.n))
+
+    def live_extra(trigger, names, **kw):
+        runner, gate = make()
+        extra = {n: GV.make_gate(n, gate, T_l=T_L, T_s=T_S, b_t=B_T, num_classes=1000) for n in names}
+        probe = Probe()
+        extra["probe"] = probe
+        return run_live(runner, parts, trigger=trigger, images=N, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, gate=gate, extra_gates=extra, log_every=0, **kw), probe
+
+    stag = StaggeredScheduleTrigger(4)
+    plain_s = live(StaggeredScheduleTrigger(4))
+    both, probe = live_extra(StaggeredScheduleTrigger(4), ("beta0", "beta2", "beta8", "route0.2w96", "agree_duo@1"))
+    assert all(np.array_equal(both["correct"][s], plain_s["correct"][s]) for s in plain_s["correct"]) and both["resets"] == plain_s["resets"], "extra gates must change nothing"
+    assert set(both["correct"]) == set(plain_s["correct"]) | {f"gate__{n}" for n in ("beta0", "beta2", "beta8", "route0.2w96", "agree_duo@1", "probe")}
+    assert np.array_equal(both["correct"]["gate__beta0"], both["correct"]["ts"]), "beta 0 is the fixed-TS duo"
+    assert np.array_equal(both["correct"]["gate__beta2"], both["correct"]["gate"]), "the follower at the leader's beta (2) is the leader"
+    assert both["resets"] and [(m, p) for m, p, _ in probe.told] == [(r["member"], r["position"]) for r in both["resets"]] and all(p == n for _, p, n in probe.told), probe.told
+    assert probe.n == both["seen"] and probe.corruptions == [p.label for p in parts]
+    print(f"  extra gates: the run is unchanged, beta0 = fixed TS, the follower at the leader's beta = the leader, {len(probe.told)} resets told at the position they act from")
 
     # ---- max_images ------------------------------------------------------------------------------------------------------------------------
     cut = live(NoTrigger(), max_images=70)

@@ -70,6 +70,7 @@ def main() -> int:
     ap.add_argument("--b_t", type=int, default=256)
     ap.add_argument("--max_images", type=int, default=None, help="name of a smoke run (38's --max_images)")
     ap.add_argument("--figures", choices=("none", "first", "all"), default="first")
+    ap.add_argument("--report_subdir", default="", help="write into report/<this> instead of report/ (so a run of other rates or another beta does not overwrite the tables and figures of another)")
     args = ap.parse_args()
     tta = "tent"
 
@@ -77,7 +78,7 @@ def main() -> int:
     ctx, seeds, out = setup(args, f"reset_live/{tag}", default_seeds=[0])
     proxy = args.proxy or ctx.g.gate["proxy"]
     proxy = {"nuclear_norm": "nnn", "ac_mc": "msp"}.get(proxy, proxy)
-    report = out / "report"
+    report = out / "report" / args.report_subdir
     report.mkdir(parents=True, exist_ok=True)
     names = {s: provenance.model_name(ctx.duo[s.upper()]["NAME"]).split(" (")[0] for s in SIDES}
     lrs = tuple(args.lrs)

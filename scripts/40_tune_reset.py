@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -75,18 +76,78 @@ def show_member(plan: TU.Plan, side: str, rate_of) -> None:
               ("  tied" if r["tied"] else "") + ("  <- chosen" if r["chosen"] else ""))
 
 
+FILLER_RUNG = {"large": 6, "small": -5}                      # a pairing filler: the shared setting at its tuned rate (5.6e-4, 8.84e-5): a known cell, only needed when one member has fewer requests
+
+
+def member_main(args, g, folder: Path, outdir: Path) -> int:
+    """Per-member tuning (plan.md, amendment of 2026-10-28): each member's own detector setting AND rate, by `TU.plan_member`; a run pairs one cell request of each member."""
+    from src.reset import member_rules as MR
+    shared = MR.Setting(args.shared[0], args.shared[1], int(args.shared[2]), args.shared[3])
+    cdir = Path(args.candidates) if args.candidates else g.path("out") / "results" / "screen_resets_stress"
+    cands = {}
+    for side in TU.SIDES:
+        d = json.loads((cdir / f"member_detector__{side}.json").read_text())
+        cands[side] = [MR.Setting(c["alpha_fast"], c["alpha_slow"], int(c["W0"]), c["delta"]) for c in d["candidates"]]
+    store = TU.MemberStore(folder, f"nnn_bt256_beta{BETA:g}", shared, args.shared_cond)
+    plans = {s: TU.plan_member(s, lambda st, k, rot, s=s: store.member_cell(s, st, rot, TU.rate(s, k)), shared, cands[s]) for s in TU.SIDES}
+    for side, pl in plans.items():
+        print(f"{side} ({'ViT' if side == 'large' else 'ResNet'}): candidates " + ", ".join("shared" if c is shared else str(tuple(c)) for c in [shared, *cands[side]]))
+        print("   " + "; ".join(pl.notes))
+        for r in pl.table:
+            print(f"     {str(r['setting']):36s} rate rung {r['rate_rung']:3d}  acc(0+2) {100 * r['acc']:6.2f}  resets/1000 {r['resets']:5.2f}" + ("  tied" if r["tied"] else "") + ("  <- best" if r["chosen"] else ""))
+    reqs = {s: list(dict.fromkeys(pl.requests)) for s, pl in plans.items()}
+    if any(reqs.values()):
+        runs: dict[int, list[tuple]] = {}
+        for rot in sorted({r for s in TU.SIDES for _, _, r in reqs[s]}):
+            lst = {s: [(st, k) for st, k, r in reqs[s] if r == rot] for s in TU.SIDES}
+            for i in range(max(len(lst["large"]), len(lst["small"]))):
+                a = lst["large"][i] if i < len(lst["large"]) else (shared, FILLER_RUNG["large"])
+                b = lst["small"][i] if i < len(lst["small"]) else (shared, FILLER_RUNG["small"])
+                runs.setdefault(rot, []).append((MR.condition(a[0], b[0]), TU.rate("large", a[1]), TU.rate("small", b[1])))
+        n = 0
+        lock = outdir / "member_submit.lock"                 # a wave takes about 70 minutes: a second submission within 15 minutes is a double trigger (the monitor and a manual call), not a new wave
+        if args.submit and lock.exists() and time.time() - lock.stat().st_mtime < 900 and not args.force:
+            print(f"NOT SUBMITTED: a wave was submitted {(time.time() - lock.stat().st_mtime) / 60:.0f} minutes ago (lock {lock.name}); use --force to override")
+            return 0
+        if args.submit:
+            lock.write_text(time.strftime("%Y-%m-%d %H:%M:%S"))
+        for rot, lst in sorted(runs.items()):
+            for cond, rl, rs in dict.fromkeys(lst):
+                c = (f"sbatch --array=0-0 -t {TIME} -J mem_r{rot}_{n} --exclude=kn117,kn101 slurm/job.sh scripts/38_run_reset_live.py --duo {args.duo} --bn --stream heldout "
+                     f"--rotations {rot} --conditions {cond} --beta {BETA:g} --lrs {rate_g(rl)} {rate_g(rs)} --shard auto")
+                print(("SUBMIT  " if args.submit else "to run  ") + c)
+                if args.submit:
+                    print("   ->", subprocess.run(c, shell=True, capture_output=True, text=True, cwd=Path(__file__).resolve().parents[1]).stdout.strip())
+                n += 1
+        print(f"{n} run(s) requested")
+        return 0
+    final = {s: plans[s].final for s in TU.SIDES}
+    if any(f is None for f in final.values()):
+        print("no final choice and no requests: see the notes above")
+        return 1
+    cond = MR.condition(final["large"][0], final["small"][0])
+    rates = [TU.rate("large", final["large"][1]), TU.rate("small", final["small"][1])]
+    print(f"\nfinal: {cond} at ViT {rates[0]:g}, ResNet {rates[1]:g}; confirm with `confirm --cond {cond} --rates {rates[0]:g} {rates[1]:g}`")
+    (outdir / "member__rates.json").write_text(json.dumps({"cond": cond, "chosen": rates, "settings": {s: list(final[s][0]) for s in TU.SIDES}, "tables": {s: plans[s].table for s in TU.SIDES}}, default=float, indent=1))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("what", choices=("rates", "baseline2", "confirm", "threshold"))
+    ap.add_argument("what", choices=("rates", "baseline2", "confirm", "threshold", "member"))
     ap.add_argument("--cond", default=None)
     ap.add_argument("--coupled", action="store_true", help="the members are coupled (the gap rule): tune the pair on the gated duo")
     ap.add_argument("--duo", default="vitb16_rn50v1")
     ap.add_argument("--submit", action="store_true")
+    ap.add_argument("--force", action="store_true", help="member: submit although a wave was submitted less than 15 minutes ago")
     ap.add_argument("--rates", type=float, nargs=2, default=None, metavar=("LR_L", "LR_S"), help="confirm / threshold: the pair (default: the chosen one of the rates run)")
     ap.add_argument("--around", type=float, nargs=2, default=None, metavar=("LR_L", "LR_S"), help="rates: start the ladders one rung either side of this pair instead of the x2 ladder")
     ap.add_argument("--family", default=None, help="threshold: the rule family, e.g. own_fast_vs_slow")
     ap.add_argument("--base", type=float, default=None, help="threshold: the screened threshold the sqrt-2 grid is anchored at")
     ap.add_argument("--rung", type=int, nargs="+", default=[-2, -1, 0, 1], help="threshold: the starting rungs of the ladder (default %(default)s: thresholds base * 2**(k/2))")
+    ap.add_argument("--shared", type=float, nargs=4, default=[0.05, 0.005, 20, 0.7], metavar=("AF", "AS", "W0", "DELTA"), help="member: the shared setting (a candidate of both members)")
+    ap.add_argument("--shared_cond", default="own_fast_vs_slow@0.7", help="member: the plain condition whose runs are the shared setting's cells")
+    ap.add_argument("--candidates", default=None, help="member: folder of member_detector__<side>.json (default <out>/results/screen_resets_stress)")
     args = ap.parse_args()
     g = load_global()
     folder = g.path("out") / "results" / "reset_live" / f"{args.duo}__tent_bn"
@@ -128,6 +189,9 @@ def main() -> int:
             print(f"\nchosen (accuracy-tuned, no reset): ViT {chosen['large']:g}, ResNet {chosen['small']:g}; the 04b conservative pair is 1.26e-05 / 2.2e-05")
             (outdir / "none__baseline2.json").write_text(json.dumps({"chosen": chosen, "tables": {s: plans[s].table for s in TU.SIDES}}, default=float, indent=1))
         return 0
+
+    if args.what == "member":
+        return member_main(args, g, folder, outdir)
 
     if not args.cond and args.what != "threshold":
         ap.error("--cond is required")

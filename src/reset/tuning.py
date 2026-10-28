@@ -29,6 +29,9 @@ every second rung (X2): ViT 3.5e-5 .. 2.8e-4, ResNet 1.25e-4 .. 1e-3. The rules 
   6. Guard: a configuration in which the member is DEAD (four consecutive 5,120-image windows below 5%, CT.dead_onset) on a tuning rotation is excluded.
 
 `plan_*` return {"requests": [(key, rotation), ...] still to run, "chosen": key or None, "table": rows, "notes": [...]}; run the requests, call again.
+
+`plan_member` is the per-member version for the default pipeline (src/reset/member_rules.py): each member's own learning rate AND its own detector setting
+(alpha_fast, alpha_slow, W0, delta) are tuned independently, over the member's candidate settings, by the same rules.
 """
 
 from __future__ import annotations
@@ -315,6 +318,109 @@ def plan_pair(*, cell_of: Callable[[tuple[int, int], int], Cell | None], series:
     return plan
 
 
+# ------------------------------------------------------------------------------------------------------------ per-member settings
+
+START_MEMBER = {"large": (2, 4, 6, 8), "small": (-6, -4, -2, 0)}      # start rungs of a candidate's rate ladder: around the shared optima (ViT 5.6e-4, ResNet 8.84e-5)
+
+
+class MemberStore(Store):
+    """The runs of `own_fast_vs_slow` with per-member settings (condition `own_fast_vs_slow@pmL...-..._S...`): a member's cell for (setting, rate) is ANY run with that
+    member at that setting and rate, whatever the partner does (own rule, gate outside the loop). The SHARED setting's cells are the plain `own_fast_vs_slow@<delta>` runs
+    (one setting for both members) and every per-member run in which the member happens to have the shared setting."""
+
+    def __init__(self, folder: Path, gate: str, shared, shared_cond: str, seed: int = 0):
+        super().__init__(folder, gate, seed)
+        self.shared, self.shared_cond = shared, shared_cond
+
+    def member_cell(self, side: str, setting, rot: int, rate: float) -> Cell | None:
+        from src.reset import member_rules as MR
+        if setting.same(self.shared):
+            c = self.cell(self.shared_cond, rot, **{side: rate})
+            if c is not None:
+                return c
+        if tuple(setting[:3]) == tuple(self.shared[:3]):                      # the shared speeds and warm-up at another threshold: the plain `<family>@<delta>` runs (stage 3)
+            c = self.cell(f"{MR.FAMILY}@{setting.delta:g}", rot, **{side: rate})
+            if c is not None:
+                return c
+        for f in glob.glob(str(self.folder / f"live-{MR.FAMILY}@pm*__heldout*__{self.gate}__seed{self.seed}.npz")):
+            m = _STEM.match(Path(f).stem)
+            parsed = MR.parse_condition(m["cond"]) if m else None
+            if parsed is None or int(m["rot"] or 0) != rot or not parsed[side].same(setting):
+                continue
+            if math.isclose(float(m["l" if side == "large" else "s"]), rate, rel_tol=1e-6):
+                path = Path(f)
+                if path not in self._cells:
+                    self._cells[path] = load_cell(path)
+                return self._cells[path]
+        return None
+
+
+@dataclass
+class MemberPlan:
+    requests: list[tuple[object, int, int]] = field(default_factory=list)     # (Setting, rate rung, rotation) still to run
+    final: tuple[object, int] | None = None                                   # (Setting, rate rung)
+    notes: list[str] = field(default_factory=list)
+    table: list[dict] = field(default_factory=list)
+
+
+def delta_setting(setting, j: int):
+    """`setting` with its threshold moved j sqrt-2 rungs (the readable grid of `threshold`)."""
+    return setting._replace(delta=threshold(setting.delta, j))
+
+
+def plan_member(side: str, cell_of: Callable[[object, int, int], Cell | None], shared, candidates: Sequence, *, rots: Sequence[int] = TUNING_ROTS, max_rounds: int = 3) -> MemberPlan:
+    """One member's search over (detector setting, learning rate), by the rules of `plan_1d` (scored by the member's own accuracy; `cell_of(setting, rung, rotation)`).
+    A. a rate ladder for the shared setting and for every candidate (`START_MEMBER` start rungs); B. the candidate with the best pooled accuracy at its chosen rate
+    (`choose`: ties by fewest resets, then the SHARED setting first, then the order of `candidates`); C. its threshold on the sqrt-2 grid at that rate, then, if the
+    threshold moved, the rate one rung either side at the new threshold, and again until neither moves (at most `max_rounds`)."""
+    plan = MemberPlan()
+    settings = [shared, *candidates]
+
+    def add(reqs, setting):
+        plan.requests += [(setting, k, r) for k, r in reqs if (setting, k, r) not in plan.requests]
+
+    ladders = {}
+    for c in settings:
+        start = X2[side] if c is shared else START_MEMBER[side]
+        pl = plan_1d(start=start, neighbours=lambda k: (k - 1, k + 1), series=side, side=side, rots=rots, cell_of=lambda k, rot, c=c: cell_of(c, k, rot))
+        ladders[c] = pl
+        add(pl.requests, c)
+    if plan.requests:
+        plan.notes.append("rate ladders of the candidates are not complete")
+        return plan
+    dead = [c for c in settings if ladders[c].chosen is None]
+    if dead:
+        plan.notes.append(f"every rung of {[tuple(c) for c in dead]} is dead on a tuning rotation: dropped")
+        settings = [c for c in settings if c not in dead]
+    pooled = {c: (np.concatenate([cell_of(c, ladders[c].chosen, r).acc[side] for r in rots]),
+                  float(np.mean([cell_of(c, ladders[c].chosen, r).resets[side] for r in rots]))) for c in settings}
+    best, tied = choose(pooled, lambda c: settings.index(c))
+    plan.table = [{"setting": tuple(c), "rate_rung": ladders[c].chosen, "acc": float(pooled[c][0].mean()), "resets": pooled[c][1], "tied": c in tied, "chosen": c == best} for c in settings]
+    plan.notes.append(f"best candidate {tuple(best)} at rung {ladders[best].chosen}; within one paired SE of the best: {[tuple(c) for c in tied]}")
+    k = ladders[best].chosen
+    for _ in range(max_rounds):
+        pd = plan_1d(start=(-1, 0, 1), neighbours=lambda j: (j - 1, j + 1), series=side, side=side, rots=rots, tie_order=lambda j: -j,
+                     cell_of=lambda j, rot, k=k: cell_of(delta_setting(best, j), k, rot))
+        for j, r in pd.requests:
+            if (delta_setting(best, j), k, r) not in plan.requests:
+                plan.requests.append((delta_setting(best, j), k, r))
+        if plan.requests:
+            plan.notes.append("threshold ladder not complete")
+            return plan
+        chosen = delta_setting(best, pd.chosen)
+        pr = plan_1d(start=(k - 1, k, k + 1), neighbours=lambda q: (q - 1, q + 1), series=side, side=side, rots=rots, cell_of=lambda q, rot, c=chosen: cell_of(c, q, rot))
+        add(pr.requests, chosen)
+        if plan.requests:
+            plan.notes.append("rate recheck at the chosen threshold not complete")
+            return plan
+        if pr.chosen == k:                                                      # neither moved: the alternating search has converged
+            break
+        k = pr.chosen                                                           # the rate moved: the threshold is checked again at the new rate
+    plan.final = (chosen, pr.chosen)
+    plan.notes.append(f"final: setting {tuple(chosen)} at rate rung {pr.chosen}")
+    return plan
+
+
 # ------------------------------------------------------------------------------------------------------------ self-test
 
 if __name__ == "__main__":
@@ -397,4 +503,34 @@ if __name__ == "__main__":
         for c, r in p2.requests:
             run2(c, r)
     assert p2.chosen == (1, -1) and p2.done, (p2.chosen, p2.notes)
+    # the per-member search: the shared setting and two candidates; candidate 1 is the best family, its best threshold is one rung above its own and its best rate rung is 5
+    from src.reset.member_rules import Setting
+    S0, C1, C2 = Setting(0.05, 0.005, 20, 0.7), Setting(0.1, 0.01, 50, 1.4), Setting(0.1, 0.025, 50, 1.4)
+    best_delta = delta_setting(C1, 1)
+    fam = lambda st: (st.alpha_fast, st.alpha_slow, st.W0)
+    base_acc = {fam(S0): 0.540, fam(C1): 0.560, fam(C2): 0.552}
+    peak = {fam(S0): 4, fam(C1): 5, fam(C2): 3}
+    made: dict = {}
+
+    def member_cell(st, k, rot):
+        return made.get((st, k, rot))
+
+    def run_member(st, k, rot):
+        dpen = 0.004 * (math.log2(st.delta / best_delta.delta) * 2) ** 2 if fam(st) == fam(C1) else 0.0
+        acc = base_acc[fam(st)] - 0.02 * (k - peak[fam(st)]) ** 2 - dpen + np.random.default_rng(10000 + 100 * rot + 7 * k + int(10 * st.delta)).normal(0, 0.0015, 16)
+        made[(st, k, rot)] = Cell({"large": acc}, {"large": 5.0, "small": 1.0}, {"large": False, "small": False}, 800000)
+
+    for sh_k in X2["large"] + (5, 6):                      # the shared setting's ladders exist already (the stage-2 runs)
+        for rot in (0, 2):
+            run_member(S0, sh_k, rot)
+    for _ in range(40):
+        mp = plan_member("large", member_cell, S0, [C1, C2])
+        for st, k, rot in mp.requests:
+            assert st in (S0, C1, C2) or fam(st) == fam(C1), f"a request for a setting that is neither a candidate nor a threshold variant of the best: {st}"
+            run_member(st, k, rot)
+        if not mp.requests:
+            break
+    else:
+        raise AssertionError("plan_member did not converge")
+    assert mp.final is not None and fam(mp.final[0]) == fam(C1) and mp.final[0].delta == best_delta.delta and mp.final[1] == 5, (mp.final, mp.notes)
     print("tuning self-test passed")

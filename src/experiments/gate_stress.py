@@ -210,7 +210,7 @@ def plot_stress(items: Sequence[dict], path: Path, *, footer: str = "", width: f
     width = width or (7.2 if cols <= 2 else 3.6 * cols)
     fig = plt.figure(figsize=(width, 5.6 if cols == 1 else 5.9), dpi=dpi, facecolor="white")
     gs = fig.add_gridspec(3, cols, height_ratios=[3.0, 1.25, 1.05], hspace=0.14, wspace=0.13, left=0.095 if cols == 1 else 0.075,
-                          right=0.835 if cols == 1 else 0.975, top=0.80, bottom=0.105)
+                          right=0.81 if cols == 1 else 0.975, top=0.80, bottom=0.105)
     first_axes = None
     for c, item in enumerate(items):
         run, frozen, an, names = item["run"], item["frozen"], item["analysis"], item["names"]
@@ -243,10 +243,11 @@ def plot_stress(items: Sequence[dict], path: Path, *, footer: str = "", width: f
         lines = [("Frozen duo", block_means(frozen["ts"]), *style["Frozen duo"], 0.9), ("Fixed TS duo", block_means(run["ts"]), *style["Fixed TS duo"], 0.9),
                  ("Vanilla DD", block_means(run["gate"]), *style["Vanilla DD"], 1.5)]
         lines += [(f"{names[s]}, adapting", block_means(run[s]), MEMBER[s][1], MEMBER[s][2], 1.0) for s in SIDES]
-        ends = {}
+        ends, means = {}, {}
         for label, y, color, ls, lw in lines:
             ax1.plot(x[:len(y)], y, color=color, linestyle=ls, linewidth=lw, zorder=3 if label != "Vanilla DD" else 4, label=label, solid_capstyle="round")
             ends[label] = float(y[-8:].mean())
+            means[label] = float(y.mean())                       # the series' accuracy over the whole run, printed after its direct label
         top = max(float(l[1].max()) for l in lines)
         resets = item.get("resets") or []
         ax1.set_ylim(-7 if resets else -1, np.ceil(top / 10) * 10 + 2)
@@ -261,7 +262,7 @@ def plot_stress(items: Sequence[dict], path: Path, *, footer: str = "", width: f
         if cols == 1:
             for label, yv in _spread(ends, (ax1.get_ylim()[1] - ax1.get_ylim()[0]) * 0.07).items():
                 color = next(l[2] for l in lines if l[0] == label)
-                ax1.annotate(label, (n, ends[label]), xytext=(n * 1.012, yv), textcoords="data", fontsize=6.2, color=INK, va="center", annotation_clip=False,
+                ax1.annotate(f"{label}  {means[label]:.1f}", (n, ends[label]), xytext=(n * 1.012, yv), textcoords="data", fontsize=6.2, color=INK, va="center", annotation_clip=False,
                              arrowprops=dict(arrowstyle="-", color=color, linewidth=0.6, shrinkA=0, shrinkB=1))
         ax1.set_title(item["title"], fontsize=6.6, color=INK, loc="left", pad=47)
         if c == 0:
@@ -299,7 +300,7 @@ def plot_stress(items: Sequence[dict], path: Path, *, footer: str = "", width: f
         if any(r["member"] == s for item in items for r in item.get("resets") or []):
             h.append(Line2D([], [], marker="^", linestyle="", color=MEMBER[s][1], markersize=3.5, label=f"{items[0]['names'][s]} reset"))
             l_.append(f"{items[0]['names'][s]} reset")
-    fig.legend(h, l_, loc="upper center", ncol=min(len(h), 7), frameon=False, fontsize=6.3, bbox_to_anchor=(0.46 if cols == 1 else 0.53, 1.0),
+    fig.legend(h, l_, loc="upper center", ncol=min(len(h), 7 if len(h) <= 5 else 4), frameon=False, fontsize=6.3, bbox_to_anchor=(0.46 if cols == 1 else 0.53, 1.0),
                handlelength=2.2, columnspacing=1.2)
     out = provenance.save_figure(fig, path, footer or "unlabeled figure: no run text given", dpi=dpi)
     plt.close(fig)
