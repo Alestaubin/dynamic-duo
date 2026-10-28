@@ -36,16 +36,66 @@
 \@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces Live runs, Vanilla DD with Tent, ViT-B/16{} at $1.4{\cdot }10^{-4}$ and ResNet-50{} at $5{\cdot }10^{-4}$, whole streams. Duo = mean accuracy (\%) of Vanilla DD over the whole stream (mean over 2 held-out runs, 3 test seeds; the spread over runs is at most 0.5 points and reflects the data order only); $\Delta $ = gain over the frozen duo on the same images; resets per 1,000 proxy batches as ViT-B/16{} / ResNet-50{}; false = share of resets (\%) of a member that was not below its frozen copy. -- = not run. Rules in the order of Table\nobreakspace  {}3\hbox {}.}}{6}{}\protected@file@percent }
 \newlabel{tab:live}{{8}{6}}
 \@writefile{toc}{\contentsline {paragraph}{What this does and does not show.}{6}{}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {8}Limits and next steps}{6}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Tuning protocol for the second stage}{6}{}\protected@file@percent }
+\newlabel{sec:tuning}{{8}{6}}
 \@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces The members' own accuracy (\%) over the whole stream in the live runs of Table\nobreakspace  {}8\hbox {}; Frozen = the same members without adaptation.}}{7}{}\protected@file@percent }
 \newlabel{tab:livemem}{{9}{7}}
-\@writefile{toc}{\contentsline {paragraph}{Reproduce.}{7}{}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Test stream, seed 0: Vanilla DD (top), the ViT-B/16{} and the ResNet-50{} (below) under every condition, accuracy over windows of 5,120 images; the dashed grey line is the frozen duo / member, dashed lines the references (episodic, oracle). Without a reset (black) both members die (accuracy below 5\% for four windows of 5,120 images): the ResNet-50{} from 158,720 images, the ViT-B/16{} from 430,080. \texttt  {both\_fast\_vs\_slow} (blue) leaves the ResNet-50{} at 0\% until about 400k.}}{8}{}\protected@file@percent }
-\newlabel{fig:overlay-test}{{1}{8}}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces As Figure\nobreakspace  {}1\hbox {} on the held-out stream (4 shifts $\times $ 4 rounds, rotation 0).}}{9}{}\protected@file@percent }
-\newlabel{fig:overlay-held}{{2}{9}}
-\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \texttt  {gap\_fast\_vs\_slow}, test stream, seed 0: accuracy of the frozen duo, the fixed-TS duo, Vanilla DD and both members; the gate's weight on the ViT-B/16{}; the proxy scores it reads. A triangle marks each reset (dark: ViT-B/16{}, light: ResNet-50{}), a line the same reset in the weight panel. The ResNet-50{} is reset first and the ViT-B/16{} 20--69k images later, six times in a row in the first 400k images.}}{10}{}\protected@file@percent }
-\newlabel{fig:gap}{{3}{10}}
-\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \texttt  {own\_fast\_vs\_slow}, test stream, seed 0, as Figure\nobreakspace  {}3\hbox {}. It resets far less often: seven resets in all, the ResNet-50{} at 133k, 278k, 551k and 701k images and the ViT-B/16{} at 345k, 415k and 605k; the shaded band is the ResNet-50{}'s collapse episode, reset at 278k. Between 278k and 551k the ResNet-50{} is not reset.}}{11}{}\protected@file@percent }
-\newlabel{fig:own}{{4}{11}}
-\gdef \@abspage@last{11}
+\@writefile{lot}{\contentsline {table}{\numberline {10}{\ignorespaces Paired differences of the live runs of Table\nobreakspace  {}8\hbox {} in the duo's accuracy (points), $A - B$ on the same images: mean $\pm $ standard error over visits, and the number of visits in which $A$ is better. Held-out: the visits of the two rotations pooled (32); test: the three seeds averaged per visit (15 visits). Visits are not independent (a collapse carries into the next visit; the two rotations hold the same images in another order), so the standard error is a noise floor, not a confidence interval. Computed by \texttt  {scripts/41\_paired\_comparisons.py}.}}{7}{}\protected@file@percent }
+\newlabel{tab:paired}{{10}{7}}
+\@writefile{toc}{\contentsline {paragraph}{What is compared, and what each has to tune (Table\nobreakspace  {}11\hbox {}).}{7}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Streams, rotations, runs.}{7}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {11}{\ignorespaces The methods of the second stage. The gate is $\beta = 0.5$ for every method (the members and the proxy values do not depend on $\beta $, so the gate is an evaluation choice); the fixed-TS duo is scored on the same runs. The reset at shift boundaries reuses the episodic runs (script 03); only the gate is rescored.}}{8}{}\protected@file@percent }
+\newlabel{tab:methods}{{11}{8}}
+\@writefile{toc}{\contentsline {paragraph}{Objective and decoupling.}{8}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Ladders.}{8}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Selection rules (fixed in advance).}{8}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {12}{\ignorespaces Threshold ladders of the three leaders, other parameters as selected at budget 1. Calibration pool (S+H): false alarms per 1,000 proxy batches, miss rate, mean delay (256-image batches, a miss counts its whole stretch); test streams: false alarms. Bold: the setting with the shortest delay within 1 false alarm per 1,000 on the calibration pool. \texttt  {scripts/37c\_threshold\_ladder.py}.}}{9}{}\protected@file@percent }
+\newlabel{tab:ladder}{{12}{9}}
+\@writefile{toc}{\contentsline {paragraph}{The no-reset baseline.}{9}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Thresholds.}{9}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The screen's thresholds sat at the edge of its grid.}{9}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Controls and the final test.}{9}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {13}{\ignorespaces ViT-B/16's own accuracy (\%, whole held-out stream) at each rung of its learning-rate ladder, under each method with the trigger active: rotation 0 / rotation 2 (rotation 2 only for the argmax and its neighbours). Bold: the chosen rung (tie-break included); $^\dagger $: the member died. Produced by \texttt  {scripts/43\_tuning\_tables.py}.}}{10}{}\protected@file@percent }
+\newlabel{tab:tune_rates_large}{{13}{10}}
+\@writefile{toc}{\contentsline {section}{\numberline {9}Results of the tuning}{10}{}\protected@file@percent }
+\newlabel{sec:tuneresults}{{9}{10}}
+\@writefile{toc}{\contentsline {paragraph}{Rates under the active trigger (Tables\nobreakspace  {}13\hbox {}--16\hbox {}).}{10}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Thresholds (Table\nobreakspace  {}17\hbox {}).}{10}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {14}{\ignorespaces ResNet-50's own accuracy (\%, whole held-out stream) at each rung of its learning-rate ladder, under each method with the trigger active: rotation 0 / rotation 2 (rotation 2 only for the argmax and its neighbours). Bold: the chosen rung (tie-break included); $^\dagger $: the member died. Produced by \texttt  {scripts/43\_tuning\_tables.py}.}}{11}{}\protected@file@percent }
+\newlabel{tab:tune_rates_small}{{14}{11}}
+\@writefile{lot}{\contentsline {table}{\numberline {15}{\ignorespaces The coupled rule (gap fast/slow, $\delta =1$): the gated duo's accuracy (\%, $\beta =0.5$) at each (ViT, ResNet) pair tried, since its ViT resets depend on the ResNet's proxy and the members cannot be tuned separately. Bold: the chosen pair; $^\dagger $: a member died.}}{11}{}\protected@file@percent }
+\newlabel{tab:tune_rates_gap}{{15}{11}}
+\@writefile{toc}{\contentsline {paragraph}{The tuned configurations (Table\nobreakspace  {}18\hbox {}).}{11}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {16}{\ignorespaces No reset: the ladder of the continual-TTA tuner (04b), each member scored on its own accuracy; the argmax and its neighbours were also run on rotation 2. Bold: the accuracy-tuned rate. The conservative pair of 04b ($1.26\!\times \!10^{-5}$ / $2.2\!\times \!10^{-5}$) is a stability rule, reported beside it.}}{12}{}\protected@file@percent }
+\newlabel{tab:tune_noreset}{{16}{12}}
+\@writefile{toc}{\contentsline {paragraph}{Control: does the timing matter? (Table\nobreakspace  {}19\hbox {}).}{12}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {10}Final test}{12}{}\protected@file@percent }
+\newlabel{sec:final}{{10}{12}}
+\@writefile{lot}{\contentsline {table}{\numberline {17}{\ignorespaces Stage 3: the detection threshold at the tuned rates (gated duo, $\beta =0.5$, whole held-out stream). Rotation 2 only for the argmax and its neighbours. Bold: the chosen threshold.}}{13}{}\protected@file@percent }
+\newlabel{tab:tune_thresholds}{{17}{13}}
+\@writefile{lot}{\contentsline {table}{\numberline {18}{\ignorespaces The tuned configurations on all four rotations of the held-out stream (gated duo, $\beta =0.5$, whole-stream accuracy in \%). Rotations 0 and 2 were used for the tuning; $^\ast $ rotations 1 and 3 only validate.}}{13}{}\protected@file@percent }
+\newlabel{tab:tune_confirm}{{18}{13}}
+\@writefile{toc}{\contentsline {paragraph}{Claim (a): the best rule beats the tuned no-reset duo --- it does, for all three rules.}{13}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Claim (b): the rule beats random resets at matched counts --- on average, and less than on held-out.}{13}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {19}{\ignorespaces Stage 4, held-out validation rotation 1: \texttt  {own\_fast\_vs\_slow} ($\delta =0.7$; ViT-B/16{} $5.6{\cdot }10^{-4}$, ResNet-50{} $8.84{\cdot }10^{-5}$) against a trigger that resets each member as often as the rule did, at random steps (five draws). Accuracy (\%) and the paired difference per visit (mean$\pm $SE over the 16 visits; visits won by the rule). The rule's advantage is almost all in the ViT-B/16{}.}}{14}{}\protected@file@percent }
+\newlabel{tab:tune_control}{{19}{14}}
+\@writefile{lot}{\contentsline {table}{\numberline {20}{\ignorespaces Final test: accuracy (\%, mean over the 15 corruptions) on the ImageNet-C test stream, every configuration as tuned on the held-out stream, the gate at $\beta =0.5$. Mean$\pm $SE over 5 orderings of the corruptions (standard order and CoTTA's random orders); resets per 1,000 proxy batches for the ViT / ResNet. Frozen and the episodic reset are order-independent (scripts/03b rows). Produced by \texttt  {scripts/42\_final\_test.py}.}}{14}{}\protected@file@percent }
+\newlabel{tab:final_test}{{20}{14}}
+\@writefile{toc}{\contentsline {paragraph}{Claim (c): against the boundary reset and the schedules --- reported as it came out.}{14}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Where the gain comes from.}{14}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {21}{\ignorespaces Paired differences on the test stream: per corruption (its accuracy averaged over the orderings), mean, standard error over the 15 corruptions, bootstrap 95\% interval over corruptions (10,000 resamples) and the number of corruptions the first method wins. Corruptions are not independent, so the interval is a noise floor, not a guarantee.}}{15}{}\protected@file@percent }
+\newlabel{tab:final_paired}{{21}{15}}
+\@writefile{lot}{\contentsline {table}{\numberline {22}{\ignorespaces Final test, per corruption (severity 5; accuracy of Vanilla DD, $\beta =0.5$, \%): each corruption's accuracy averaged over the orderings of the stream (the episodic reset and the frozen duo: scripts/03b rows). Bold: the best method on that corruption.}}{15}{}\protected@file@percent }
+\newlabel{tab:final_per_shift}{{22}{15}}
+\@writefile{toc}{\contentsline {paragraph}{What the test supports.}{15}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {11}Limits and next steps}{15}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Reproduce.}{16}{}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Test stream, seed 0: Vanilla DD (top), the ViT-B/16{} and the ResNet-50{} (below) under every condition, accuracy over windows of 5,120 images; the dashed grey line is the frozen duo / member, dashed lines the references (episodic, oracle). Without a reset (black) both members die (accuracy below 5\% for four windows of 5,120 images): the ResNet-50{} from 158,720 images, the ViT-B/16{} from 430,080. \texttt  {both\_fast\_vs\_slow} (blue) leaves the ResNet-50{} at 0\% until about 400k.}}{17}{}\protected@file@percent }
+\newlabel{fig:overlay-test}{{1}{17}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces As Figure\nobreakspace  {}1\hbox {} on the held-out stream (4 shifts $\times $ 4 rounds, rotation 0).}}{18}{}\protected@file@percent }
+\newlabel{fig:overlay-held}{{2}{18}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \texttt  {gap\_fast\_vs\_slow}, test stream, seed 0: accuracy of the frozen duo, the fixed-TS duo, Vanilla DD and both members; the gate's weight on the ViT-B/16{}; the proxy scores it reads. A triangle marks each reset (dark: ViT-B/16{}, light: ResNet-50{}), a line the same reset in the weight panel. The ResNet-50{} is reset first and the ViT-B/16{} 20--69k images later, six times in a row in the first 400k images.}}{19}{}\protected@file@percent }
+\newlabel{fig:gap}{{3}{19}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \texttt  {own\_fast\_vs\_slow}, test stream, seed 0, as Figure\nobreakspace  {}3\hbox {}. It resets far less often: seven resets in all, the ResNet-50{} at 133k, 278k, 551k and 701k images and the ViT-B/16{} at 345k, 415k and 605k; the shaded band is the ResNet-50{}'s collapse episode, reset at 278k. Between 278k and 551k the ResNet-50{} is not reset.}}{20}{}\protected@file@percent }
+\newlabel{fig:own}{{4}{20}}
+\gdef \@abspage@last{20}

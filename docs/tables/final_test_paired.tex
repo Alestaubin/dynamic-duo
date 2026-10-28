@@ -1,0 +1,31 @@
+\begin{table}[t]
+  \centering\small
+  \begin{tabular}{@{}lrrcc@{}}
+    \toprule
+    Difference (Vanilla DD, points) & Mean & SE & 95\% CI & Corruptions won \\
+    \midrule
+    Every 500 steps $-$ No reset, accuracy-tuned rates & +1.81 & 0.44 & [+0.95, +2.60] & 14/15 \\
+    Every 1,000 steps $-$ No reset, accuracy-tuned rates & +1.48 & 0.48 & [+0.51, +2.36] & 13/15 \\
+    Own fast/slow trigger $-$ No reset, accuracy-tuned rates & +3.78 & 1.02 & [+2.08, +5.90] & 14/15 \\
+    Gap fast/slow trigger $-$ No reset, accuracy-tuned rates & +2.84 & 0.47 & [+1.98, +3.79] & 15/15 \\
+    Own CUSUM trigger $-$ No reset, accuracy-tuned rates & +3.16 & 0.89 & [+1.63, +5.01] & 14/15 \\
+    Own fast/slow trigger $-$ Random resets, matched to Own fast/slow trigger & +1.39 & 0.46 & [+0.54, +2.32] & 12/15 \\
+    Own fast/slow trigger $-$ Reset at every shift (episodic) & +1.80 & 1.41 & [-0.39, +4.86] & 8/15 \\
+    Own fast/slow trigger $-$ Every 500 steps & +1.97 & 1.30 & [-0.12, +4.76] & 10/15 \\
+    Own fast/slow trigger $-$ Every 1,000 steps & +2.30 & 1.35 & [+0.09, +5.18] & 10/15 \\
+    Gap fast/slow trigger $-$ Reset at every shift (episodic) & +0.86 & 0.82 & [-0.37, +2.65] & 8/15 \\
+    Gap fast/slow trigger $-$ Every 500 steps & +1.03 & 0.70 & [-0.08, +2.54] & 9/15 \\
+    Gap fast/slow trigger $-$ Every 1,000 steps & +1.37 & 0.75 & [+0.13, +2.95] & 11/15 \\
+    Own CUSUM trigger $-$ Reset at every shift (episodic) & +1.17 & 1.29 & [-0.86, +3.93] & 7/15 \\
+    Own CUSUM trigger $-$ Every 500 steps & +1.35 & 1.20 & [-0.64, +3.85] & 9/15 \\
+    Own CUSUM trigger $-$ Every 1,000 steps & +1.68 & 1.24 & [-0.38, +4.28] & 10/15 \\
+    Own fast/slow trigger $-$ Gap fast/slow trigger & +0.94 & 0.64 & [-0.17, +2.25] & 10/15 \\
+    Own fast/slow trigger $-$ Own CUSUM trigger & +0.62 & 0.39 & [-0.16, +1.33] & 11/15 \\
+    Gap fast/slow trigger $-$ Own CUSUM trigger & -0.32 & 0.59 & [-1.45, +0.79] & 9/15 \\
+    No reset, accuracy-tuned rates $-$ Frozen (no adaptation) & +4.11 & 0.86 & [+2.41, +5.66] & 13/15 \\
+    No reset, accuracy-tuned rates $-$ No reset, conservative rates & +0.45 & 0.15 & [+0.17, +0.72] & 12/15 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Paired differences on the test stream: per corruption (its accuracy averaged over the orderings), mean, standard error over the 15 corruptions, bootstrap 95\% interval over corruptions (10,000 resamples) and the number of corruptions the first method wins. Corruptions are not independent, so the interval is a noise floor, not a guarantee.}
+  \label{tab:final_paired}
+\end{table}

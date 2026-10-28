@@ -1,0 +1,21 @@
+\begin{table}[t]
+  \centering\small
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Rate & Every 500 steps & Every 1,000 steps & own fast/slow ($\delta$=0.7) & own cusum ($h$=2) & own cusum ($h$=0.25) \\
+    \midrule
+    $3.5\!\times\!10^{-5}$ & 49.83 & 50.38 & 50.87 / 50.93 & 50.58 & -- \\
+    $4.95\!\times\!10^{-5}$ & -- & 50.88 & -- & -- & -- \\
+    $7\!\times\!10^{-5}$ & 50.65 & \textbf{51.47 / 51.29} & 52.12 & 51.90 & -- \\
+    $9.9\!\times\!10^{-5}$ & 51.17 / 51.18 & 51.74 / 50.82 & -- & -- & -- \\
+    $1.4\!\times\!10^{-4}$ & \textbf{51.48 / 51.56} & 49.33 / 47.87 & 53.21 & 53.31 & -- \\
+    $1.98\!\times\!10^{-4}$ & 50.43 / 50.73 & -- & 53.74 & 54.00 / 53.97 & 54.13 / 54.08 \\
+    $2.8\!\times\!10^{-4}$ & 48.29 & 42.30$^\dagger$ & 54.36 & \textbf{54.55 / 54.55} & \textbf{54.73 / 54.65} \\
+    $3.96\!\times\!10^{-4}$ & -- & -- & 54.45 / 54.57 & 54.48 / 54.35 & 54.56 / 54.37 \\
+    $5.6\!\times\!10^{-4}$ & -- & -- & \textbf{54.81 / 54.79} & -- & -- \\
+    $7.92\!\times\!10^{-4}$ & -- & -- & 54.50 / 54.72 & -- & -- \\
+    \bottomrule
+  \end{tabular}
+  \caption{ViT-B/16's own accuracy (\%, whole held-out stream) at each rung of its learning-rate ladder, under each method with the trigger active: rotation 0 / rotation 2 (rotation 2 only for the argmax and its neighbours). Bold: the chosen rung (tie-break included); $^\dagger$: the member died. Produced by \rl{scripts/43\_tuning\_tables.py}.}
+  \label{tab:tune_rates_large}
+\end{table}

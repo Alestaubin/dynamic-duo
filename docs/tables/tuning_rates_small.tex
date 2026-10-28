@@ -1,0 +1,22 @@
+\begin{table}[t]
+  \centering\small
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Rate & Every 500 steps & Every 1,000 steps & own fast/slow ($\delta$=0.7) & own cusum ($h$=2) & own cusum ($h$=0.25) \\
+    \midrule
+    $6.25\!\times\!10^{-5}$ & -- & -- & 40.73 / 40.87 & -- & -- \\
+    $8.84\!\times\!10^{-5}$ & -- & -- & \textbf{41.11 / 41.21} & -- & -- \\
+    $1.25\!\times\!10^{-4}$ & 40.41 & 41.63 & 41.31 / 41.20 & 38.70 & -- \\
+    $1.77\!\times\!10^{-4}$ & -- & -- & 41.20 / 40.77 & -- & -- \\
+    $2.5\!\times\!10^{-4}$ & 42.35 & 43.13 & 40.04 & 34.89 & -- \\
+    $3.54\!\times\!10^{-4}$ & -- & 43.60 / 43.74 & -- & -- & -- \\
+    $5\!\times\!10^{-4}$ & 43.89 & \textbf{43.75 / 43.96} & 36.74 & 35.96 & -- \\
+    $7.07\!\times\!10^{-4}$ & \textbf{44.28 / 44.29} & 43.29 / 43.55 & -- & 33.73 / 34.26 & 34.27 / 34.61 \\
+    $1\!\times\!10^{-3}$ & 44.30 / 44.28 & 41.84 & 39.33 & \textbf{39.76 / 41.04} & \textbf{41.22 / 42.18} \\
+    $1.41\!\times\!10^{-3}$ & 43.54 / 43.69 & -- & -- & 37.22 / 36.33 & 38.91 / 37.82 \\
+    $2\!\times\!10^{-3}$ & -- & -- & 38.46 / 36.85 & -- & -- \\
+    \bottomrule
+  \end{tabular}
+  \caption{ResNet-50's own accuracy (\%, whole held-out stream) at each rung of its learning-rate ladder, under each method with the trigger active: rotation 0 / rotation 2 (rotation 2 only for the argmax and its neighbours). Bold: the chosen rung (tie-break included); $^\dagger$: the member died. Produced by \rl{scripts/43\_tuning\_tables.py}.}
+  \label{tab:tune_rates_small}
+\end{table}

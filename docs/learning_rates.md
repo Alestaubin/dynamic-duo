@@ -169,17 +169,51 @@ Experiments A and B use the 04b conservative / stress rates; B1 and B2 use ViT r
 | vitb16_rn50v1 | heldout x4 rounds | B | 0.5, 256 | 3.5e-5 (04b stress) | 2.2e-5 (04b conservative) | 0 | summary_heldout.json |
 | vitb16_rn50v1 | heldout x4 rounds | H | 2, 256 | 1.26e-5 (04b conservative) | 2.2e-5 (04b conservative) | 0 (rotations 0,2) | 2 runs, no summary (screening runs, scripts/37b_screen_resets_stress.py) |
 | vitb16_rn50v1 | heldout x4 rounds | S | 2, 256 | 1.4e-4 (TRIAL: above the 04b stress rate) | 5e-4 (TRIAL: above the 04b stress rate) | 0,1 (rotations 0,1,2,3) | 8 runs, no summary (screening runs, scripts/37b_screen_resets_stress.py) |
-| vitb16_rn50v1 | heldout x4 rounds | live resets (12 conditions: both_fast_vs_slow, boundary, fixed1000, fixed2000, fixed250, fixed500, gap_fast_vs_slow, none, oracle, own_cusum, own_fast_vs_slow, own_level) | 2, 256 | 1.4e-4 (TRIAL: above the 04b stress rate) | 5e-4 (TRIAL: above the 04b stress rate) | 0 (rotations 0,2) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: fixed1000) | 0.5, 256 | 4.95e-5 (reset-tuning ladder rung) | 3.54e-4 (reset-tuning ladder rung) | 0 (rotations 0) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: fixed1000) | 0.5, 256 | 7e-5 (reset tuning, chosen for fixed1000) | 5e-4 (reset tuning, chosen for fixed1000, gap_fast_vs_slow) | 0 (rotations 0,1,2,3) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: fixed1000) | 0.5, 256 | 7e-5 (reset tuning, chosen for fixed1000) | 3.54e-4 (reset-tuning ladder rung) | 0 (rotations 2) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: fixed1000) | 0.5, 256 | 9.9e-5 (reset-tuning ladder rung) | 5e-4 (reset tuning, chosen for fixed1000, gap_fast_vs_slow) | 0 (rotations 2) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: fixed500) | 0.5, 256 | 1.98e-4 (reset-tuning ladder rung) | 1.41e-3 (reset-tuning ladder rung) | 0 (rotations 0,2) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: fixed500) | 0.5, 256 | 1.4e-4 (reset tuning, chosen for fixed500, gap_fast_vs_slow) | 1e-3 (reset tuning, chosen for own_cusum) | 0 (rotations 2) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: none) | 0.5, 256 | 1.26e-5 (reset tuning, chosen for no_reset_conservative) | 2.2e-5 (reset tuning, chosen for no_reset_conservative) | 0 (rotations 0,1,2,3) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: none) | 0.5, 256 | 1.75e-5 (reset tuning, chosen for no_reset_tuned) | 3.1e-5 (reset tuning, chosen for no_reset_tuned) | 0 (rotations 0,1,2,3) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: none) | 0.5, 256 | 1.26e-5 (reset tuning, chosen for no_reset_conservative) | 3.1e-5 (reset tuning, chosen for no_reset_tuned) | 0 (rotations 2) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: none) | 0.5, 256 | 1.75e-5 (reset tuning, chosen for no_reset_tuned) | 4.4e-5 (reset-tuning ladder rung) | 0 (rotations 2) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (1 conditions: none) | 0.5, 256 | 2.45e-5 (reset-tuning ladder rung) | 6.25e-5 (reset-tuning ladder rung) | 0 (rotations 2) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (12 conditions: both_fast_vs_slow, boundary, fixed1000, fixed2000, fixed250, fixed500, gap_fast_vs_slow, none, oracle, own_cusum, own_fast_vs_slow, own_level) | 2, 256 | 1.4e-4 (reset tuning, chosen for fixed500, gap_fast_vs_slow) | 5e-4 (reset tuning, chosen for fixed1000, gap_fast_vs_slow) | 0 (rotations 0,2) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (2 conditions: fixed1000, fixed500) | 0.5, 256 | 1.4e-4 (reset tuning, chosen for fixed500, gap_fast_vs_slow) | 5e-4 (reset tuning, chosen for fixed1000, gap_fast_vs_slow) | 0 (rotations 0) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (2 conditions: fixed1000, fixed500) | 0.5, 256 | 2.8e-4 (reset tuning, chosen for own_cusum) | 1e-3 (reset tuning, chosen for own_cusum) | 0 (rotations 0) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (2 conditions: fixed1000, fixed500) | 0.5, 256 | 3.5e-5 (reset-tuning ladder rung) | 1.25e-4 (reset-tuning ladder rung) | 0 (rotations 0) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (2 conditions: fixed1000, fixed500) | 0.5, 256 | 7e-5 (reset tuning, chosen for fixed1000) | 2.5e-4 (reset-tuning ladder rung) | 0 (rotations 0) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (2 conditions: fixed1000, fixed500) | 0.5, 256 | 9.9e-5 (reset-tuning ladder rung) | 7.07e-4 (reset tuning, chosen for fixed500) | 0 (rotations 0,2) | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | heldout x4 rounds | live resets (2 conditions: fixed1000, fixed500) | 0.5, 256 | 1.4e-4 (reset tuning, chosen for fixed500, gap_fast_vs_slow) | 7.07e-4 (reset tuning, chosen for fixed500) | 0 (rotations 0,1,2,3) | scripts/38_run_reset_live.py, out/results/reset_live/ |
 | vitb16_rn50v1 | test | A | 2, 256 | 1.26e-5 (04b conservative) | 2.5e-4 (04b stress) | 0 | summary__nnn_bt256_beta2.json |
 | vitb16_rn50v1 | test | B1 | 1, 256 | 1.4e-4 (TRIAL: above the 04b stress rate) | 2.2e-5 (04b conservative) | 0 | summary__nnn_bt256_beta1.json |
 | vitb16_rn50v1 | test | B1 | 2, 256 | 1.4e-4 (TRIAL: above the 04b stress rate) | 2.2e-5 (04b conservative) | 0 | summary__nnn_bt256_beta2.json |
 | vitb16_rn50v1 | test | B2 | 2, 256 | 2.8e-4 (TRIAL: above the 04b stress rate) | 2.2e-5 (04b conservative) | 0 | summary__nnn_bt256_beta2.json |
 | vitb16_rn50v1 | test | T | 2, 256 | 1.4e-4 (TRIAL: above the 04b stress rate) | 5e-4 (TRIAL: above the 04b stress rate) | 0,1,2 | 3 runs, no summary (screening runs, scripts/37b_screen_resets_stress.py) |
-| vitb16_rn50v1 | test | live resets (9 conditions: both_fast_vs_slow, boundary, fixed1000, gap_fast_vs_slow, none, oracle, own_cusum, own_fast_vs_slow, own_level) | 2, 256 | 1.4e-4 (TRIAL: above the 04b stress rate) | 5e-4 (TRIAL: above the 04b stress rate) | 0,1,2 | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | test | live resets (10 conditions: both_fast_vs_slow, boundary, fixed1000, fixed500, gap_fast_vs_slow, none, oracle, own_cusum, own_fast_vs_slow, own_level) | 2, 256 | 1.4e-4 (reset tuning, chosen for fixed500, gap_fast_vs_slow) | 5e-4 (reset tuning, chosen for fixed1000, gap_fast_vs_slow) | 0,1,2 | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | test | live resets (5 conditions: fixed1000, fixed1000__order0, fixed1000__order1, fixed1000__order2, fixed1000__order3) | 0.5, 256 | 7e-5 (reset tuning, chosen for fixed1000) | 5e-4 (reset tuning, chosen for fixed1000, gap_fast_vs_slow) | 0 | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | test | live resets (5 conditions: fixed500, fixed500__order0, fixed500__order1, fixed500__order2, fixed500__order3) | 0.5, 256 | 1.4e-4 (reset tuning, chosen for fixed500, gap_fast_vs_slow) | 7.07e-4 (reset tuning, chosen for fixed500) | 0 | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | test | live resets (5 conditions: none, none__order0, none__order1, none__order2, none__order3) | 0.5, 256 | 1.26e-5 (reset tuning, chosen for no_reset_conservative) | 2.2e-5 (reset tuning, chosen for no_reset_conservative) | 0 | scripts/38_run_reset_live.py, out/results/reset_live/ |
+| vitb16_rn50v1 | test | live resets (5 conditions: none, none__order0, none__order1, none__order2, none__order3) | 0.5, 256 | 1.75e-5 (reset tuning, chosen for no_reset_tuned) | 3.1e-5 (reset tuning, chosen for no_reset_tuned) | 0 | scripts/38_run_reset_live.py, out/results/reset_live/ |
+
+**Rates tuned for resetting** (stages 2 and 3 of the reset tuning, held-out stream only; the configurations frozen for the final test in `out/results/reset_tune/final_configs.json`, chosen by `scripts/40_tune_reset.py`, run by `scripts/42_final_test.py`). A run of the table above that is not one of these is a rung of a ladder.
+
+| method | condition (rule and threshold) | ViT LR | ResNet LR |
+|---|---|---|---|
+| No reset, accuracy-tuned rates | `none` | 1.75e-5 | 3.1e-5 |
+| No reset, conservative rates | `none` | 1.26e-5 | 2.2e-5 |
+| Every 500 steps | `fixed500` | 1.4e-4 | 7.07e-4 |
+| Every 1,000 steps | `fixed1000` | 7e-5 | 5e-4 |
+| Own fast/slow trigger | `own_fast_vs_slow@0.7` | 5.6e-4 | 8.84e-5 |
+| Gap fast/slow trigger | `gap_fast_vs_slow@1` | 1.4e-4 | 5e-4 |
+| Own CUSUM trigger | `own_cusum@0.25` | 2.8e-4 | 1e-3 |
+
 
 ## 5. Planned, not yet run
 
 - **Rates for a resetting scheme (Vanilla DD): not tuned yet.** The 04b rates are the largest rates that never collapse WITHOUT a reset, so they are expected to be too low once collapses are caught: on the held-out shifts a model that starts every shift from source weights (the idealised reset at every boundary) scores 45.7 for the ResNet at its episodic 5e-4 against 41.2 at the 04b conservative rate; for the ViT 51.8 against 51.6. They must be tuned WITH the reset rule running, on the held-out stream x 4 rounds (live runs, whole-stream accuracy with the resets counted), separately per rule family and for the oracle trigger.
 - The B1 setting (ViT 1.4e-4 (trial), ResNet 2.2e-5 (04b conservative), test stream, beta 2) stays as the qualitative stress case for the reset plots; it is not a tuned setting.
 
-_Generated 2026-10-26 20:24 -0400 by src/utils/rates_sheet.py._
+_Generated 2026-10-28 10:53 -0400 by src/utils/rates_sheet.py._

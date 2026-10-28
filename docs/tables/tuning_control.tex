@@ -1,0 +1,20 @@
+\begin{table}[t]
+  \centering\small\setlength{\tabcolsep}{4pt}
+  \begin{tabular}{@{}lccccccc@{}}
+    \toprule
+    & Duo & \vit{} & \rn{} & Resets/1,000 & Duo: rule $-$ random & \vit{} & \rn{} \\
+    \midrule
+    The rule itself & 57.8 & 54.5 & 41.1 & 6.7 / 0.6 & -- & -- & -- \\
+    \midrule
+    Random, draw 0 & 55.0 & 43.6 & 41.8 & 6.7 / 0.6 & +2.84$\pm$1.08 (9/16) & +10.9$\pm$4.0 & -0.69$\pm$0.55 \\
+    Random, draw 1 & 54.0 & 41.9 & 41.2 & 6.7 / 0.6 & +3.78$\pm$1.19 (12/16) & +12.5$\pm$3.9 & -0.06$\pm$0.63 \\
+    Random, draw 2 & 52.9 & 35.4 & 41.0 & 6.7 / 0.6 & +4.93$\pm$1.29 (13/16) & +19.1$\pm$5.3 & +0.10$\pm$0.55 \\
+    Random, draw 3 & 53.0 & 39.0 & 41.2 & 6.7 / 0.6 & +4.77$\pm$1.54 (12/16) & +15.5$\pm$4.9 & -0.03$\pm$0.57 \\
+    Random, draw 4 & 55.6 & 45.5 & 41.5 & 6.7 / 0.6 & +2.15$\pm$0.69 (13/16) & +9.0$\pm$2.9 & -0.34$\pm$0.38 \\
+    \midrule
+    Mean of the draws & 54.1 & 41.1 & 41.3 & -- & +3.69 & +13.4 & -0.20 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Stage 4, held-out validation rotation 1: \rl{own\_fast\_vs\_slow} ($\delta=0.7$; \vit{} $5.6{\cdot}10^{-4}$, \rn{} $8.84{\cdot}10^{-5}$) against a trigger that resets each member as often as the rule did, at random steps (five draws). Accuracy (\%) and the paired difference per visit (mean$\pm$SE over the 16 visits; visits won by the rule). The rule's advantage is almost all in the \vit{}.}
+  \label{tab:tune_control}
+\end{table}

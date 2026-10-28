@@ -228,7 +228,16 @@ def experiments_section(root: Path) -> list[str]:
                      "scripts/38_run_reset_live.py, out/results/reset_live/"))
     out = ["| duo | stream | experiment | gate (beta, b_t) | ViT LR (how found) | ResNet LR (how found) | seed | summary file |", "|---|---|---|---|---|---|---|---|"]
 
-    def how(duo, side, lr):
+    chosen_live: list = []                      # (side, lr, method name): the frozen configurations of the reset tuning (scripts/40, scripts/42)
+    cfg_path = root / "out" / "results" / "reset_tune" / "final_configs.json"
+    cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {"methods": []}
+    for m in cfg["methods"]:
+        chosen_live += [("large", m["lrs"][0], m["name"]), ("small", m["lrs"][1], m["name"])]
+
+    def how(duo, side, lr, live=False):
+        if live:
+            names = sorted({n for sd, x, n in chosen_live if sd == side and abs(x - lr) <= 1e-6 * lr})
+            return f"reset tuning, chosen for {', '.join(names)}" if names else "reset-tuning ladder rung"
         sel = tuned.get(duo, {}).get("sides", {}).get(side)
         if not sel:
             return "explicit"
@@ -239,7 +248,15 @@ def experiments_section(root: Path) -> list[str]:
         return "TRIAL: above the 04b stress rate" if sel["stress"] and lr > sel["stress"] else "explicit"
 
     for duo, stream, name, beta, b_t, lrs, seed, fname in sorted(rows, key=lambda r: (r[0], r[1], r[2])):
-        out.append(f"| {duo} | {stream} | {name} | {beta:g}, {b_t} | {lr_text(lrs[0])} ({how(duo, 'large', lrs[0])}) | {lr_text(lrs[1])} ({how(duo, 'small', lrs[1])}) | {seed} | {fname} |")
+        live = name.startswith("live resets")
+        out.append(f"| {duo} | {stream} | {name} | {beta:g}, {b_t} | {lr_text(lrs[0])} ({how(duo, 'large', lrs[0], live)}) | {lr_text(lrs[1])} ({how(duo, 'small', lrs[1], live)}) | {seed} | {fname} |")
+    out.append("")
+    if cfg["methods"]:
+        out += ["**Rates tuned for resetting** (stages 2 and 3 of the reset tuning, held-out stream only; the configurations frozen for the final test in `out/results/reset_tune/final_configs.json`, "
+                "chosen by `scripts/40_tune_reset.py`, run by `scripts/42_final_test.py`). A run of the table above that is not one of these is a rung of a ladder.", "",
+                "| method | condition (rule and threshold) | ViT LR | ResNet LR |", "|---|---|---|---|"]
+        out += [f"| {m['label']} | `{m['cond']}` | {lr_text(m['lrs'][0])} | {lr_text(m['lrs'][1])} |" for m in cfg["methods"]]
+        out.append("")
     return out + [""]
 
 

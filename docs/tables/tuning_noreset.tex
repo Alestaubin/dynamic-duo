@@ -1,0 +1,41 @@
+\begin{table}[t]
+  \centering\small
+  \begin{tabular}{@{}llc@{}}
+    \toprule
+    Member & Rate & Own accuracy, rotation 0 / rotation 2 \\
+    \midrule
+    ViT & $2.2\!\times\!10^{-6}$ & 49.60 \\
+    ViT & $3.1\!\times\!10^{-6}$ & 49.86 \\
+    ViT & $4.4\!\times\!10^{-6}$ & 50.20 \\
+    ViT & $6.2\!\times\!10^{-6}$ & 50.62 \\
+    ViT & $8.75\!\times\!10^{-6}$ & 51.07 \\
+    ViT & $1.26\!\times\!10^{-5}$ & 51.62 / 51.62 \\
+    ViT & $1.75\!\times\!10^{-5}$ & \textbf{52.02 / 51.97} \\
+    ViT & $2.45\!\times\!10^{-5}$ & 51.47 / 50.09 \\
+    ViT & $3.5\!\times\!10^{-5}$ & 45.25 \\
+    ViT & $4.9\!\times\!10^{-5}$ & 31.64 \\
+    ViT & $7\!\times\!10^{-5}$ & 43.08 \\
+    ViT & $9.8\!\times\!10^{-5}$ & 36.68 \\
+    ViT & $1.4\!\times\!10^{-4}$ & 40.42 \\
+    ViT & $1.96\!\times\!10^{-4}$ & 39.50 \\
+    ViT & $2.8\!\times\!10^{-4}$ & 38.20 \\
+    ResNet & $1.6\!\times\!10^{-5}$ & 40.79 \\
+    ResNet & $2.2\!\times\!10^{-5}$ & 41.21 \\
+    ResNet & $3.1\!\times\!10^{-5}$ & \textbf{41.51 / 41.56} \\
+    ResNet & $4.4\!\times\!10^{-5}$ & 41.60 / 41.62 \\
+    ResNet & $6.25\!\times\!10^{-5}$ & 41.33 / 41.33 \\
+    ResNet & $9\!\times\!10^{-5}$ & 40.57 \\
+    ResNet & $1.25\!\times\!10^{-4}$ & 38.26 \\
+    ResNet & $1.75\!\times\!10^{-4}$ & 32.52 \\
+    ResNet & $2.5\!\times\!10^{-4}$ & 30.13 \\
+    ResNet & $3.5\!\times\!10^{-4}$ & 23.55 \\
+    ResNet & $5\!\times\!10^{-4}$ & 23.69 \\
+    ResNet & $7\!\times\!10^{-4}$ & 21.84 \\
+    ResNet & $1\!\times\!10^{-3}$ & 19.86 \\
+    ResNet & $1.4\!\times\!10^{-3}$ & 18.07 \\
+    ResNet & $2\!\times\!10^{-3}$ & 16.09 \\
+    \bottomrule
+  \end{tabular}
+  \caption{No reset: the ladder of the continual-TTA tuner (04b), each member scored on its own accuracy; the argmax and its neighbours were also run on rotation 2. Bold: the accuracy-tuned rate. The conservative pair of 04b ($1.26\!\times\!10^{-5}$ / $2.2\!\times\!10^{-5}$) is a stability rule, reported beside it.}
+  \label{tab:tune_noreset}
+\end{table}

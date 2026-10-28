@@ -88,6 +88,53 @@ class ScheduleTrigger(Trigger):
         return {"trigger": self.name, "period": self.period}
 
 
+class StaggeredScheduleTrigger(Trigger):
+    """The ResNet every `period` adaptation steps and the ViT every `period` steps `offset` steps later (default half a period): a schedule whose two
+    members are never reset together, the pattern the gap rule produces by itself. Label-free and blind: the control for 'does the alternation explain it'."""
+
+    def __init__(self, period: int, offset: int | None = None):
+        if period < 2:
+            raise ValueError(f"period must be at least 2, got {period}")
+        self.period, self.offset, self.name = int(period), int(period // 2 if offset is None else offset), f"staggered{int(period)}"
+
+    def after_batch(self, *, step, position, records, correct):
+        out = []
+        if step % self.period == 0:
+            out.append(("small", self.name))
+        if (step - self.offset) % self.period == 0 and step > self.offset:
+            out.append(("large", self.name))
+        return out
+
+    def summary(self) -> dict:
+        return {"trigger": self.name, "period": self.period, "offset": self.offset}
+
+
+class RandomTrigger(Trigger):
+    """The control for detection: each member is reset the same number of times as in a reference run (`counts`, resets per member) but at RANDOM
+    adaptation steps, uniform over the stream, at least `min_gap` steps apart (a rule's cooldown is K proxy batches) and none in the first `min_gap`
+    steps (the warm-up). `draw` seeds the choice. If it does not beat the rule it copies, the rule provides reset frequency, not detection."""
+
+    def __init__(self, counts: Mapping[str, int], total_steps: int, *, draw: int = 0, min_gap: int = 80, name: str | None = None):
+        self.counts, self.total_steps, self.draw, self.min_gap = dict(counts), int(total_steps), int(draw), int(min_gap)
+        self.name = name or f"random{draw}"
+        rng = np.random.default_rng(10_007 + self.draw)
+        self.at: dict[str, set[int]] = {}
+        for side in SIDES:
+            n = int(self.counts.get(side, 0))
+            span = self.total_steps - self.min_gap * (n + 1)
+            if n and span < 0:
+                raise ValueError(f"{n} resets of the {side} member with a gap of {self.min_gap} do not fit in {self.total_steps} steps")
+            # n sorted draws from a shrunken range, then spread by the gap: they are distinct and at least min_gap apart (the standard trick for spaced samples)
+            raw = np.sort(rng.integers(0, span + 1, size=n)) if n else np.zeros(0, dtype=int)
+            self.at[side] = {int(x) + self.min_gap * (i + 1) for i, x in enumerate(raw)}
+
+    def after_batch(self, *, step, position, records, correct):
+        return [(s, self.name) for s in SIDES if step in self.at[s]]
+
+    def summary(self) -> dict:
+        return {"trigger": self.name, "counts": self.counts, "draw": self.draw, "min_gap": self.min_gap, "steps": {s: sorted(v) for s, v in self.at.items()}}
+
+
 class BoundaryTrigger(Trigger):
     name, new_gate_per_part = "boundary", True
 
@@ -348,4 +395,21 @@ if __name__ == "__main__":
         raise AssertionError("the oracle needs a frozen copy")
     except ValueError:
         pass
+    # ---- the controls: random resets with the counts of a reference run, and the staggered schedule ------------------------------------------
+    rnd = RandomTrigger({"large": 7, "small": 12}, 12_000, draw=3, min_gap=80)
+    for side, n in (("large", 7), ("small", 12)):
+        ts_ = sorted(rnd.at[side])
+        assert len(ts_) == n and ts_[0] >= 80 and ts_[-1] <= 12_000 and all(b - a >= 80 for a, b in zip(ts_, ts_[1:])), (side, ts_)
+    assert RandomTrigger({"large": 7, "small": 12}, 12_000, draw=3).at == rnd.at and RandomTrigger({"large": 7, "small": 12}, 12_000, draw=4).at != rnd.at
+    hits = [(st, f) for st in range(1, 12_001) for f in rnd.after_batch(step=st, position=0, records=[], correct={})]
+    assert len(hits) == 19 and {w for _, (_, w) in hits} == {"random3"}
+    try:
+        RandomTrigger({"large": 200}, 1000, min_gap=80)
+        raise AssertionError("200 resets cannot fit")
+    except ValueError:
+        pass
+    stg = StaggeredScheduleTrigger(10)
+    seq = [(st, m) for st in range(1, 31) for m, _ in stg.after_batch(step=st, position=0, records=[], correct={})]
+    assert seq == [(10, "small"), (15, "large"), (20, "small"), (25, "large"), (30, "small")], seq      # the ViT half a period after each ResNet reset
+    print("  random-matched and staggered triggers: counts, spacing, reproducibility, alternation")
     print("live_runs self-test passed")

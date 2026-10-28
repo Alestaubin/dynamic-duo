@@ -14,9 +14,9 @@
 \newcommand{\vit}{ViT-B/16}
 \newcommand{\rn}{ResNet-50}
 
-\title{Choosing a reset rule: offline screening and live runs at fixed collapse rates}
+\title{Label-free resets for a continual duo: screening, tuning and a test-stream comparison}
 \author{Dynamic Duos, \vit{} + \rn{} V1, Tent, Vanilla DD}
-\date{26 October 2026}
+\date{28 October 2026}
 
 \begin{document}
 \maketitle
@@ -26,7 +26,7 @@ A reset puts a member back to its source weights. We want a rule that flags a co
 We compare 15 detector families on stored runs (the \emph{screen}), then run the five best live with real resets (Section~\ref{sec:live}).
 
 The setting is the one of the gate-stress experiments: Vanilla DD (each member adapts with Tent on its own entropy, the gate sits outside the loop), the nuclear-norm proxy with proxy batch $b_t = 256$, gate $\beta = 2$ ($\beta$ changes neither the members nor the proxy values).
-The learning rates are \emph{fixed} to values that collapse both members (stress pair: \vit{} $1.4{\cdot}10^{-4}$, \rn{} $5{\cdot}10^{-4}$). The rates tuned for stability without resets (the 04b rates) are too low for a resetting scheme, so rates are not tuned here.
+In the screen and the first live runs the learning rates are \emph{fixed} to values that collapse both members (stress pair: \vit{} $1.4{\cdot}10^{-4}$, \rn{} $5{\cdot}10^{-4}$); the rates tuned for stability without resets (the 04b rates) are too low for a resetting scheme. Sections~\ref{sec:tuning}--\ref{sec:final} then tune the rates and thresholds of every method on the held-out stream under fixed rules and compare the tuned methods once on the test stream.
 
 \section{The rules}
 \paragraph{Signals.} Each proxy batch gives each member a proxy value $r^{(m)}_t \in (0,1)$; let $s^{(m)}_t = \operatorname{logit}(r^{(m)}_t)$ (clipped). A member's rule watches either its own score (\emph{own}, $s^{(m)}_t$), its gap to the partner (\emph{gap}, $s^{(m)}_t - s^{(m')}_t$, antisymmetric between the two members), or either of the two (\emph{both}: gap OR own, same parameters).
@@ -301,7 +301,7 @@ The loop was checked against the earlier loops: on the real models a live run wi
   \item \textbf{Oracle and episodic are not ceilings.} The oracle scores 52.6 on test, below \rl{gap}, the episodic reset and the 1,000-step schedule. The episodic reset lets the \vit{} collapse inside a single shift (fog) and it stays dead until the next boundary (Figure~\ref{fig:overlay-test}, middle panel).
   \item \textbf{Rules protect the \vit{}, schedules protect the \rn{}} (Table~\ref{tab:livemem}). On test the \vit{} scores 48.8--50.0 under the rules and 49.2 under the oracle, but 44.5--47.3 under the schedules and the episodic reset; the \rn{} scores 42.6--43.8 under those and 26.5--40.9 under the rules.
   \item \textbf{How often you reset matters.} The fixed periods score 54.3, 55.4, 55.3 and 53.5 on held-out for 250, 500, 1000 and 2000 steps: too frequent costs adaptation, too rare lets the collapse through. The held-out pick, 500, does not carry to test (51.7, against 52.7 for 1000).
-  \item \textbf{At matched reset frequency} \rl{gap\_fast\_vs\_slow} (2--3 resets per 1,000 batches per member) beats the 1,000-step schedule (3.8) by 1.2 points on held-out and 1.1 on test. The own rules reset about 3 to 13 times less often than that schedule and land within it: $+0.1$ to $+0.4$ on held-out, $-0.3$ to $-0.9$ on test; \rl{both\_fast\_vs\_slow} is $-1.8$ on test.
+  \item \textbf{At matched reset frequency} \rl{gap\_fast\_vs\_slow} (2--3 resets per 1,000 batches per member) beats the 1,000-step schedule (3.8) by 1.2 points on held-out and 1.1 on test, but only the held-out difference is outside the noise (Table~\ref{tab:paired}: $+1.25 \pm 0.28$ against $+1.13 \pm 1.02$ on test, a win in 8 of 15 test visits). The own rules reset about 3 to 13 times less often than that schedule and land within it: $+0.1$ to $+0.4$ on held-out, $-0.3$ to $-0.9$ on test, all within one standard error; \rl{both\_fast\_vs\_slow} is $-1.8$ on test.
   \item \textbf{The audit does not predict harm.} 91\% of \rl{gap}'s test resets are false (66\% on held-out), against 5\% for \rl{own\_cusum}, 0\% for \rl{own\_level} and 29\% for \rl{own\_fast}, yet \rl{gap} wins. Its resets alternate (Figure~\ref{fig:gap}): in each test seed all 18 \vit{} resets follow a \rn{} reset 20--69k images earlier. A plausible reading, not checked here, is that a reset member's proxy dips and recovers, which moves its partner's gap, so the rule acts partly as an emergent schedule.
 \end{itemize}
 
@@ -336,6 +336,27 @@ The loop was checked against the earlier loops: on the real models a live run wi
   \end{tabular}
 \end{table}
 
+\begin{table}[t]
+  \centering\footnotesize\setlength{\tabcolsep}{5pt}
+  \caption{Paired differences of the live runs of Table~\ref{tab:live} in the duo's accuracy (points), $A - B$ on the same images: mean $\pm$ standard error over visits, and the number of visits in which $A$ is better. Held-out: the visits of the two rotations pooled (32); test: the three seeds averaged per visit (15 visits). Visits are not independent (a collapse carries into the next visit; the two rotations hold the same images in another order), so the standard error is a noise floor, not a confidence interval. Computed by \rl{scripts/41\_paired\_comparisons.py}.}
+  \label{tab:paired}
+  \begin{tabular}{@{}l rr rr@{}}
+    \toprule
+    & \multicolumn{2}{c}{held-out (32 visits)} & \multicolumn{2}{c}{test (15 visits)} \\
+    \cmidrule(lr){2-3} \cmidrule(lr){4-5}
+    $A - B$ & diff. & wins & diff. & wins \\
+    \midrule
+    \rl{gap\_fast\_vs\_slow} $-$ every 1,000 steps & $+1.25 \pm 0.28$ & 24 & $+1.13 \pm 1.02$ & 8 \\
+    \rl{gap\_fast\_vs\_slow} $-$ episodic & $+0.10 \pm 0.19$ & 12 & $+0.51 \pm 1.05$ & 6 \\
+    \rl{gap\_fast\_vs\_slow} $-$ oracle & $-0.41 \pm 0.22$ & 12 & $+1.28 \pm 0.48$ & 9 \\
+    \rl{own\_fast\_vs\_slow} $-$ every 1,000 steps & $+0.34 \pm 0.41$ & 15 & $-0.27 \pm 1.30$ & 6 \\
+    \rl{own\_cusum} $-$ every 1,000 steps & $+0.40 \pm 0.46$ & 16 & $-0.89 \pm 1.47$ & 7 \\
+    \rl{own\_fast\_vs\_slow} $-$ \rl{gap\_fast\_vs\_slow} & $-0.90 \pm 0.37$ & 9 & $-1.40 \pm 0.55$ & 3 \\
+    Episodic $-$ every 1,000 steps & $+1.14 \pm 0.22$ & 24 & $+0.62 \pm 0.53$ & 11 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.92\linewidth]{figures/reset_live/gap_fast_vs_slow_test_seed0.pdf}
@@ -352,15 +373,141 @@ The loop was checked against the earlier loops: on the real models a live run wi
 
 \paragraph{What this does and does not show.} At fixed stress rates, whether a reset helps depends on how often it happens as much as on whether it follows a collapse, so the comparison mixes detection with reset frequency. What the runs support: the label-free rules rescue the duo from a collapse that costs 22 points against the frozen duo on test, match or beat the best blind schedule (the \rl{gap} rule by about 1 point, the own rules within 1 point with far fewer resets), and the offline screen predicted the live order on the test stream. They do not show that the rules detect collapses better than a schedule would at its own best rate.
 
+\section{Tuning protocol for the second stage}\label{sec:tuning}
+The live runs of Section~\ref{sec:live} used the stress rates and compare ways of deciding a reset at a fixed collapse rate. They leave three things open: whether a reset method beats a no-reset duo that is itself tuned for continual adaptation (on held-out, the tuned no-reset Vanilla DD already scores 54.1, against 55.4--56.5 for the rules, so the margin is 1.3--2.4 points, not the 3.3--4.4 over the frozen duo); whether the rates, thresholds and periods were chosen with the same care for every method; and whether a rule's timing adds anything to its reset frequency. This section fixes how every method is tuned and compared. The rules below were written down before any tuning run (\path{plan.md}) and are implemented in \path{src/reset/tuning.py}, so that no choice is made by eye.
+
+\paragraph{What is compared, and what each has to tune (Table~\ref{tab:methods}).} All methods are Vanilla DD with Tent; every adapting method has two rates (the \vit{}'s and the \rn{}'s). A reset method adds a second quantity: a rule's detection threshold (its sensitivity dial) or a schedule's period. The two interact: the rate decides how fast a member collapses, the threshold or period how often it is reset. A full grid is too expensive, so they are tuned by \emph{alternating} search: the rates at the screened threshold, then the threshold at those rates, then the rates again one rung either side of the choice at the chosen threshold, until nothing changes. All choices use the four held-out shifts only (speckle noise, Gaussian blur, spatter, saturate; severity 5); the test stream is touched once, at the end.
+
+\begin{table}[t]
+  \centering\small
+  \caption{The methods of the second stage. The gate is $\beta = 0.5$ for every method (the members and the proxy values do not depend on $\beta$, so the gate is an evaluation choice); the fixed-TS duo is scored on the same runs. The reset at shift boundaries reuses the episodic runs (script 03); only the gate is rescored.}
+  \label{tab:methods}
+  \begin{tabular}{@{}lll@{}}
+    \toprule
+    method & tuned & members \\
+    \midrule
+    Frozen duo & nothing & -- \\
+    No reset (baseline 2) & two rates & decoupled \\
+    Reset every 500 / 1,000 steps & two rates (period fixed) & decoupled \\
+    \rl{own\_fast\_vs\_slow}, \rl{own\_cusum} & two rates, threshold & decoupled \\
+    \rl{gap\_fast\_vs\_slow} & the pair of rates, threshold & coupled \\
+    Reset at shift boundaries & done (episodic rates) & decoupled \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Streams, rotations, runs.} The tuning stream is the four held-out shifts of 50,000 images each, four rounds, round $r$ rotated by $r$: 16 visits and 800,000 images. A \emph{rotation} $k \in \{0, 1, 2, 3\}$ is the same stream opening with shift $k$ (so the shifts follow other predecessors); rotations 0 and 2 are the \emph{tuning} rotations, rotations 1 and 3 \emph{validate} (nothing is chosen on them). A \emph{run} is one pass over one stream for one configuration (one method, one pair of rates): about 70 minutes on an L40S. A run stores the per-sample correctness of the gated duo, the fixed-TS duo and both members, and every reset.
+
+\paragraph{Objective and decoupling.} The score of a configuration is the whole-stream accuracy, averaged over the tuning rotations. For the decoupled methods (no reset, the schedules, the \rl{own\_*} rules) a member's trajectory depends only on its own rate and its own reset times: the gate sits outside the loop, and an \rl{own} rule reads only that member's proxy. One run therefore measures \emph{both} members at their rates, whatever the partner's rate is, and each rate is chosen on its member's own accuracy, in two independent ladders; the chosen pair is then run once as a pair and the gated duo reported. For the coupled rule (\rl{gap\_*}: the \vit{}'s resets depend on the \rn{}'s proxy) the pair of rates is one point of a plane and is scored by the gated duo. Thresholds are always scored by the gated duo.
+
+\paragraph{Ladders.} Rates live on the $\sqrt2$ grid of the earlier tuner, $\text{rate}(k) = a \cdot 2^{k/2}$ with anchor $a = 7{\cdot}10^{-5}$ (\vit{}) and $5{\cdot}10^{-4}$ (\rn{}), rounded to three digits. The first ladder uses every second rung (steps of 2): \vit{} $3.5 \cdot 10^{-5}, 7 \cdot 10^{-5}, 1.4 \cdot 10^{-4}, 2.8 \cdot 10^{-4}$ and \rn{} $1.25 \cdot 10^{-4}, 2.5 \cdot 10^{-4}, 5 \cdot 10^{-4}, 10^{-3}$, centred on the stress pair, and is run on rotation 0. A run pairs the two ladders rung by rung (that is why the decoupling matters: four runs give eight points).
+
+\paragraph{Selection rules (fixed in advance).}
+\begin{enumerate}
+  \item \textbf{Refine.} The best rung of rotation 0 must have both its $\sqrt2$ neighbours tried; if not, they are run and the best is recomputed, until it has. The best rung is then a local maximum of what was tried (``interior'').
+  \item \textbf{Second rotation.} The best rung and its two neighbours are run on rotation 2, and the choice among the three is made on the mean of the two rotations (visits pooled, 32).
+  \item \textbf{Ties.} Among the candidates within one \emph{paired} standard error of the best (the standard error of the per-visit differences to the best, so the shared difficulty of each visit cancels), take the one with the fewest resets per 1,000 proxy batches, then the lowest rate. Without this rule noise would pick the most aggressive rate among equals.
+  \item \textbf{No boundary, and a cap.} The chosen value must have a tried value on each side. If the tie-break pushed it to an end of the tried range, the next rung beyond is run on both tuning rotations and the choice is made again. A ladder is extended by at most two $\times 2$ steps (four $\sqrt2$ rungs) beyond its starting ladder on each side; the cap bounds rule~1 as well, and a value still at the capped end is reported as a plateau (a quantity that does not matter) instead of being chased. \emph{Correction made during the runs:} the first implementation enforced the cap only after a choice, so rule~1 would have kept running the neighbour of an argmax that crept down by hundredths per rung. This appeared on the threshold of \rl{own\_cusum} (Section~\ref{sec:tuneresults}), where the rung beyond the cap ($h = 0.2$) was about to be requested after $h = 0.25$ scored 57.84 against 57.83 at $h = 0.35$. The code was changed to apply the written rule (\path{src/reset/tuning.py}, with a self-test of a creeping ladder); every selection made before the change was recomputed and is unchanged.
+  \item \textbf{Guard.} A configuration in which the member is \emph{dead} (four consecutive windows of 5,120 images below 5\% accuracy) on a tuning rotation is excluded.
+  \item \textbf{Coupled rule.} A cell is a pair (\vit{} rung, \rn{} rung). Start on the diagonal of the two ladders; the best cell of rotation 0 must have its neighbourhood tried: the four axis neighbours (one member's rung up or down) and the two cells that scale both members together (the direction of the starting ladder), six runs; the best cell and its two best neighbours go to rotation 2; the chosen cell must again have its neighbourhood tried. The two off-diagonal corners of the full $3 \times 3$ block are not run.
+\end{enumerate}
+
+\paragraph{The no-reset baseline.} Its ladder already exists: the continual tuner (04b) ran 15 rungs per member on this very stream, whole-stream accuracy per rung. The same rules are applied to it (with rotation 2 added for the best rung and its neighbours), so the baseline is tuned by the same objective as the others. The 04b pair of ``conservative'' rates (one rung below the largest rate that stays stable) is reported next to it, because it is the safe choice a practitioner without a held-out stream would make.
+
+\paragraph{Thresholds.} The threshold ladder is the $\sqrt2$ grid anchored at the screened value ($\delta$ of \rl{fast\_vs\_slow}, $h$ of \rl{cusum}); the other parameters (the two averaging speeds, $\nu$, the warm-up $W_0$) stay as the screen selected them. It is run at the tuned rates with the same rules, scored by the gated duo; then the rates are rechecked one rung either side (alternating search).
+
+\paragraph{The screen's thresholds sat at the edge of its grid.} The first screen chose, at budget 1, the \emph{smallest} threshold of its grid for all three leaders ($\delta = 1.0$ for the two \rl{fast\_vs\_slow} rules, $h = 2.0$ for \rl{cusum}), so nothing said that a more sensitive threshold was not better. Table~\ref{tab:ladder} extends the sweep down (calibration pool S+H and, frozen, test T; the other parameters as selected). For \rl{gap\_fast\_vs\_slow} and \rl{own\_cusum} the grid edge was harmless: the next lower threshold exceeds the budget (1.57 and 1.57 false alarms per 1,000) without a shorter delay. For \rl{own\_fast\_vs\_slow} it was not: $\delta = 0.7$ stays within the budget (0.97) and has a shorter delay (104 against 113 batches), so the starting threshold of its tuning is $0.7$, not $1.0$. The calibration false-alarm rate grows steadily as the threshold falls (to 1.4--3.5 per 1,000 at the lowest values), so the ladders bracket the budget on both sides.
+
+\begin{table}[t]
+  \centering\small\setlength{\tabcolsep}{5pt}
+  \caption{Threshold ladders of the three leaders, other parameters as selected at budget 1. Calibration pool (S+H): false alarms per 1,000 proxy batches, miss rate, mean delay (256-image batches, a miss counts its whole stretch); test streams: false alarms. Bold: the setting with the shortest delay within 1 false alarm per 1,000 on the calibration pool. \rl{scripts/37c\_threshold\_ladder.py}.}
+  \label{tab:ladder}
+  \begin{tabular}{@{}l r rrr r@{}}
+    \toprule
+    rule & threshold & FA & miss & delay & test FA \\
+    \midrule
+    \rl{gap\_fast\_vs\_slow} & 0.35 & 2.92 & 0.27 & 74.0 & 2.74 \\
+    ($\delta$) & 0.5 & 2.14 & 0.23 & 108.8 & 2.47 \\
+     & 0.7 & 1.57 & 0.19 & 83.7 & 1.83 \\
+     & \textbf{1.0} & \textbf{0.91} & \textbf{0.35} & \textbf{109.6} & \textbf{1.19} \\
+     & 1.25 & 0.35 & 0.54 & 177.2 & 0.64 \\
+     & 1.5 & 0.09 & 0.54 & 194.8 & 0.27 \\
+    \midrule
+    \rl{own\_fast\_vs\_slow} & 0.35 & 1.38 & 0.27 & 104.5 & 1.64 \\
+    ($\delta$) & 0.5 & 1.19 & 0.27 & 108.1 & 1.46 \\
+     & \textbf{0.7} & \textbf{0.97} & \textbf{0.27} & \textbf{103.9} & \textbf{0.82} \\
+     & 1.0 & 0.69 & 0.31 & 112.8 & 0.27 \\
+     & 1.25 & 0.31 & 0.38 & 131.1 & 0.00 \\
+     & 1.5 & 0.00 & 0.46 & 232.4 & 0.00 \\
+    \midrule
+    \rl{own\_cusum} & 0.5 & 1.57 & 0.31 & 124.9 & 0.00 \\
+    ($h$) & 1 & 0.82 & 0.31 & 137.0 & 0.00 \\
+     & \textbf{2} & \textbf{0.72} & \textbf{0.31} & \textbf{133.2} & \textbf{0.00} \\
+     & 4 & 0.63 & 0.31 & 145.1 & 0.00 \\
+     & 8 & 0.63 & 0.31 & 147.8 & 0.00 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Controls and the final test.} Detection has to beat frequency. For the best rule a \emph{random} trigger resets each member the same number of times as the rule did on the same stream, at random times (five draws); if the rule does not beat it, what the rule provides is reset frequency, not detection. A \emph{staggered} schedule (both members on the same period, the \vit{} half a period later) is run only if the \rl{gap} rule wins, to test whether its alternation alone explains it. The final comparison runs every tuned configuration once on the test stream (15 corruptions, one pass) in five orderings of the 15 shifts, with the gated duo ($\beta = 0.5$) and the fixed-TS duo scored on each run, and paired differences over the shifts. Three claims are fixed in advance: (a) the best rule beats the tuned no-reset baseline by more than the paired standard error; (b) it beats the random control at matched reset counts; (c) the comparison with the boundary reset and the tuned schedules is reported whichever way it goes.
+
+\section{Results of the tuning}\label{sec:tuneresults}
+Everything in this section is held-out: the four shifts, rotations 0 and 2 to choose, rotations 1 and 3 only to validate. The tuning took about 115 runs of 68 minutes (the rotation-0 ladders, rotation 2 for each argmax and its neighbours, the extensions, the confirmations and the controls); the tables are generated from the stored runs by \rl{scripts/43\_tuning\_tables.py}. Throughout, the number to compare with is the tuned no-reset duo, 55.5 (Table~\ref{tab:tune_confirm}), not the 54.1 quoted earlier: that was the gate at $\beta = 2$; at $\beta = 0.5$ the same no-reset members score 55.5, so the room a reset method has is about a point smaller than Section~\ref{sec:tuning} first assumed.
+
+\paragraph{Rates under the active trigger (Tables~\ref{tab:tune_rates_large}--\ref{tab:tune_noreset}).}
+\begin{itemize}
+  \item \textbf{Without resets the two members tolerate very little.} The accuracy-tuned rates are $1.75 \cdot 10^{-5}$ (\vit{}, 52.0) and $3.1 \cdot 10^{-5}$ (\rn{}, 41.5), only 1.4 times the conservative pair of 04b; two rungs above, at $3.5 \cdot 10^{-5}$, the \vit{} is at 45 and at $4.9 \cdot 10^{-5}$ at 32 (Table~\ref{tab:tune_noreset}). The tuned no-reset duo gains 0.4 over the conservative one (55.5 against 55.1), a gain of the same order as the differences among the methods below.
+  \item \textbf{A schedule cannot improve the \vit{}.} Its best rates (1.4$\cdot 10^{-4}$ every 500 steps, 7$\cdot 10^{-5}$ every 1,000) give 51.5 and 51.4, below the tuned no-reset \vit{} (52.0): a periodic reset removes a healthy \vit{}'s progress as often as a collapsing one's. The schedules lift only the \rn{} (44.3 and 43.8, against 41.5 without resets), consistent with a slow decay that a periodic reset caps, and that is where their duo gain comes from.
+  \item \textbf{The \rl{own} rules let the \vit{} run at a much higher rate.} Because the reset fires when the \vit{}'s own proxy drops, the \vit{} can adapt at $2.8$--$5.6 \cdot 10^{-4}$, 16 to 32 times the no-reset optimum and 2 to 4 times a schedule's, and its accuracy rises to 54.5--54.8 (against 52.0). The optimum is interior: \rl{own\_fast\_vs\_slow} is best at $5.6 \cdot 10^{-4}$ (54.8; 54.5 at $7.9 \cdot 10^{-4}$) after its ladder had been extended three rungs above the original top ($2.8 \cdot 10^{-4}$), \rl{own\_cusum} at $2.8 \cdot 10^{-4}$ (54.6; 54.4 at $4 \cdot 10^{-4}$).
+  \item \textbf{They do nothing for the \rn{}.} Its best rates are the low ones ($8.8 \cdot 10^{-5}$ for \rl{own\_fast\_vs\_slow}, 41.1; $10^{-3}$ for \rl{own\_cusum}, 39.8 and 41.0 on the two rotations, on a ragged curve: 34 to 40 across its rungs), no better than the 41.5 without resets. The screen had warned of it: the \rn{} decays like a ramp that the fast/slow statistic detects late (delay about 150 batches against 11--32 for the \vit{}).
+  \item \textbf{The coupled rule helps both members a little.} The pair $(1.4 \cdot 10^{-4}, 5 \cdot 10^{-4})$ is the chosen cell (Table~\ref{tab:tune_rates_gap}); it is tied within one paired standard error with two neighbours, and the tie-break takes the lowest rates. Its \vit{} (53.6) is below the \rl{own} rules' and its \rn{} (43.7) above them.
+\end{itemize}
+
+\input{tables/tuning_rates_large.tex}
+\input{tables/tuning_rates_small.tex}
+\input{tables/tuning_rates_gap.tex}
+\input{tables/tuning_noreset.tex}
+
+\paragraph{Thresholds (Table~\ref{tab:tune_thresholds}).} Thresholds matter much less than rates. \rl{gap\_fast\_vs\_slow} has a clear interior optimum at $\delta = 1$ (56.2, 56.8, 57.3, 56.3 for $\delta = 0.5, 0.7, 1, 1.4$ on rotation 0, confirmed on rotation 2): below it the rule resets too often, above it too late, and its rates, tuned at $\delta = 1$, need no recheck. \rl{own\_fast\_vs\_slow} is flat between $\delta = 0.35$ and 0.7 (57.8--57.9) and loses 0.15 at 1; the choice, 0.7, is the base of the ladder and interior. \rl{own\_cusum} is a plateau: its duo accuracy creeps from 57.44 ($h = 2.8$) to 57.84 ($h = 0.25$), the number of resets is the same at every $h$ from 0.5 to 2.8 (4.8 per 1,000 batches for the \vit{}, 3.8 for the \rn{}), and only below about 0.35 does the \vit{} reset a little more (5.1--5.4). That is what one expects when a collapse is abrupt: the statistic crosses every threshold in the same batch, and a threshold only matters once noise can cross it. The ladder reached the cap of two extensions at $h = 0.25$, so the threshold is reported as a plateau at the capped end, not as a located optimum. Because $h$ changed from its base (2), its rates were rechecked one rung either side at $h = 0.25$ (alternating search; Section~\ref{sec:tuning}, last column of Tables~\ref{tab:tune_rates_large} and~\ref{tab:tune_rates_small}): the \vit{} stays at $2.8 \cdot 10^{-4}$ (54.7 on the two tuning rotations; 54.5 at $4 \cdot 10^{-4}$ and 54.1 at $2 \cdot 10^{-4}$) and the \rn{} at $10^{-3}$ (41.7; 34.4 at $7.1 \cdot 10^{-4}$ and 38.4 at $1.4 \cdot 10^{-3}$). Nothing changed, so the alternating search stopped, and \rl{own\_cusum} is final at $h = 0.25$ with the pair $(2.8 \cdot 10^{-4}, 10^{-3})$, confirmed on all four rotations (Table~\ref{tab:tune_confirm}).
+
+\input{tables/tuning_thresholds.tex}
+
+\paragraph{The tuned configurations (Table~\ref{tab:tune_confirm}).} On all four rotations the ordering is the same and the validation rotations agree with the tuning ones to within 0.3 (0.6 for the gap rule on rotation 1). Over the tuned no-reset duo (55.5) the three rules gain 1.5 to 2.4 points: \rl{own\_fast\_vs\_slow} (57.8--57.9) and \rl{own\_cusum} (57.6--57.9) about 2.3, \rl{gap\_fast\_vs\_slow} (56.7--57.3) 1.5; the schedules gain 0.7 (every 500 steps) and 0.4 (every 1,000). Paired over the 32 visits of the two validation rotations (nothing was chosen on them; visits are correlated, so the errors are a noise floor): \rl{own\_fast\_vs\_slow} $+2.3 \pm 0.6$, \rl{own\_cusum} $+2.2 \pm 0.5$, \rl{gap\_fast\_vs\_slow} $+1.4 \pm 0.3$, every 500 steps $+0.7 \pm 0.2$, every 1,000 steps $+0.4 \pm 0.2$; the accuracy-tuned no-reset rates over the conservative ones $+0.39 \pm 0.08$. Among the rules, \rl{own\_fast\_vs\_slow} and \rl{own\_cusum} are indistinguishable ($+0.16 \pm 0.29$) and both lead \rl{gap\_fast\_vs\_slow} by about two standard errors ($+0.9 \pm 0.4$ and $+0.7 \pm 0.3$); \rl{own\_fast\_vs\_slow} leads the 500-step schedule by $+1.6 \pm 0.6$.
+
+\input{tables/tuning_confirm.tex}
+
+\paragraph{Control: does the timing matter? (Table~\ref{tab:tune_control}).} For the rule that leads on validation, \rl{own\_fast\_vs\_slow}, five random triggers reset each member as many times as the rule did, at random steps, on validation rotation 1. Every draw is beaten: 52.9 to 55.6 against 57.8, differences of $+2.2$ to $+4.9$ points with paired standard errors of 0.7--1.5, and the rule wins 9 to 13 of the 16 visits. The advantage is almost entirely the \vit{} ($+9$ to $+19$ points; the \vit{} is 35--46 under random resets, presumably because a reset that misses the collapse leaves it collapsed for a long stretch, which the traces of the runs would show). The \rn{} is indistinguishable from random ($-0.7$ to $+0.1$, standard errors about 0.5): at about one reset per 1,000 batches the rule does for the \rn{} nothing a random reset would not. So on held-out the \emph{detection} adds to reset frequency for the \vit{}, and not for the \rn{}.
+
+\input{tables/tuning_control.tex}
+
+\section{Final test}\label{sec:final}
+Every configuration of Section~\ref{sec:tuneresults} was frozen in \path{out/results/reset_tune/final_configs.json} before the first test run and is run once on the test stream: the 15 corruptions at severity 5, one pass of 750,000 images, in five orderings (the standard order and CoTTA's random orders 0--3), with the gate at $\beta = 0.5$ and the fixed-TS duo scored on the same runs (\rl{scripts/42\_final\_test.py}). The control is one random draw per ordering, resetting each member as often as \rl{own\_fast\_vs\_slow} did on the same ordering. The frozen duo and the reset at every shift are the episodic runs of script 03 (order-independent). Paired differences are taken per corruption, each corruption's accuracy averaged over the orderings, with a bootstrap over the 15 corruptions. The orderings reuse the same images, so they are not independent replicates; the standard errors over orderings in Table~\ref{tab:final_test} are small for that reason.
+
+\input{tables/final_test_main.tex}
+\input{tables/final_test_paired.tex}
+
+\paragraph{Claim (a): the best rule beats the tuned no-reset duo --- it does, for all three rules.} Tuned without resets the duo scores 50.2 (conservative rates 49.8: $+0.45 \pm 0.15$ for the tuning, 12 of 15 corruptions), 4.1 points above the frozen duo. \rl{own\_fast\_vs\_slow} adds $+3.8 \pm 1.0$ (bootstrap interval $[+2.1, +5.9]$; 14 of 15 corruptions; positive in each of the five orderings, $+2.8$ to $+4.4$), \rl{own\_cusum} $+3.2 \pm 0.9$ ($[+1.6, +5.0]$; 14 of 15) and \rl{gap\_fast\_vs\_slow} $+2.8 \pm 0.5$ ($[+2.0, +3.8]$; 15 of 15). The two schedules add $+1.8$ and $+1.5$. The held-out ordering of the rules holds (\rl{own\_fast} 54.0, \rl{own\_cusum} 53.4, \rl{gap} 53.1), but on test the differences among the three rules are inside the noise: \rl{own\_fast} over \rl{gap} $+0.9 \pm 0.6$ ($[-0.2, +2.3]$), over \rl{own\_cusum} $+0.6 \pm 0.4$ ($[-0.2, +1.3]$), and \rl{own\_cusum} over \rl{gap} $+0.3 \pm 0.6$. The margin over the tuned no-reset duo is larger on test (3.8) than on held-out (2.3).
+
+\paragraph{Claim (b): the rule beats random resets at matched counts --- on average, and less than on held-out.} \rl{own\_fast\_vs\_slow} scores 54.0 against 52.6 for the random trigger with the same reset counts: $+1.4 \pm 0.5$ ($[+0.5, +2.3]$; 12 of 15 corruptions). Per ordering the difference is $+0.7$, $+1.8$, $+3.6$, $+1.6$ and $-0.7$: in one ordering the random draw wins. With one draw per ordering the control is itself noisy (on held-out the five draws spread over 52.9--55.6), and the held-out margin (about $+3.7$ on average over five draws, on a single rotation) was larger than the test margin. The random control also depends on the gate: its fixed-TS duo scores 48.5, 4.1 points below its gated duo, whereas the rule's two duos agree (54.2 and 54.0). The control was run for \rl{own\_fast\_vs\_slow} only; for \rl{own\_cusum} and \rl{gap} the claim is untested.
+
+\paragraph{Claim (c): against the boundary reset and the schedules --- reported as it came out.} No rule is separated from the reset at every shift, which is told where the shifts are: \rl{own\_fast\_vs\_slow} $+1.8 \pm 1.4$ ($[-0.4, +4.9]$), \rl{own\_cusum} $+1.2 \pm 1.3$ ($[-0.9, +3.9]$), \rl{gap\_fast\_vs\_slow} $+0.9 \pm 0.8$ ($[-0.4, +2.7]$), 7 to 8 of 15 corruptions each. Against the tuned schedules the rules are ahead by about $+1$ to $+2.3$ but the intervals mostly include zero: against the 1,000-step schedule \rl{own\_fast} ($[+0.1, +5.2]$) and \rl{gap} ($[+0.1, +3.0]$) just exclude it, \rl{own\_cusum} ($[-0.4, +4.3]$) does not; against the 500-step schedule none does. The \rl{own\_fast}--schedule difference is positive in all five orderings, which counts for little because the orderings share their images.
+
+\paragraph{Where the gain comes from.} As on held-out, it is the \vit{} (Table~\ref{tab:final_test}): 50.2 (\rl{own\_fast}), 49.5 (\rl{own\_cusum}) and 47.7 (\rl{gap}) against 45.1 without resets and 43.8 for the schedules. The \rn{} gain belongs to the schedules (42.0--42.5), not to the rules (38.1 for \rl{own\_fast}, 37.0 for \rl{own\_cusum}, 40.7 for \rl{gap}); the two \rl{own} rules leave it no better than without resets (38.4), the same result as on held-out. Table~\ref{tab:final_per_shift} shows that the gain is uneven: contrast alone is $+15.4$ points for \rl{own\_fast} over no reset (54.7 against 39.3; the schedules lose 2--3 points there), which is about 1.0 of its 3.8-point average gain. Without contrast \rl{own\_fast} is still $+2.95 \pm 0.63$ over the tuned no-reset duo (13 of 14 corruptions), \rl{own\_cusum} $+2.5 \pm 0.6$ and \rl{gap} $+2.5 \pm 0.4$; but the lead over random shrinks to $+1.2 \pm 0.5$, over the 1,000-step schedule to $+1.2 \pm 0.8$ and over the boundary reset to $+0.5 \pm 0.7$. This leave-one-corruption-out is a description of the table, not a new test. The schedules are ahead of the rules on a few corruptions where the \vit{} does not collapse and a reset only costs (zoom blur 51--52 against 49 and 47, snow 54 against 50--53, fog 63 against 60--62).
+
+\paragraph{What the test supports.} A label-free reset rule, with rates and threshold tuned on four held-out shifts under fixed rules, beats an equally tuned no-reset duo by 2.8 to 3.8 points on the test stream, with bootstrap intervals that exclude zero; for \rl{own\_fast\_vs\_slow} part of this is timing, not frequency ($+1.4$ over random resets at the same counts). It does not beat the episodic reset that is told the shifts, it is not separated from the tuned schedules by a margin larger than the noise, and the three rules cannot be told apart on test. The effect is carried by the \vit{} and by a few corruptions, most of all contrast.
+
+\input{tables/final_test_per_shift.tex}
+
 \section{Limits and next steps}
 \begin{itemize}
-  \item \textbf{Little independent data.} The calibration pool has 4 independent rotations (the two seeds of a rotation are nearly identical) plus 2 healthy streams; T is 3 seeds of one stream. At budget 1 the pool allows about 32 false alarms in total, so differences of about 20\% in delay between rules are not meaningful. The live runs add 2 held-out rotations (the same images in another order) and 3 test seeds (the same corruptions shuffled differently, with deterministic models), so their small spreads reflect the data order only; differences below about 1 point are not meaningful.
-  \item \textbf{Held-out is in-sample.} The rule settings (and the schedule period 500) were chosen on it; only the test stream is an honest comparison.
-  \item \textbf{Fixed stress rates confound detection and reset frequency} (the main limit, see above). The next test is to tune each rule's rates with the rule running, on the held-out stream (a ladder of rates per rule), and to compare rules and schedules at matched reset counts. This is not run and needs a decision (roughly 30--40 GPU-hours).
-  \item \textbf{The \rl{gap} mechanism} (a reset member's proxy dip moving its partner's gap) is a reading of the figures, not a measurement.
-  \item \textbf{Grid edges.} The selected own and gap \rl{fast\_vs\_slow} settings sit on the lowest threshold of the grid ($\delta = 1$, at 0.69 and 0.91 false alarms, below the budget), and \rl{own\_cusum} on the lowest $\nu$ and $h$. The best setting may lie beyond the grid; the gap and both versions of cusum need a higher threshold range.
+  \item \textbf{Little independent data.} The calibration pool of the screen has 4 independent rotations (the two seeds of a rotation are nearly identical) plus 2 healthy streams; at budget 1 it allows about 32 false alarms, so differences of about 20\% in delay between rules are not meaningful. The four held-out rotations are the same images in another order; the five test orderings reuse the same 15 shifts and images, and the models are deterministic, so their spread understates the uncertainty. The paired standard errors treat visits as independent although a collapse carries over to the next visit: read them as a noise floor, not a confidence interval. The bootstrap intervals resample the 15 corruptions, which differ a lot in difficulty, and are wide for that reason.
+  \item \textbf{Held-out is in-sample.} Every rate, threshold and schedule choice was made on it; the test stream was touched once, after the configurations were frozen, and nothing was changed afterwards. The claim that the test comparison is honest rests on that order (the frozen configurations are in \path{out/results/reset_tune/final_configs.json}).
+  \item \textbf{One selection-code correction during the runs} (the extension cap also bounds the refinement of rule~1, Section~\ref{sec:tuning}); no earlier choice changed. The cap leaves \rl{own\_cusum}'s threshold at the end of its ladder: a plateau reported as such, not a located optimum.
+  \item \textbf{Frequency against detection is answered only for one rule, one draw per test ordering.} The matched-count control was run for \rl{own\_fast\_vs\_slow} (five draws on held-out validation, one draw per ordering on test); the other rules and the \rn{}'s share of the effect were not controlled separately. The held-out margin over random (about $+3.7$) is larger than the test margin (Section~\ref{sec:final}).
+  \item \textbf{The \rn{} is not helped by any \rl{own} rule beyond what a random reset does} (Section~\ref{sec:tuneresults}); one rule with the same settings was used for both members. A detector sensitive to the \rn{}'s slow ramp is the obvious next candidate. The detector's other parameters (the two averaging speeds, $\nu$, the warm-up) stay as the screen selected them, and the schedules' periods (500 and 1,000) were fixed, not tuned.
+  \item \textbf{The \rl{gap} mechanism} (a reset member's proxy dip moving its partner's gap) is a reading of the figures, not a measurement; the staggered-schedule control was not run because \rl{gap\_fast\_vs\_slow} is not the best rule.
   \item \textbf{Short dips.} They account for most misses of the screen. Treating self-recovering dips under $\approx 32$ batches as non-events lowers every miss rate (for the leaders, from about $0.3$ to $0.2$) and could change the offline ranking.
-  \item \textbf{Not yet run.} Joint DD with the best rule; the live rules at rates tuned for resetting; the oracle with other definitions.
+  \item \textbf{Not run.} Another duo, Joint DD with the best rule, and the oracle with other definitions (stage 6 of the plan; the author has not asked for it). The compute used (about 115 held-out and 40 test runs of roughly 68 minutes) is above the 150 GPU-hour estimate of the plan, because of the threshold extensions, the conservative baseline on four orderings and the five control draws.
 \end{itemize}
 
 \paragraph{Reproduce.}

@@ -1,0 +1,25 @@
+\begin{table}[t]
+  \centering\small
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Method & Vanilla DD & Fixed-TS duo & ViT & ResNet & Resets/1,000 \\
+    \midrule
+    Frozen (no adaptation) & 46.1 & 46.1 & 40.4 & 31.7 & -- \\
+    Reset at every shift (episodic) & 52.2 & -- & 42.9 & 43.9 & -- \\
+    \midrule
+    No reset, accuracy-tuned rates & 50.2$\pm$0.2 & 50.4$\pm$0.2 & 45.1$\pm$0.3 & 38.4$\pm$0.3 & 0.0 / 0.0 \\
+    No reset, conservative rates & 49.8$\pm$0.2 & 50.0$\pm$0.1 & 44.4$\pm$0.2 & 38.3$\pm$0.3 & 0.0 / 0.0 \\
+    \midrule
+    Every 500 steps & 52.0$\pm$0.1 & 51.9$\pm$0.1 & 43.8$\pm$0.2 & 42.5$\pm$0.1 & 7.9 / 7.9 \\
+    Every 1,000 steps & 51.7$\pm$0.1 & 51.5$\pm$0.1 & 43.8$\pm$0.4 & 42.0$\pm$0.2 & 3.8 / 3.8 \\
+    \midrule
+    Own fast/slow trigger & 54.0$\pm$0.3 & 54.2$\pm$0.3 & 50.2$\pm$0.8 & 38.1$\pm$0.5 & 3.7 / 0.7 \\
+    Gap fast/slow trigger & 53.1$\pm$0.3 & 53.1$\pm$0.3 & 47.7$\pm$0.6 & 40.7$\pm$0.4 & 2.6 / 3.4 \\
+    Own CUSUM trigger & 53.4$\pm$0.3 & 53.0$\pm$0.3 & 49.5$\pm$0.5 & 37.0$\pm$0.3 & 2.0 / 3.8 \\
+    \midrule
+    Random resets, matched to Own fast/slow trigger & 52.6$\pm$0.5 & 48.5$\pm$1.2 & 44.3$\pm$1.3 & 39.0$\pm$0.6 & 3.7 / 0.7 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Final test: accuracy (\%, mean over the 15 corruptions) on the ImageNet-C test stream, every configuration as tuned on the held-out stream, the gate at $\beta=0.5$. Mean$\pm$SE over 5 orderings of the corruptions (standard order and CoTTA's random orders); resets per 1,000 proxy batches for the ViT / ResNet. Frozen and the episodic reset are order-independent (scripts/03b rows). Produced by \rl{scripts/42\_final\_test.py}.}
+  \label{tab:final_test}
+\end{table}
