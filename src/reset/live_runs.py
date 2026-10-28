@@ -1,7 +1,7 @@
 """
 live_runs.py
 ============
-The live reset runs of scripts/38_run_reset_live.py (Phase 4, stage R-E): Vanilla DD (both members adapt on their own entropy, the gate outside the
+The live reset runs (src/reset/workers.py `live`; Phase 4, stage R-E): Vanilla DD (both members adapt on their own entropy, the gate outside the
 loop) over one long stream, a TRIGGER that decides when a member goes back to source, and per-sample correctness stored in the format of
 continual.save_run (so the continual report and the gate-stress plots read it). Same loop as `src.reset.live.run_stream`, but it keeps the
 per-sample correctness of the four series (ts = the fixed-TS duo, gate = Vanilla DD, large, small) instead of logits.
@@ -27,6 +27,7 @@ series `gate__<name>`, and a gate with a `notify_reset(member, position)` is tol
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Mapping, Sequence
 
@@ -123,6 +124,39 @@ class BoundaryTrigger(Trigger):
         return [(s, "boundary") for s in SIDES]
 
 
+# ------------------------------------------------------------------------------------------------------------------ conditions -> triggers
+
+def with_threshold(spec: RuleSpec, delta: float) -> RuleSpec:
+    """`spec` with the detection threshold delta replaced (nothing else changes)."""
+    j = spec.to_json()
+    j["parts"]["own"]["delta"] = float(delta)
+    return RuleSpec.from_json(j)
+
+
+def split_condition(name: str) -> tuple[str, float | None]:
+    """'own_fast_vs_slow@0.7' -> ('own_fast_vs_slow', 0.7); 'own_fast_vs_slow' -> ('own_fast_vs_slow', None)."""
+    base, _, thr = name.partition("@")
+    return base, (float(thr) if thr else None)
+
+
+def make_trigger(name: str, rules: Mapping[str, RuleSpec]) -> Trigger:
+    """The trigger of a condition name: `none`, `boundary`, `fixed<N>`, `own_fast_vs_slow[@<delta>]` (the screened rule, `rules`) or its per-member form
+    `own_fast_vs_slow@pmL<af>-<as>-<W0>-<d>_S<af>-<as>-<W0>-<d>` (src/reset/member_rules.py). (`frozen` and `random~...` are not triggers: the worker handles them.)"""
+    from src.reset import member_rules as MR
+    if name == "none":
+        return NoTrigger()
+    if name == "boundary":
+        return BoundaryTrigger()
+    if (m := re.fullmatch(r"fixed(\d+)", name)):
+        return ScheduleTrigger(int(m.group(1)))
+    if MR.parse_condition(name) is not None:
+        return RuleTrigger(MR.specs_of(name, rules[MR.FAMILY]), name=name)
+    base, thr = split_condition(name)
+    if base in rules:
+        return RuleTrigger(rules[base] if thr is None else with_threshold(rules[base], thr), name=name)
+    raise ValueError(f"unknown condition {name!r}: none, boundary, frozen, fixed<N>, random~<cond>~d<D> or {MR.FAMILY}[@threshold]")
+
+
 # ------------------------------------------------------------------------------------------------------------------ the loop
 
 def _batches(runner, dataset, *, batch_size: int, workers: int, seed: int, num_samples: int | None):
@@ -132,12 +166,16 @@ def _batches(runner, dataset, *, batch_size: int, workers: int, seed: int, num_s
 
 
 def run_live(runner, parts, *, trigger: Trigger, images: int, batch_size: int, workers: int, T_l: float, T_s: float, gate,
-             max_images: int | None = None, log_every: int = 1000, log=print, extra_gates: Mapping[str, object] | None = None) -> dict:
-    """Adapt over `parts` (continual.Part: segment, round, seed) with `trigger` deciding the resets.
+             max_images: int | None = None, log_every: int = 1000, log=print, extra_gates: Mapping[str, object] | None = None, inside: bool = False) -> dict:
+    """Adapt over `parts` (continual.Part: segment, round, seed) with `trigger` deciding the resets. `inside`: the JOINT signal: the gate is the runner's loop
+    calibrator (both members adapt on the gated duo's entropy), so the duo's prediction is the one the step used (pre-update) and the gate is not called again;
+    extra gates cannot be scored then.
     `extra_gates`: more gates to score on the same logits (module text); their series are `gate__<name>`; they must be called after `gate` (followers read its cache).
     Returns {"correct": {series: uint8 array}, "part_n", "gate_records", "seen", "stopped", "resets", "trigger"}."""
     if not hasattr(gate, "records"):
         raise ValueError("a live run needs a gate that records its proxy batches (PureProxyGate)")
+    if inside and (runner.loop_calibrator is None or extra_gates):
+        raise ValueError("the joint signal needs a runner with the gate as its loop calibrator, and scores no extra gates")
     extra = dict(extra_gates or {})
     names = ["ts", "large", "small", "gate"] + [f"gate__{k}" for k in extra]
     correct = {s: [] for s in names}
@@ -176,7 +214,8 @@ def run_live(runner, parts, *, trigger: Trigger, images: int, batch_size: int, w
             z_l, z_s = runner.step_tensors(x_l, x_s, ds)         # adapts; the logits are the PRE-update ones
             y = y.to(z_l.device)
             with torch.no_grad():
-                preds = {"ts": (z_l / T_l + z_s / T_s).argmax(1), "large": z_l.argmax(1), "small": z_s.argmax(1), "gate": gate.calibrate(z_l, z_s).argmax(1)}
+                z_duo = runner.loop_calibrator.last if inside else gate.calibrate(z_l, z_s)
+                preds = {"ts": (z_l / T_l + z_s / T_s).argmax(1), "large": z_l.argmax(1), "small": z_s.argmax(1), "gate": z_duo.argmax(1)}
                 preds.update({f"gate__{k}": g.calibrate(z_l, z_s).argmax(1) for k, g in extra.items()})
             batch = {s: (p == y).to(torch.uint8).cpu() for s, p in preds.items()}
             for s, c in batch.items():
@@ -338,4 +377,63 @@ if __name__ == "__main__":
     except ValueError:
         pass
     print("  random-matched trigger: counts, spacing, reproducibility")
+    # ---- the JOINT signal: the gate inside the loss; run_live(inside=True) is run_stream's joint path with per-sample correctness ------------------------------------
+    from src.experiments.joint_dd import RecordingCalibrator
+
+    def make_joint():
+        g = PureProxyGate("nnn", beta=2.0, b_t=B_T, T_l=T_L, T_s=T_S, num_classes=1000)
+        return MemberRunner(DUO, "tent", {}, "both_duo", "cpu", models=copy.deepcopy(base), loop_calibrator=RecordingCalibrator(g), bn=False), g
+
+    def live_joint(trigger, **kw):
+        runner, g = make_joint()
+        return run_live(runner, parts, trigger=trigger, images=N, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, gate=g, inside=True, log_every=0, **kw)
+
+    def reference_joint(**kw):
+        runner, g = make_joint()
+        res = run_stream(runner, lparts, batch_size=BS, gate=g, keep_logits=True, num_samples=N, **kw)
+        z_l, z_s, z_d, y = (torch.cat(v) for v in (res.z_l, res.z_s, res.z_duo, res.labels))
+        return res, {"ts": ((z_l / T_L + z_s / T_S).argmax(1) == y).numpy(), "large": (z_l.argmax(1) == y).numpy(), "small": (z_s.argmax(1) == y).numpy(),
+                     "gate": (z_d.argmax(1) == y).numpy()}
+
+    rs_j, ref_j = reference_joint()
+    jn = live_joint(NoTrigger())
+    assert same(jn, ref_j, rs_j) and jn["resets"] == [] and len(jn["gate_records"]) == len(rs_j.gate_records)
+    assert proxies(jn["gate_records"]) != proxies(plain["gate_records"]), "adapting on the duo's entropy is not adapting on each member's own"
+    rs_ja, ref_ja = reference_joint(controller=ResetController(ALWAYS))
+    ja = live_joint(RuleTrigger(ALWAYS))
+    assert same(ja, ref_ja, rs_ja) and ja["resets"] and [(r["step"], r["member"]) for r in ja["resets"]] == [(r["step"], r["member"]) for r in rs_ja.resets]
+    assert not same(ja, ref_j, rs_j), "the resets changed the joint trajectory too"
+    runner, g = make_joint()
+    until_j = CT.run_until(runner, parts, images=N, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, gate=g, inside=True, log_every=0)
+    assert all(np.array_equal(until_j["correct"][k], jn["correct"][k]) for k in jn["correct"]) and until_j["part_n"] == jn["part_n"], "run_until(inside=True) is the no-reset live loop"
+    for bad in (dict(extra_gates={"x": object()}),):
+        try:
+            live_joint(NoTrigger(), **bad)
+            raise AssertionError("the joint signal scores no extra gates")
+        except ValueError:
+            pass
+    runner, g = make()
+    try:
+        run_live(runner, parts, trigger=NoTrigger(), images=N, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, gate=g, inside=True, log_every=0)
+        raise AssertionError("inside needs a loop calibrator")
+    except ValueError:
+        pass
+    print(f"  joint signal: {len(ja['resets'])} resets at run_stream's steps, the same predictions and proxy batches as its joint path")
+
+    # ---- conditions -> triggers ----------------------------------------------------------------------------------------------------------
+    from src.reset import member_rules as MR
+    base_rule = RuleSpec.of(own=dict(kind="fast_vs_slow", alpha_fast=0.05, alpha_slow=0.005, delta=1.0), W0=20)
+    rules = {MR.FAMILY: base_rule}
+    assert isinstance(make_trigger("none", rules), NoTrigger) and isinstance(make_trigger("boundary", rules), BoundaryTrigger)
+    assert make_trigger("fixed500", rules).period == 500
+    assert make_trigger("own_fast_vs_slow", rules).spec == base_rule
+    assert make_trigger("own_fast_vs_slow@0.7", rules).spec.parts["own"]["delta"] == 0.7 and base_rule.parts["own"]["delta"] == 1.0, "the threshold is replaced on a copy"
+    per = make_trigger("own_fast_vs_slow@pmL0.05-0.005-20-0.7_S0.02-0.005-100-0.5", rules)
+    assert per.spec["small"].W0 == 100 and per.spec["large"].parts["own"]["delta"] == 0.7
+    for bad in ("own_cusum@0.25", "oracle", "staggered1000", "frozen"):
+        try:
+            make_trigger(bad, rules)
+            raise AssertionError(f"{bad} is not a trigger")
+        except ValueError:
+            pass
     print("live_runs self-test passed")

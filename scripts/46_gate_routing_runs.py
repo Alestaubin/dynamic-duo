@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 The multi-gate runs of the gate study: the frozen configuration of a method (`out/results/reset_tune/final_configs.json`: same rule, rates, seed) run again on a stream, with
-more gates scored on the same members' logits (`scripts/38_run_reset_live.py --extra_gates`, gates in src/reset/gate_variants.py). The default is the BETA LADDER
+more gates scored on the same members' logits (a live run's `extra_gates`, src/reset/workers.py; gates in src/reset/gate_variants.py). The default is the BETA LADDER
 (0, 0.25, 1, 2, 4, 8 besides the run's own 0.5) for own_fast_vs_slow. The members' logits are not stored, so a gate that was not scored in the run cannot be scored
 afterwards. One run is about 65 minutes on one GPU (the extra gates cost a few percent: they reuse the main gate's proxy values).
 
@@ -25,7 +25,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.reset import gate_variants as GV
+from src.reset import jobs as J
 from src.reset import live_report as LV
+from src.reset.layout import Paths
 from src.utils.config import load_global
 
 
@@ -56,17 +58,17 @@ def main() -> int:
         for key in (args.rotations if args.stream == "heldout" else args.orders):
             if args.stream == "heldout":
                 stem = LV.run_stem(m["cond"], stream="heldout", rot=key, seed=0, lrs=m["lrs"], proxy="nnn", b_t=256, beta=args.beta)
-                which, tag = ["--rotations", str(key)], f"h{key}"
+                order, tag = None, f"h{key}"
             else:
                 order = None if key == "std" else int(key)
                 stem = LV.run_stem(m["cond"], stream="test", rot=0, seed=0, lrs=m["lrs"], proxy="nnn", b_t=256, beta=args.beta, order=order)
-                which, tag = ([] if order is None else ["--order", str(order)]), f"t{key}"
+                tag = f"t{key}"
             if (folder / f"{stem}.npz").is_file():
                 print(f"# done already: {name}, {args.stream} {key}")
                 continue
-            cmd = ["sbatch", "-t", args.time, "-J", f"gates_{name}_{tag}", "--exclude=kn117,kn101", "slurm/job.sh", "scripts/38_run_reset_live.py", "--duo", args.duo, "--bn",
-                   "--stream", args.stream, "--seeds", "0", "--beta", f"{args.beta:g}", "--conditions", m["cond"], "--lrs", *(f"{x:g}" for x in m["lrs"]),
-                   "--extra_gates", *args.extra_gates, *which]
+            job = J.live_job(args.duo, m["cond"], stream=args.stream, lrs=m["lrs"], rotation=key if args.stream == "heldout" else 0, order=order, seed=0, beta=args.beta,
+                             extra_gates=args.extra_gates, label=f"{tag}{name}")
+            cmd = J.live_command(Paths(g, args.duo), job, time=args.time, write=args.submit)
             todo += 1
             print(" ".join(cmd))
             if args.submit:

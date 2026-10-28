@@ -2,7 +2,7 @@
 continual_tuning.py
 ===================
 Tent's learning rates for the CONTINUAL setting, chosen on held-out shifts only (never on the 15 test shifts), and the loop that runs a
-duo over a long stream and stops once a member has completely collapsed. Used by scripts/04b_tune_continual_lr.py (the tuning) and
+duo over a long stream and stops once a member has completely collapsed. Used by the continual-rate stage of src/reset/pipeline.py (the tuning) and
 scripts/04c_gate_stress.py (the gate on a collapsing member).
 
 Why a second tuning. A rate chosen by whole-stream accuracy on 50,000-image episodic streams (scripts/02c) is the largest one that has not
@@ -125,8 +125,10 @@ class DeadStop:
 # ------------------------------------------------------------------------------------------------------------ the loop
 
 def run_until(runner: MemberRunner, parts: Sequence[Part], *, images: int, batch_size: int, workers: int, T_l: float, T_s: float,
-              gate: PureProxyGate | None = None, stop: DeadStop | None = None, max_images: int | None = None, log_every: int = 4) -> dict:
-    """Adapt over `parts` (no resets) like `continual.run_continual` (gate OUTSIDE the loop) and return {"correct": {series: uint8 array},
+              gate: PureProxyGate | None = None, stop: DeadStop | None = None, max_images: int | None = None, log_every: int = 4,
+              inside: bool = False) -> dict:
+    """Adapt over `parts` (no resets) like `continual.run_continual` (gate OUTSIDE the loop; `inside`: the gate is the runner's loop calibrator, the joint signal, and the
+    duo's prediction is the one the step used) and return {"correct": {series: uint8 array},
     "part_n": [images of each visit made, the last possibly partial], "gate_records": [...], "seen": images, "stopped": why or None,
     "dead_at": {side: sample index}}. Stops after the batch on which `stop` says so or `max_images` is reached."""
     correct = {s: [] for s in ("ts", "large", "small") + (("gate",) if gate is not None else ())}
@@ -146,7 +148,7 @@ def run_until(runner: MemberRunner, parts: Sequence[Part], *, images: int, batch
             with torch.no_grad():
                 preds = {"ts": (z_l / T_l + z_s / T_s).argmax(1), "large": z_l.argmax(1), "small": z_s.argmax(1)}
                 if gate is not None:
-                    preds["gate"] = gate.calibrate(z_l, z_s).argmax(1)
+                    preds["gate"] = (runner.loop_calibrator.last if inside else gate.calibrate(z_l, z_s)).argmax(1)
             batch = {s: (p == y).to(torch.uint8).cpu() for s, p in preds.items()}
             for s, c in batch.items():
                 correct[s].append(c)

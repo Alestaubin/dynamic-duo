@@ -7,7 +7,7 @@ in the standard order and in CoTTA's random orders, with the gate at beta 0.5. N
     <out>/results/reset_tune/final_configs.json
         {"methods": [{"name": "no_reset_tuned", "cond": "none", "lrs": [1.75e-5, 3.1e-5], "label": "No reset (tuned)", "kind": "baseline"}, ...],
          "control": {"rule": "own_fast_vs_slow", "draws": [0]}}
-        kind: baseline (no reset) / schedule / rule. `cond` is a condition of scripts/38_run_reset_live.py (`own_fast_vs_slow@0.7`, `fixed500`, ...).
+        kind: baseline (no reset) / schedule / rule. `cond` is a condition of a live run (src/reset/workers.py: `own_fast_vs_slow@0.7`, `fixed500`, ...).
         `control`: the random-matched trigger of the named rule (it resets each member as often as the rule's run of the same order, at random steps): one run per
         draw and order, submitted with a dependency on the rule's run of that order (it reads that run's reset counts).
 
@@ -36,11 +36,12 @@ import numpy as np
 import pandas as pd
 
 from src.experiments import continual as RC
+from src.reset import jobs as J
 from src.reset import live_report as LV
 from src.reset import tuning as TU
+from src.reset.layout import Paths
 from src.utils.config import load_global
 
-TIME = "01:50:00"
 SERIES = ("gate", "ts", "large", "small")
 CSV_MODE = {"frozen": "frozen", "boundary": "indep_duo"}          # rows of the 03b CSV (series duo / large / small, segment 'clean' dropped)
 
@@ -69,15 +70,11 @@ def all_methods(cfg: dict) -> list[dict]:
     return methods
 
 
-def sbatch_cmd(duo: str, m: dict, order: int | None, tok: str, beta: float, dep: str | None) -> list[str]:
-    cmd = ["sbatch", "--parsable", "--array=0-0", "-t", TIME, "-J", f"final_{m['name']}_o{tok}", "--exclude=kn117,kn101"]
-    if dep:
-        cmd.append(f"--dependency=afterok:{dep}")
-    cmd += ["slurm/job.sh", "scripts/38_run_reset_live.py", "--duo", duo, "--bn", "--stream", "test", "--seeds", "0", "--conditions", m["cond"], "--beta", f"{beta:g}",
-            "--lrs", f"{m['lrs'][0]:g}", f"{m['lrs'][1]:g}", "--shard", "auto"]
-    if order is not None:
-        cmd += ["--order", str(order)]
-    return cmd
+def sbatch_cmd(g, duo: str, m: dict, order: int | None, tok: str, beta: float, dep: str | None, write: bool) -> list[str]:
+    """The sbatch command of one live run on the test stream (src/reset/jobs.py); `write`: write the job's spec file (when it is going to be submitted)."""
+    job = J.live_job(duo, m["cond"], stream="test", lrs=m["lrs"], order=order, seed=0, beta=beta, label=f"o{tok}{m['name']}")
+    extra = ["--parsable"] + ([f"--dependency=afterok:{dep}"] if dep else [])
+    return J.live_command(Paths(g, duo), job, extra, write=write)
 
 
 # ------------------------------------------------------------------------------------------------------------ loading
@@ -157,7 +154,7 @@ def main() -> int:
                             if dep is None:
                                 print(f"  {m['name']} order {tok}: its reference run ({ref['name']}) is not run and not submitted: submit the rules first")
                                 continue
-                    cmd = sbatch_cmd(args.duo, m, o, tok, args.beta, dep)
+                    cmd = sbatch_cmd(g, args.duo, m, o, tok, args.beta, dep, write=args.what == "submit")
                     print(("SUBMIT  " if args.what == "submit" else "to run  ") + " ".join(shlex.quote(c) for c in cmd))
                     if args.what == "submit":
                         res = subprocess.run(cmd, capture_output=True, text=True, cwd=root)

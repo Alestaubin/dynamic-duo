@@ -2,7 +2,7 @@
 """
 The gate on a member that collapses (src/experiments/gate_stress.py): the independent duo (Vanilla DD, the gate outside the loop) on the test
 continual stream (the 15 corruptions in CoTTA's standard order, severity 5, no reset), one member at a CONSERVATIVE rate and the other at a
-STRESS rate, both from scripts/04b_tune_continual_lr.py (held-out shifts only):
+STRESS rate, both from the continual-rate stage of scripts/tune_reset.py (held-out shifts only):
 
     A   ViT-B/16 conservative, ResNet-50 stress      the small member should collapse; the gate moves to the large one
     B   ViT-B/16 stress, ResNet-50 conservative      the large member should collapse; the gate moves to the small one
@@ -123,7 +123,7 @@ def main() -> int:
         if (tuning["duo"], tuning["bn"]) != (args.duo, args.bn):
             raise SystemExit(f"{tuning_path} is for {tuning['duo']} (bn {tuning['bn']}), not {args.duo} (bn {args.bn})")
     elif args.experiments:
-        raise SystemExit(f"{tuning_path} is missing: run scripts/04b_tune_continual_lr.py first (or give only --extra experiments)")
+        raise SystemExit(f"{tuning_path} is missing: run scripts/tune_reset.py first (its continual stage; or give only --extra experiments)")
 
     def role_of(side: str, lr: float) -> str | None:
         """The role the tuning gives a rate: the conservative one exactly, or any rate from the stress one up; None between or without tuning."""

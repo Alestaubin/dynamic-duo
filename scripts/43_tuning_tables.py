@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-The tables of the reset tuning (scripts/40_tune_reset.py, src/reset/tuning.py) for the report, written to docs/tables/ as LaTeX fragments from the STORED runs and the
+The tables of the reset tuning (scripts/tune_reset.py, src/reset/tuning.py) for the report, written to docs/tables/ as LaTeX fragments from the STORED runs and the
 states the selection saved (out/results/reset_tune/*.json): no number is typed by hand.
 
     tuning_rates_large.tex / tuning_rates_small.tex   rate ladders of the decoupled methods (the schedules and the shared-setting rule): one row per rung of the sqrt-2

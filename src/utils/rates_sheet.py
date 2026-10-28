@@ -5,7 +5,7 @@ docs/learning_rates.md: ONE sheet of every learning rate in the repo, per model 
 never a source: it is rendered from the files that hold the numbers, so it cannot drift from them.
 
   cfgs/duo_lrs/<duo>__<regime>.yaml                        the episodic rates (src/utils/duo_lrs.py: the one place they live)
-  out/results/tune_continual_lr/<duo>__tent_bn/results.json   the continual rates of scripts/04b_tune_continual_lr.py (conservative, stress)
+  out/results/tune_continual_lr/<duo>__tent_bn/results.json   the continual rates of the continual stage of scripts/tune_reset.py (conservative, stress)
   out/results/gate_stress/<duo>__tent_bn/summary*.json     the rates actually run in the gate-stress experiments of scripts/04c_gate_stress.py
 
     python -m src.utils.rates_sheet            # rewrite docs/learning_rates.md
@@ -52,7 +52,7 @@ TUNERS = {
     "02": ("scripts/02_tune_tta.py", "episodic: one model alone (Tent), 4 held-out shifts, seed 0 (the older single-model tuner)"),
     "05": ("scripts/05_select_member_lr.py", "episodic: each member alone for ETA / EATA / SAR from the stored sweep, macro accuracy on the 4 held-out shifts, seed 0"),
     "default": ("pre-tuning default", "nothing tuned: the OPTIM block the duo had before the tuning scripts (never used for results)"),
-    "04b": ("scripts/04b_tune_continual_lr.py", "CONTINUAL: the 4 held-out shifts x 4 rounds (each round rotated), 800k images, no reset; stability rule (late gain >= -2 points "
+    "04b": ("scripts/tune_reset.py (continual stage; formerly 04b)", "CONTINUAL: the 4 held-out shifts x 4 rounds (each round rotated), 800k images, no reset; stability rule (late gain >= -2 points "
             "per visit against the frozen member); conservative = one rung below the stable frontier, stress = lowest rung that dies completely"),
     "trial": ("by trial", "picked by hand for one experiment, not by a tuning rule"),
 }
@@ -208,8 +208,8 @@ def experiments_section(root: Path) -> list[str]:
     for (duo, stream, name, beta, b_t, lrs), runs in unreported.items():
         seeds, rots = sorted({s for _, s in runs}), sorted({r for r, _ in runs})
         rows.append((duo, stream, name, beta, b_t, lrs, ",".join(map(str, seeds)) + (f" (rotations {','.join(map(str, rots))})" if stream != "test" else ""),
-                     f"{len(runs)} runs, no summary (screening runs, scripts/37b_screen_resets_stress.py)"))
-    # the live reset runs of scripts/38_run_reset_live.py: one row per (duo, stream, rates, gate), its conditions and seeds from the file names
+                     f"{len(runs)} runs, no summary (screening runs, scripts/tune_reset.py)"))
+    # the live reset runs of scripts/tune_reset.py: one row per (duo, stream, rates, gate), its conditions and seeds from the file names
     live = {}
     for f in sorted(glob.glob(str(root / "out" / "results" / "reset_live" / "*" / "live-*.npz"))):
         mt = re.match(r"live-(?P<c>[A-Za-z0-9_]+?)(?P<held>__heldout)?(?:__rot(?P<rot>\d+))?__L(?P<l>[\d.e+-]+)_S(?P<s>[\d.e+-]+)__(?P<g>[a-z]+_bt\d+_beta[\d.]+)(?P<cut>__first\d+)?__seed(?P<seed>\d+)\.npz$",
@@ -225,10 +225,10 @@ def experiments_section(root: Path) -> list[str]:
         conds = sorted(d["cond"])
         rows.append((duo, stream, f"live resets ({len(conds)} conditions: {', '.join(conds)})", float(mg[3]), int(mg[2]), (lr_l, lr_s),
                      ",".join(map(str, sorted(d["seed"]))) + (f" (rotations {','.join(map(str, sorted(d['rot'])))})" if stream != "test" else ""),
-                     "scripts/38_run_reset_live.py, out/results/reset_live/"))
+                     "scripts/tune_reset.py, out/results/reset_live/"))
     out = ["| duo | stream | experiment | gate (beta, b_t) | ViT LR (how found) | ResNet LR (how found) | seed | summary file |", "|---|---|---|---|---|---|---|---|"]
 
-    chosen_live: list = []                      # (side, lr, method name): the frozen configurations of the reset tuning (scripts/40, scripts/42)
+    chosen_live: list = []                      # (side, lr, method name): the frozen configurations of the reset tuning (scripts/tune_reset.py, scripts/42)
     cfg_path = root / "out" / "results" / "reset_tune" / "final_configs.json"
     cfg = json.loads(cfg_path.read_text()) if cfg_path.exists() else {"methods": []}
     for m in cfg["methods"]:
@@ -253,7 +253,7 @@ def experiments_section(root: Path) -> list[str]:
     out.append("")
     if cfg["methods"]:
         out += ["**Rates tuned for resetting** (stages 2 and 3 of the reset tuning, held-out stream only; the configurations frozen for the final test in `out/results/reset_tune/final_configs.json`, "
-                "chosen by `scripts/40_tune_reset.py`, run by `scripts/42_final_test.py`). A run of the table above that is not one of these is a rung of a ladder.", "",
+                "chosen by `scripts/tune_reset.py`, run by `scripts/42_final_test.py`). A run of the table above that is not one of these is a rung of a ladder.", "",
                 "| method | condition (rule and threshold) | ViT LR | ResNet LR |", "|---|---|---|---|"]
         out += [f"| {m['label']} | `{m['cond']}` | {lr_text(m['lrs'][0])} | {lr_text(m['lrs'][1])} |" for m in cfg["methods"]]
         out.append("")
@@ -282,7 +282,7 @@ def render(root: Path = REPO, stamp: bool = True) -> str:
     L += ["## 3. Continual rates (04b, held-out stream x 4 rounds)", ""] + continual_section(root)
     L += ["## 4. Rates actually run in the gate-stress experiments (04c)", "",
           "Experiments A and B use the 04b conservative / stress rates; B1 and B2 use ViT rates above the 04b stress rate, picked by trial because the 04b stress rate "
-          "(3.5e-5) does not collapse the ViT on the test stream. S, H and T are the runs the reset rules are screened on offline (`scripts/37b_screen_resets_stress.py`): "
+          "(3.5e-5) does not collapse the ViT on the test stream. S, H and T are the runs the reset rules are screened on offline (`scripts/tune_reset.py`): "
           "S = both members at a rate chosen to collapse them (ViT 1.4e-4, ResNet 5e-4; ViT above its 04b stress rate by trial, ResNet above it by trial), held-out stream, "
           "calibration; H = the 04b conservative rates, held-out stream, healthy time for the false-alarm budget; T = the S rates on the test stream, evaluation only. "
           "Every run here is Vanilla DD (both members on their own entropy, the gate outside the loop).", ""]

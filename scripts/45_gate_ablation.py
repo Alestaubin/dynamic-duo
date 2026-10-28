@@ -11,7 +11,7 @@ and the fixed-TS duo on the same members, so no new run is needed for the compar
                    in each bucket (ViT worse by more than 5 points / within 5 / better by more than 5): where does routing pay?
 
 Not available from the stored runs: other betas, or other routing rules (the members' logits are not stored). `--multigate DIR` reads the runs that do have them:
-the multi-gate runs of `scripts/38_run_reset_live.py --extra_gates` (see scripts/46_gate_routing_runs.py), whose series `gate__<name>` are other gates scored on the same
+the multi-gate runs (live runs with `extra_gates`, see scripts/46_gate_routing_runs.py), whose series `gate__<name>` are other gates scored on the same
 members in the same run. There every gate (the run's main gate, beta 0.5, included) is compared with the fixed-TS duo of ITS OWN run, so a gate's gap is exact even if a
 rerun's trajectory is not the stored run's to the bit (GPU arithmetic); the main gate's accuracy against the stored run's is printed as that check. It also reports the
 gap in the samples BEFORE each reset (the member is degrading, the rule has not fired yet) as well as after, for each window length of `--windows`.

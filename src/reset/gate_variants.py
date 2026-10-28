@@ -38,7 +38,7 @@ _PROXY = re.compile(r"(?P<proxy>[a-z_]+)@(?P<beta>[0-9]+(?:\.[0-9]+)?)")
 # the beta ladder around the final test's 0.5 (beta0 = the fixed-TS duo, a check; the main gate of the run is beta 0.5); scripts/46_gate_routing_runs.py's default
 LADDER = ("beta0", "beta0.25", "beta1", "beta2", "beta4", "beta8")
 
-# the default set of scripts/38_run_reset_live.py --extra_gates default: the beta ladder around the final test's 0.5 (beta0 = the fixed-TS duo, a check) and routing
+# the default set of a live run's `extra_gates` (`default`): the beta ladder around the final test's 0.5 (beta0 = the fixed-TS duo, a check) and routing
 # after a reset: the reset member's weight 0.35 / 0.2 / 0 for 5,120 samples (20 proxy batches, the window of scripts/45_gate_ablation.py) and 0.2 for 1,280, plus one
 # proxy that does not measure confidence
 DEFAULT_SET = ("beta0", "beta0.25", "beta1", "beta2", "beta4", "beta8", "route0.35w5120", "route0.2w5120", "route0w5120", "route0.2w1280", "agree_duo@1")

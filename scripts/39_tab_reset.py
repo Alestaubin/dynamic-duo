@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tables and figures of the live reset runs (scripts/38_run_reset_live.py; src/reset/live_report.py). Reads the stored runs of a stream and writes, in
+Tables and figures of the live reset runs (the live runs of src/reset/workers.py; src/reset/live_report.py). Reads the stored runs of a stream and writes, in
 <paths.out>/results/reset_live/<duo>__tent_bn/report/:
 
     table__<stream>.csv / .json / .tex     one row per condition: whole-stream accuracy (mean, and the spread over runs) of Vanilla DD, the fixed-TS duo, both
@@ -99,12 +99,12 @@ def main() -> int:
                 found.add(m["c"])
         conds = [c for c in order(sorted(found)) if all(path_of(c, s, r).is_file() for s, r in keys)]
         if not conds:
-            raise SystemExit(f"no condition has a stored run for every seed/rotation {keys} in {out}: run scripts/38_run_reset_live.py first")
+            raise SystemExit(f"no condition has a stored run for every seed/rotation {keys} in {out}: run the live runs first (scripts/tune_reset.py, scripts/42_final_test.py)")
     conds = [c for c in conds if c != "frozen"]
     missing = [str(path_of(c, s, r)) for c in conds for s, r in keys if not path_of(c, s, r).is_file()] + \
               [str(path_of("frozen", s, r)) for s, r in keys if not path_of("frozen", s, r).is_file()]
     if missing:
-        print("runs missing (see scripts/38_run_reset_live.py):\n  " + "\n  ".join(missing))
+        print("runs missing (scripts/tune_reset.py and scripts/42_final_test.py make them):\n  " + "\n  ".join(missing))
         return 1
 
     runs, frozen = {}, {}

@@ -1,7 +1,7 @@
 """
 live_report.py
 ==============
-What scripts/39_tab_reset.py reads out of the live reset runs of scripts/38_run_reset_live.py (src/reset/live_runs.py): one summary per run, the audit
+What scripts/39_tab_reset.py reads out of the live reset runs (src/reset/workers.py, src/reset/live_runs.py): one summary per run, the audit
 of its resets, the table over conditions, and the overlay figure of every condition on one stream.
 
     run, frozen = RC.load_run(live_file), RC.load_run(frozen_file)
@@ -77,7 +77,7 @@ def table_rows(by_condition: Mapping[str, Sequence[dict]]) -> list[dict]:
 
 def run_stem(cond: str, *, stream: str, rot: int, seed: int, lrs: Sequence[float], proxy: str, b_t: int, beta: float, max_images: int | None = None,
              order: int | None = None) -> str:
-    """The file stem of a live run (scripts/38_run_reset_live.py writes it, scripts/39_tab_reset.py reads it); the frozen run does not depend on the rates or the gate.
+    """The file stem of a live run (src/reset/workers.py writes it, scripts/39_tab_reset.py reads it); the frozen run does not depend on the rates or the gate.
     `order`: a test stream in one of CoTTA's random orders (None = the standard order, which keeps its old names)."""
     where = ("__heldout" if stream == "heldout" else "") + (f"__rot{rot}" if rot else "") + (f"__order{order}" if order is not None and stream == "test" else "")
     cut = f"__first{max_images}" if max_images else ""

@@ -3,7 +3,7 @@ member_rules.py
 ===============
 PER-MEMBER detector settings of the default reset rule, `own_fast_vs_slow`: each member of a duo gets its OWN `fast_vs_slow` parameters -- the two averaging speeds
 (alpha_fast, alpha_slow), the warm-up W0 (cooldown K = W0) and the threshold delta -- besides its own learning rate, because different architectures collapse
-differently (plan.md, "Per-member detectors"). A condition of scripts/38_run_reset_live.py names the two settings in the open, so a run's file name says what it ran:
+differently (plan.md, "Per-member detectors"). A condition of a live run (src/reset/workers.py) names the two settings in the open, so a run's file name says what it ran:
 
     own_fast_vs_slow@pmL<af>-<as>-<W0>-<delta>_S<af>-<as>-<W0>-<delta>        L = the large member (ViT), S = the small member (ResNet)
     e.g.  own_fast_vs_slow@pmL0.05-0.005-20-0.7_S0.02-0.005-100-0.7
