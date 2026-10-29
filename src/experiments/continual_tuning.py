@@ -25,12 +25,14 @@ Criteria, per member and rate (labels are used: these are held-out shifts). The 
 
 Selection (`select_side`; the ladder of each member is half-octave spaced around the rate scripts/02c recorded, and must be extended until
 it is bracketed). With the rates ascending:
-  first degraded   the lowest rung that is not stable
-  frontier         the rung just below it: the largest rate that is stable, which is where an accuracy-maximising rule would stop
+  stress           the lowest rung that is dead: a rate that collapses completely
+  frontier         the highest stable rung below the stress rung: the largest rate that is stable, which is where an accuracy-maximising rule would stop.
+                   (Counted from the collapse DOWN: a rate so low that the member adapts too slowly to beat the frozen copy by 2 points on every visit is
+                   `lagging`, not collapsing; it does not move the frontier and is not a reason to extend the ladder. The first rule took the rung below the
+                   lowest unstable one, which failed on ConvNeXt-B, whose rungs below 1.6e-6 lag.)
   conservative     `margin` rungs below the frontier (default 1): the margin is what the episodic tuning lacked
-  stress           the lowest rung from the first degraded one up that is dead: a rate that collapses completely
-A warning is raised, and no rate named, where the ladder does not bracket (no rung degraded; the lowest one already is; no rung dead; a
-stable rung above a degraded one, i.e. noise).
+A warning is raised, and no rate named, where the ladder does not bracket (no rung degraded; no stable rung below the collapse; no rung dead; a
+stable rung above the first collapse, i.e. noise).
 
 `run_until` is `continual.run_continual` with two additions: a `stop` object consulted after every batch (`DeadStop`) and `max_images`
 (stop after exactly that many images, so that the frozen run can cover the same prefix). A stopped run stores only the visits it made.
@@ -213,24 +215,27 @@ def select_side(rows: Sequence[Mapping], margin: int = MARGIN) -> dict:
     table = [{"lr": lr, "stable": all(r["stable"] for r in by[lr]), "dead": all(r["dead"] for r in by[lr]),
               "any_dead": any(r["dead"] for r in by[lr]), "acc": float(np.mean([r["acc"] for r in by[lr]])),
               "min_gain": float(min(r["min_gain"] for r in by[lr])), "seeds": len(by[lr])} for lr in lrs]
-    out = {"table": table, "frontier": None, "conservative": None, "stress": None, "warnings": []}
-    bad = [i for i, t in enumerate(table) if not t["stable"]]
-    if not bad:
+    out = {"table": table, "frontier": None, "conservative": None, "stress": None, "lagging": [], "warnings": []}
+    stable = [t["stable"] for t in table]
+    dead = [i for i, t in enumerate(table) if t["dead"]]
+    top = dead[0] if dead else len(table)                       # from this rung up a member collapses (or the ladder ends)
+    below = [i for i in range(top) if stable[i]]
+    if all(stable):
         out["warnings"].append("no rung is degraded: extend the ladder upward")
-    elif bad[0] == 0:
+    elif not below:
         out["warnings"].append("the lowest rung is already degraded: extend the ladder downward")
     else:
-        first = bad[0]
-        out["frontier"] = lrs[first - 1]
-        if any(table[i]["stable"] for i in range(first + 1, len(table))):
-            out["warnings"].append(f"a stable rung above the first degraded one ({lrs[first]:g}): not monotone, check the seeds")
-        if first - 1 - margin >= 0:
-            out["conservative"] = lrs[first - 1 - margin]
+        f = below[-1]
+        out["frontier"] = lrs[f]
+        if any(stable[i] for i in range(top + 1, len(table))):
+            out["warnings"].append(f"a stable rung above the first collapse ({lrs[top]:g}): not monotone, check the seeds")
+        if f - margin >= 0:
+            out["conservative"] = lrs[f - margin]
         else:
             out["warnings"].append(f"no rung {margin} below the frontier: extend the ladder downward")
-        dead = [i for i in range(first, len(table)) if table[i]["dead"]]
+        out["lagging"] = [lrs[i] for i in range(f) if not stable[i]]      # too slow to beat the frozen member yet: not a collapse, no reason to extend
         if dead:
-            out["stress"] = lrs[dead[0]]
+            out["stress"] = lrs[top]
         else:
             out["warnings"].append("no rung above the frontier dies completely: extend the ladder upward")
     return out
@@ -292,8 +297,13 @@ if __name__ == "__main__":
     assert "lowest rung is already degraded" in select_side(ladder([(1, False, True, 1), (2, False, True, 1)]))["warnings"][0]
     assert select_side(ok[:5])["stress"] is None and "dies completely" in select_side(ok[:5])["warnings"][0]
     assert select_side(ok[:2] + ok[3:], margin=3)["conservative"] is None
-    noisy = ladder([(1, True, False, 50), (2, False, False, 40), (3, True, False, 45), (4, False, True, 3)])
+    noisy = ladder([(1, True, False, 50), (2, False, False, 40), (3, False, True, 3), (4, True, False, 45)])
     assert "not monotone" in select_side(noisy)["warnings"][0]
+    lag = ladder([(1, False, False, 40), (2, False, False, 44), (3, True, False, 50), (4, False, True, 3), (5, False, True, 1)])    # slow rungs lag frozen, the cliff is clean
+    sel = select_side(lag)
+    assert (sel["frontier"], sel["conservative"], sel["stress"], sel["lagging"], sel["warnings"]) == (3.0, 2.0, 4.0, [1.0, 2.0], []), sel
+    assert select_side(ok)["lagging"] == [], "a monotone ladder has nothing lagging"
+    assert "lowest rung is already degraded" in select_side(ladder([(1, False, False, 40), (2, False, True, 3)]))["warnings"][0], "no stable rung below the collapse"
     two = ok + [{**r, "seed": 1} for r in ok[:3]] + [{**ok[3], "seed": 1, "stable": False}]
     assert select_side(two)["frontier"] == 3.0, "a rate that is unstable in one seed is unstable"
     assert [t["seeds"] for t in select_side(two)["table"]][:4] == [2, 2, 2, 2]

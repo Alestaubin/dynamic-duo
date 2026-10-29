@@ -127,6 +127,9 @@ Call it again after each wave finishes (about 70 minutes), or add `--chain` (bel
 1. **prerequisites**: the duo's frozen-model temperatures (one job, once per duo).
 2. **continual**: the continual-rate ladder (no reset; both members on the held-out stream x 4 rounds, stopped once both are dead): each member's *conservative*
    rate (stable) and *stress* rate (a complete collapse). Independent: each member alone; joint: the two ladders run together (the i-th rungs as a pair).
+   *Stress* is the lowest rung that dies; the *frontier* is the highest rung below it that is stable (no visit ends more than 2 points below the frozen member);
+   *conservative* is one rung below the frontier. Rungs below the frontier that fail the test only because they adapt too slowly (they lag the frozen member) are
+   listed as `lagging` and do not move anything. These two rates have one use: they make the calibration streams of stage 3, nothing in the search starts from them.
 3. **calibration**: the calibration streams, stress S (both members collapse) and healthy H, 10 runs.
 4. **screens**: the offline replay of the detector (CPU, inline): the shared setting and each member's two candidates.
 5. **tune**: the search above, in waves of live runs (`member__rates.json` / `joint__choice.json`).

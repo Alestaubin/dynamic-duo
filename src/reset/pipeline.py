@@ -215,6 +215,8 @@ def continual_report(S: Setup, log=print) -> dict:
             log(f"  {r['lr']:9.3g}  {'yes' if r['stable'] else 'NO':>6}  {r['min_gain']:+6.1f}  {r['worst_visit']:<30} {dead:>8}  {r['acc']:8.2f}  {r['images']:7d}")
         for k in ("frontier", "conservative", "stress"):
             log(f"  {k:<13}: {sel[k]:g}" if sel[k] is not None else f"  {k:<13}: none")
+        if sel["lagging"]:
+            log("  lagging      : " + ", ".join(f"{x:g}" for x in sel["lagging"]) + "  (below the frontier: too slow to beat the frozen member, not a collapse)")
         warnings += [f"{side}: {w}" for w in sel["warnings"]]
     for w in warnings:
         log("WARNING " + w)
@@ -239,7 +241,8 @@ def continual_results(S: Setup) -> dict | None:
         return None
     d = json.loads(p.read_text())
     axes = S.ladders()
-    return d if all(np.allclose(d["ladders"][s], axes[s], rtol=1e-9) for s in SIDES) else None
+    same = all(len(d["ladders"][s]) == len(axes[s]) and np.allclose(d["ladders"][s], axes[s], rtol=1e-9) for s in SIDES)   # an extended ladder is a different shape
+    return d if same else None
 
 
 def stage_continual(S: Setup) -> Step:
@@ -629,6 +632,13 @@ if __name__ == "__main__":
     needs = {"large": [(0, 0), (2, 0), (3, 2)], "small": [(-4, 0)]}
     pairs = _runs_for(needs, grid.rate)
     assert pairs[0][0] == (grid.rate("large", 0), grid.rate("small", -4)) and len(pairs[0]) == 2 and len(pairs[2]) == 1 and pairs[2][0][0] == grid.rate("large", 3)
+    # a saved continual report made from a shorter ladder is stale (None), not an error: extending the ladder with --mults must reach the report again
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _t:
+        (Path(_t) / "results.json").write_text(json.dumps({"ladders": {"large": [1.0, 2.0], "small": [1.0, 2.0]}, "warnings": []}))
+        stub = lambda axes: type("S", (), {"P": type("P", (), {"continual_dir": Path(_t)})(), "ladders": lambda self: axes})()
+        assert continual_results(stub({"large": [1.0, 2.0], "small": [1.0, 2.0]})) is not None
+        assert continual_results(stub({"large": [0.5, 1.0, 2.0], "small": [0.5, 1.0, 2.0]})) is None
     assert CALIBRATION["S"]["rotations"] == (0, 1, 2, 3) and len(CALIBRATION["S"]["seeds"]) * 4 + 2 == 10, "ten calibration streams: 8 stress + 2 healthy"
     # ---- the flow of a duo: a scratch output folder, the real config of convnextb_deits, synthetic calibration streams ----------------------------------------
     import os

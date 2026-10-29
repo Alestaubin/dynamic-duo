@@ -61,8 +61,8 @@ def control_cond(rule_cond: str, draw: int) -> str:
 def all_methods(cfg: dict) -> list[dict]:
     """The methods of the file plus the control runs (kind 'control'; `ref` = the rule's method it matches)."""
     methods = [dict(m) for m in cfg["methods"]]
-    ctl = cfg.get("control")
-    if ctl:
+    ctls = cfg.get("control") or []
+    for ctl in (ctls if isinstance(ctls, list) else [ctls]):                       # one control entry, or a list of them (one per rule)
         rule = next(m for m in cfg["methods"] if m["cond"] == ctl["rule"] or m["name"] == ctl["rule"])
         for d in ctl.get("draws", [0]):
             methods.append({"name": f"random_{rule['name']}_d{d}", "cond": control_cond(rule["cond"], d), "lrs": rule["lrs"], "kind": "control",

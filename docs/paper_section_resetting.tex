@@ -1,0 +1,46 @@
+% Method-section subsection: resetting collapsed members. Plain LaTeX (amsmath only); align the notation with the rest of the paper:
+%   r_t^{(m)}  the reliability proxy of member m on proxy batch t (the quantity the gate already computes),  b  the proxy batch size,
+%   m in {L, S} the large and the small member.  \ref targets (sec:gate, app:reset_tuning, tab:reset_settings) are placeholders.
+\subsection{Resetting collapsed members}\label{sec:reset}
+
+Entropy minimization on a long stream can drive a member into collapse: its accuracy falls to a few percent and does not recover.
+The gate of Section~\ref{sec:gate} already shifts weight to the member that still works, but the collapsed member keeps adapting on a degenerate
+signal and never becomes useful again. We therefore restore a member to its source weights as soon as a label-free detector says that it has collapsed.
+Everything the rule uses is already available: one proxy value per member and per proxy batch, no labels and no extra forward pass.
+
+\paragraph{Signal.}
+Every $b$ samples the gate computes the reliability proxy $r_t^{(m)} \in (0,1)$ of each member $m \in \{\mathrm{L},\mathrm{S}\}$ on the $t$-th proxy batch.
+The rule reads only the member's own value, on the logit scale,
+\begin{equation}
+  s_t^{(m)} = \operatorname{logit}\!\big(\operatorname{clip}(r_t^{(m)}, \epsilon, 1-\epsilon)\big),
+\end{equation}
+so a member is never reset because of what its partner does, and the decisions of the two members are independent.
+
+\paragraph{Detector.}
+For one member (we drop the index $m$) the detector compares a fast and a slow exponential moving average of $s_t$,
+\begin{equation}
+  f_t = (1-\alpha_{\mathrm{f}})\, f_{t-1} + \alpha_{\mathrm{f}}\, s_t, \qquad
+  g_t = (1-\alpha_{\mathrm{s}})\, g_{t-1} + \alpha_{\mathrm{s}}\, s_t, \qquad 0 < \alpha_{\mathrm{s}} < \alpha_{\mathrm{f}} < 1,
+\end{equation}
+and flags the member when the fast average has fallen more than $\delta$ noise units below the slow one,
+\begin{equation}
+  z_t = \frac{g_t - f_t}{\hat\sigma_{t-1}} > \delta .
+\end{equation}
+The test is one-sided: a rise of the proxy never triggers it. A sudden collapse moves $f_t$ first, a gradual decay moves $g_t$ later, and in both cases the gap
+$g_t - f_t$ opens. $\hat\sigma_t$ is a running standard deviation of $s_t$ (an exponentially weighted variance with a fixed rate), so that $\delta$ is expressed in units of the
+member's own noise; the scale used to judge $s_t$ is the one \emph{before} $s_t$ enters the variance, so that a collapse does not inflate its own yardstick.
+The first $W_0$ proxy batches after the start, and after every reset, are a warm-up: no member is flagged, both averages start at the warm-up mean and $\hat\sigma$ at the warm-up
+standard deviation. The detector costs $O(1)$ per proxy batch.
+
+\paragraph{Action.}
+When a member is flagged, its adapted parameters are restored to the source weights and its optimizer state is emptied (momentum buffers set to zero), so that the next
+update is the first update of a fresh run; its detector restarts with a new warm-up. The other member, the data stream and the gate are left untouched: the gate keeps
+reading both proxies and re-weights the freshly reset member as its proxy recovers. The decisions for a proxy batch are taken for both members before any action is applied,
+so both members can be flagged on the same batch.
+
+\paragraph{Per-member settings.}
+Different architectures collapse at different speeds, so each member $m$ has its own detector setting
+$\mathbf{c}_m = (\alpha_{\mathrm{f}}^{m}, \alpha_{\mathrm{s}}^{m}, W_0^{m}, \delta^{m})$ in addition to its own learning rate $\eta_m$.
+Since the rule reads only a member's own proxy and the gate does not feed back into adaptation, a member's trajectory depends only on $(\eta_m, \mathbf{c}_m)$ and on its own
+reset times; the two members are therefore tuned independently, each on its own accuracy, on held-out corruptions that do not appear in the test stream
+(Appendix~\ref{app:reset_tuning}). The tuned values for our pairs are in Table~\ref{tab:reset_settings}.

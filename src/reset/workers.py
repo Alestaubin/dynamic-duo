@@ -156,7 +156,8 @@ def live(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
 
     # the rule: the screened one (the shared screen's budget-1 choice), whose threshold and per-member settings the condition replaces
     rules: dict[str, RuleSpec] = {}
-    family = MR.FAMILY if MR.parse_condition(cond) else LR.split_condition(cond)[0]
+    # a `random~<reference>~d<k>` control has no rule of its own (its reference run's reset counts are read below); `split_condition` would choke on its name
+    family = None if cond.startswith("random~") else (MR.FAMILY if MR.parse_condition(cond) else LR.split_condition(cond)[0])
     if cond not in ("none", "boundary", "frozen") and not re.fullmatch(r"fixed\d+", cond) and not cond.startswith("random~") and family == MR.FAMILY:
         screen_path = Path(a["screen_json"]) if a.get("screen_json") else P.shared_screen
         if not screen_path.is_file():
