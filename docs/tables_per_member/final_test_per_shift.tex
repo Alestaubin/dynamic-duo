@@ -1,0 +1,25 @@
+\begin{table*}[t]
+  \centering\scriptsize\setlength{\tabcolsep}{2.2pt}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}lrrrrrrrrrrrrrrrr@{}}
+    \toprule
+    Method & Gauss & Shot & Impul & Defoc & Glass & Motn & Zoom & Snow & Frost & Fog & Brit & Contr & Elast & Pixel & JPEG & Avg. \\
+    \midrule
+    No reset, accuracy-tuned rates & 42.9 & 43.7 & 46.2 & 39.2 & 35.8 & 48.1 & 47.7 & 50.7 & 56.2 & 59.1 & 73.6 & 39.3 & 54.4 & 57.2 & 59.3 & 50.2 \\
+    No reset, conservative rates & 42.3 & 42.8 & 45.6 & 38.4 & 34.6 & 47.3 & 47.4 & 50.5 & 56.2 & 59.8 & 73.7 & 37.7 & 54.2 & 57.0 & 59.0 & 49.8 \\
+    Every 500 steps & 45.0 & 46.1 & 46.5 & 40.4 & 37.4 & 49.3 & 51.5 & 54.1 & 56.5 & 63.2 & 74.6 & 37.0 & 57.0 & 60.9 & 60.9 & 52.0 \\
+    Every 1,000 steps & 44.1 & 46.2 & 45.7 & 39.7 & 36.6 & 49.4 & 51.1 & 54.4 & 56.4 & 63.3 & 74.4 & 36.2 & 56.7 & 60.4 & 60.9 & 51.7 \\
+    Own fast/slow trigger & 45.1 & 48.2 & 46.9 & 45.4 & 42.3 & 51.8 & 49.0 & 50.0 & 57.3 & 61.8 & 74.0 & 54.7 & 56.5 & 63.9 & 63.3 & 54.0 \\
+    Own fast/slow, per-member settings & 44.4 & 47.8 & 47.2 & 45.7 & 43.3 & 51.3 & 50.1 & 49.4 & 57.9 & 62.4 & 73.8 & 54.4 & 56.3 & 63.8 & 63.1 & 54.1 \\
+    Joint DD: own fast/slow, per-member settings & 46.9 & 50.0 & 49.0 & 47.8 & 48.4 & 54.2 & 54.4 & \textbf{58.3} & 59.0 & 64.0 & 73.1 & 58.5 & 61.5 & 65.0 & 63.8 & 56.9 \\
+    Random resets, matched to Own fast/slow trigger & 43.9 & 46.7 & 46.4 & 45.1 & 43.5 & 48.4 & 49.0 & 45.4 & 53.1 & 60.8 & 74.3 & 50.9 & 54.7 & 64.0 & 63.0 & 52.6 \\
+    Random resets, matched to Own fast/slow, per-member settings & 43.5 & 46.8 & 45.7 & 45.0 & 43.3 & 47.8 & 49.2 & 44.5 & 47.5 & 60.4 & 74.2 & 44.1 & 54.3 & 63.5 & 63.1 & 51.5 \\
+    Random resets, matched to Joint DD: own fast/slow, per-member settings & 45.9 & 51.2 & 35.4 & 28.7 & 36.9 & 51.7 & 34.3 & 37.0 & 32.1 & 62.0 & 73.9 & 58.9 & 34.8 & 66.2 & 48.5 & 46.5 \\
+    Frozen (no adaptation) & 38.9 & 37.9 & 40.3 & 34.4 & 28.4 & 41.2 & 42.0 & 48.0 & 55.9 & 62.8 & 73.8 & 29.9 & 49.2 & 52.2 & 56.7 & 46.1 \\
+    Reset at every shift (episodic) & 45.3 & 46.7 & 47.0 & 41.2 & 38.0 & 50.7 & 52.4 & 55.1 & 56.1 & 64.2 & 74.8 & 34.8 & 58.2 & 62.1 & 61.2 & 52.5 \\
+    Joint DD, reset at every shift (episodic) & \textbf{49.3} & \textbf{51.6} & \textbf{51.0} & \textbf{50.0} & \textbf{50.6} & \textbf{58.9} & \textbf{56.6} & 51.5 & \textbf{59.5} & \textbf{69.7} & \textbf{76.1} & \textbf{60.5} & \textbf{65.3} & \textbf{68.9} & \textbf{67.0} & 59.1 \\
+    \bottomrule
+  \end{tabular}}
+  \caption{Final test, per corruption (severity 5; accuracy of Vanilla DD, $\beta=0.5$, \%): each corruption's accuracy averaged over the orderings of the stream (the episodic reset and the frozen duo: scripts/03b rows). Bold: the best method on that corruption.}
+  \label{tab:final_per_shift}
+\end{table*}

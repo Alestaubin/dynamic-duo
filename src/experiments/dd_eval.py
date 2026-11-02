@@ -39,6 +39,7 @@ from typing import Sequence
 import numpy as np
 import pandas as pd
 import torch
+from scipy.special import ndtri
 from scipy.stats import spearmanr
 
 from src.experiments import oracles as O
@@ -92,11 +93,26 @@ def plan_buckets(batch_sizes: Sequence[int], n: int, b_t: int) -> BucketPlan:
     return BucketPlan(b_t, n, nb, bucket.astype(np.int64), widx.astype(np.int64))
 
 
-def gate_weights(r_l: np.ndarray, r_s: np.ndarray, beta: float, eps: float = 1e-3) -> np.ndarray:
-    """w_L of every bucket: sigmoid(beta (x_L - x_S)), x = logit(clip(r, eps, 1 - eps))."""
-    a_l, a_s = np.clip(r_l, eps, 1 - eps), np.clip(r_s, eps, 1 - eps)
-    x = np.log(a_l / (1 - a_l)) - np.log(a_s / (1 - a_s))
-    return 1.0 / (1.0 + np.exp(-beta * x))
+# The scale a clipped score a = clip(r, eps, 1 - eps) is put on before the two members are compared (scripts/48_ablate_gate_link.py).
+# "logit" is the live gate's (src.reliability.calibration.logit.to_logit); the others exist only for that ablation: the live
+# JointProxyWeighted always applies the logit. Every link is increasing, so sign(x_L - x_S) (hence the ordering accuracy) is the
+# same for all of them; they differ in how a score gap is stretched, i.e. in how fast the weight moves with it.
+LINKS = {
+    "logit": lambda a: np.log(a / (1 - a)),              # log odds (eq. 8): equal steps are equal odds ratios
+    "identity": lambda a: a,                             # no transform: the raw score gap
+    "log": lambda a: np.log(a),                          # half of the logit: stretches low scores
+    "neglog1m": lambda a: -np.log1p(-a),                 # the other half: stretches high scores
+    "probit": lambda a: ndtri(a),                        # normal quantile: the logit's thinner-tailed cousin
+    "arcsin": lambda a: np.arcsin(np.sqrt(a)),           # variance-stabilizing transform of a proportion
+}
+
+
+def gate_weights(r_l: np.ndarray, r_s: np.ndarray, beta: float, eps: float = 1e-3, link: str = "logit") -> np.ndarray:
+    """w_L of every bucket: sigmoid(beta (x_L - x_S)), x = link(clip(r, eps, 1 - eps)); the live gate's link is the logit."""
+    f = LINKS[link]
+    x = f(np.clip(r_l, eps, 1 - eps)) - f(np.clip(r_s, eps, 1 - eps))
+    with np.errstate(over="ignore"):                     # exp(-beta x) overflows to inf at a saturated gate: w = 0 exactly
+        return 1.0 / (1.0 + np.exp(-beta * x))
 
 
 def sample_weights(w_bucket: np.ndarray, plan: BucketPlan) -> np.ndarray:
@@ -504,4 +520,16 @@ if __name__ == "__main__":
             raise AssertionError("cfg.ts = clean needs a clean stream")
         except ValueError:
             pass
+    # ---- 8. the links of the gate ablation: the default is the live gate's logit, the others are increasing ---------------------
+    rl, rs = rng.uniform(0.0, 1.0, 200), rng.uniform(0.0, 1.0, 200)
+    a_l, a_s = np.clip(rl, 1e-3, 1 - 1e-3), np.clip(rs, 1e-3, 1 - 1e-3)
+    want = 1.0 / (1.0 + np.exp(-2.0 * (np.log(a_l / (1 - a_l)) - np.log(a_s / (1 - a_s)))))
+    assert np.array_equal(gate_weights(rl, rs, 2.0), want) and np.array_equal(gate_weights(rl, rs, 2.0, link="logit"), want)
+    assert np.allclose(gate_weights(rl, rs, 3.0, link="identity"), 1 / (1 + np.exp(-3.0 * (a_l - a_s))))
+    grid = np.linspace(1e-3, 1 - 1e-3, 999)
+    for name, f in LINKS.items():
+        assert (np.diff(f(grid)) > 0).all(), f"link {name!r} must be increasing"
+        assert (gate_weights(rl, rs, 0.0, link=name) == 0.5).all(), "beta = 0 is the fixed combination whatever the link"
+        assert ((gate_weights(rl, rs, 4.0, link=name) > 0.5) == (rl > rs)).all(), "an increasing link keeps the ordering"
+    assert np.isfinite(gate_weights(np.array([0.0]), np.array([1.0]), 512.0, link="log")).all(), "the clip keeps every link finite"
     print("dd_eval self-test passed")

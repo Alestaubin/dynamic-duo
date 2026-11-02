@@ -1,5 +1,5 @@
 # Fdb version 4
-["pdflatex"] 1793206691 "reset_screening_report.tex" "reset_screening_report.pdf" "reset_screening_report" 1793206692 0
+["pdflatex"] 1793256858 "reset_screening_report.tex" "reset_screening_report.pdf" "reset_screening_report" 1793256858 0
   "/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/share/texmf-dist/fonts/enc/dvips/cm-super/cm-super-ts1.enc" 1136849721 2900 1537cc8184ad1792082cd229ecc269f4 ""
   "/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/share/texmf-dist/fonts/map/fontname/texfonts.map" 1577235249 3524 cb3e574dea2d1052e39280babc910dc8 ""
   "/cvmfs/soft.computecanada.ca/gentoo/2023/x86-64-v3/usr/share/texmf-dist/fonts/tfm/jknappen/ec/tcrm1000.tfm" 1136768653 1536 e07581a4bb3136ece9eeb4c3ffab8233 ""
@@ -92,11 +92,11 @@
   "figures/reset_live/overlay_heldout_rot0.pdf" 1793064956 51033 bdd29b51a0022e4a6a4f4be8a4a0f290 ""
   "figures/reset_live/overlay_test_seed0.pdf" 1793064956 44337 6339920aba85bb5042380369ca29b390 ""
   "figures/reset_live/own_fast_vs_slow_test_seed0.pdf" 1793064956 109799 251144bea26e7f93c86dd0cade4f6018 ""
-  "reset_screening_report.aux" 1793206692 16840 c113f0b91ed0a29a02a5e0a79483ab77 "pdflatex"
-  "reset_screening_report.tex" 1793206690 62458 56bd2f614a031581a94c6a3c06914a5d ""
-  "tables/final_test_main.tex" 1793203410 1695 d5f5061f42baa09d11db8bceaa31bd4d ""
-  "tables/final_test_paired.tex" 1793203410 2553 8b7c51d551b11f458e9d416134f3ce41 ""
-  "tables/final_test_per_shift.tex" 1793203410 2227 7bd895f4814ef4922af059a9057a2775 ""
+  "reset_screening_report.aux" 1793256858 18293 1cda621387a06a453ddf4eb34da93c4d "pdflatex"
+  "reset_screening_report.tex" 1793256856 69360 5f5e1bd86c7f02ebad3f706dd9cef29d ""
+  "tables/final_test_main.tex" 1793255623 1695 d5f5061f42baa09d11db8bceaa31bd4d ""
+  "tables/final_test_paired.tex" 1793255623 2553 8b7c51d551b11f458e9d416134f3ce41 ""
+  "tables/final_test_per_shift.tex" 1793255623 2227 7bd895f4814ef4922af059a9057a2775 ""
   "tables/tuning_confirm.tex" 1793203540 1288 db6588341fc48b84cf0b0377eccc0eee ""
   "tables/tuning_control.tex" 1793203540 1419 7cd4cbfd1aafd7f344bd4ebd6480570c ""
   "tables/tuning_noreset.tex" 1793203539 1968 42cfb543a269a457295faca0464bb69c ""

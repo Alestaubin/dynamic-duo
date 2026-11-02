@@ -23,6 +23,7 @@ cached, so a repeat only replays (and a cache from before the clean stream exist
     sbatch --array=0-20 slurm/job.sh scripts/03_tab_adaptation_modes.py --shard auto      # one job per (mode, seed)
     python scripts/03_tab_adaptation_modes.py --report_only                               # tables from the cache
     python scripts/03_tab_adaptation_modes.py --modes joint indep_duo --seeds 0 --num_samples 2000   # smoke test
+    python scripts/03_tab_adaptation_modes.py --heldout --report_only       # the same tables on the 4 corruptions the rates were TUNED on
 
 Learning rates. The modes adapt on different signals and each kind runs with its own rates (cfgs/duo_lrs/<duo>__<regime>.yaml):
 the modes that adapt on a member's OWN entropy (Independent large / small / both) with the indep regime's rates (tuned member by member,
@@ -40,6 +41,11 @@ The rates are part of every cache key, so nothing is shared between two settings
 on the frozen models) never depend on them. With any of these flags the CSV and both tables are named
 <tag>_lrL<large>_S<small>[_jlrL<large>_S<small>][_alrL<large>_S<small>]_<YYYYmmdd-HHMMSS> (the time of the rendering run; a shard never
 renders), so they never replace the tuned run's files in the paper folder nor each other.
+
+--heldout: every mode on the 4 held-out corruptions (the protocol's tuning set: the streams every learning rate was tuned on, no clean stream) instead of
+the 15 test ones, tag `<tag>_heldout`. The member cache of the independent-segment protocols is shared with the tuners (02b, 02c, 02d, 02e), so what they
+already ran is reused and only the missing (mode, seed) runs are computed (`--report_only` lists them, a `--shard auto` array computes them). These are
+the numbers the rates were selected on: they say what the tuning saw, not how the modes generalize.
 
 Writes <paths.paper>/tab_adaptation_modes__<tag>.tex (accuracy per corruption: the duo under each mode, and each
 member alone adapting on its own entropy / frozen; a Clean column that is not part of Avg.),
@@ -65,6 +71,10 @@ from src.experiments.results import per_seed_average, save_rows
 from src.utils.tables import write_table
 
 
+HELDOUT_NOTE = ("These are the 4 held-out corruptions the learning rates were tuned on (speckle noise, Gaussian blur, spatter, saturate), "
+                "not the test corruptions: the numbers show what the tuning saw.")
+
+
 def print_rates(what: str, ctx) -> None:
     print(f"{what}: " + ", ".join(f"{side.lower()} {ctx.duo[side]['NAME']} {ctx.duo[side]['OPTIM']['LR']:g}"
                                   for side in ("LARGE", "SMALL")))
@@ -73,8 +83,10 @@ def print_rates(what: str, ctx) -> None:
 def main() -> int:
     ap = add_common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter))
     AM.add_args(ap)
+    ap.add_argument("--heldout", action="store_true", help="the 4 held-out (tuning) corruptions instead of the 15 test ones; see the docstring")
     args = ap.parse_args()
     ctx, seeds, out = setup(args, "tab_adaptation_modes")
+    segments = AM.heldout_segments(ctx) if args.heldout else None      # None: the protocol's test corruptions and the clean stream
     ctx = AM.with_learning_rates(ctx, args.lr_large, args.lr_small)       # the own-entropy modes' rates (indep regime)
     print_rates("own-entropy learning rates", ctx)
 
@@ -101,9 +113,9 @@ def main() -> int:
 
     jobs = AM.mode_jobs(args.duo, args.tta, args.tta_kwargs, seeds, args.num_samples, temps, args.modes)
     if not args.report_only:
-        AM.compute_members(ctx, select_jobs(jobs, AM.job_label, args.shard, args.only), duo_ctx=duo_ctx, single_ctx=single_ctx,
+        AM.compute_members(ctx, select_jobs(jobs, AM.job_label, args.shard, args.only), segments, duo_ctx=duo_ctx, single_ctx=single_ctx,
                            anchor_ctx=anchor_ctx)
-    gaps = AM.missing(ctx, jobs, duo_ctx, single_ctx, anchor_ctx)
+    gaps = AM.missing(ctx, jobs, duo_ctx, single_ctx, anchor_ctx, segments)
     if gaps:
         for label, streams in gaps.items():
             print(f"{label}: member logits missing for {len(streams)} streams (e.g. {streams[:3]}); "
@@ -112,8 +124,8 @@ def main() -> int:
     if args.shard:
         return 0        # (a shard that finds the cache complete must not render too: with --lr_* the names carry a stamp)
 
-    df = pd.DataFrame(AM.duo_rows(jobs, ctx, temps, duo_ctx=duo_ctx, single_ctx=single_ctx, anchor_ctx=anchor_ctx))
-    tag = AM.output_tag(args, ap.get_default("duo"), stamp=time.strftime("%Y%m%d-%H%M%S"))
+    df = pd.DataFrame(AM.duo_rows(jobs, ctx, temps, segments, duo_ctx=duo_ctx, single_ctx=single_ctx, anchor_ctx=anchor_ctx))
+    tag = AM.output_tag(args, ap.get_default("duo"), stamp=time.strftime("%Y%m%d-%H%M%S")) + ("_heldout" if args.heldout else "")
     save_rows(out / f"{tag}.csv", df)
     corruptions, clean = AM.split_clean(df)
     mean_acc = lambda d: (per_seed_average(d.assign(series=d["mode"] + "/" + d["series"]))     # noqa: E731
@@ -124,10 +136,10 @@ def main() -> int:
     source = "scripts/03_tab_adaptation_modes.py"
     write_table(dest / f"tab_adaptation_modes__{tag}.tex", AM.render_corruption_table(
         df, ctx, args.tta, temps, label=f"tab:adaptation_modes:{tag}", source=source, duo_ctx=duo_ctx,
-        single_ctx=single_ctx, anchor_ctx=anchor_ctx))
+        single_ctx=single_ctx, anchor_ctx=anchor_ctx, note=HELDOUT_NOTE if args.heldout else ""))
     write_table(dest / f"tab_adaptation_modes_summary__{tag}.tex", AM.render_summary_table(
         df, ctx, args.tta, temps, label=f"tab:adaptation_modes_summary:{tag}", source=source, duo_ctx=duo_ctx,
-        single_ctx=single_ctx, anchor_ctx=anchor_ctx))
+        single_ctx=single_ctx, anchor_ctx=anchor_ctx, note=HELDOUT_NOTE if args.heldout else ""))
     return 0
 
 

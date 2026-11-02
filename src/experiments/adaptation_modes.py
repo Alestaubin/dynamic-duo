@@ -293,8 +293,16 @@ def compute_members(ctx: Context, jobs: Sequence[tuple[Mode, RunSpec]], segments
 
 
 def missing(ctx: Context, jobs: Sequence[tuple[Mode, RunSpec]], duo_ctx: Context | None = None,
-            single_ctx: Context | None = None, anchor_ctx: dict[str, Context] | None = None) -> dict[str, list[str]]:
-    return {job_label(j): m for j in jobs if (m := missing_streams(j[1], mode_context(j[0], ctx, duo_ctx, single_ctx, anchor_ctx)))}
+            single_ctx: Context | None = None, anchor_ctx: dict[str, Context] | None = None,
+            segments: list[Segment] | None = None) -> dict[str, list[str]]:
+    return {job_label(j): m for j in jobs
+            if (m := missing_streams(j[1], mode_context(j[0], ctx, duo_ctx, single_ctx, anchor_ctx), segments))}
+
+
+def heldout_segments(ctx: Context) -> list[Segment]:
+    """The streams the learning rates were tuned on (the protocol's 4 held-out corruptions, no clean stream). The member cache of an
+    independent-segment protocol is shared by `episodic` and `tuning` runs, so a tuner's finished runs are this table's cache."""
+    return build_segments(RunSpec(ctx.duo["NAME"], protocol="tuning"), ctx.g)
 
 
 def duo_rows(jobs: Sequence[tuple[Mode, RunSpec]], ctx: Context, temps: Temps,
@@ -467,7 +475,7 @@ def _max_std_points(df: pd.DataFrame, keys: Sequence[str]) -> float | None:
 
 def render_corruption_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Temps, *, label: str,
                             source: str, duo_ctx: Context | None = None, single_ctx: Context | None = None,
-                            anchor_ctx: dict[str, Context] | None = None) -> str:
+                            anchor_ctx: dict[str, Context] | None = None, note: str = "") -> str:
     """Top-1 accuracy per corruption, one row per (mode, prediction) of ROWS (ImageNet-C paper layout), in sections:
     frozen, a single model adapting on its own entropy, the duo with members adapting on their own entropy, the duo
     with members adapting on the duo's. The clean stream is its own column. Means over seeds, no std in the cells."""
@@ -493,7 +501,8 @@ def render_corruption_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Tem
                + (f" \\emph{{Clean}}: the ImageNet validation images the corruptions are rendered from, adapted to like "
                   f"any other stream. It is not part of Avg., the mean over the {n_corr} corruptions." if has_clean else "")
                + (f" Mean over {n_seeds} seeds." + (f" Standard deviations are at most {max_std:.1f} points."
-                                                    if max_std is not None else "") if n_seeds > 1 else ""))
+                                                    if max_std is not None else "") if n_seeds > 1 else "")
+               + (f" {note}" if note else ""))
     return corruption_table(df, groups, ctx.g.corruption_families, value="accuracy", caption=caption, label=label,
                             star=True, source=source, std=False, clean=CLEAN if has_clean else None,
                             group_rows=True, tabcolsep=3.5, models=provenance.run_label(ctx.duo, tta, ctx.bn))
@@ -501,7 +510,7 @@ def render_corruption_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Tem
 
 def render_summary_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Temps, *, label: str, source: str,
                          duo_ctx: Context | None = None, single_ctx: Context | None = None,
-                         anchor_ctx: dict[str, Context] | None = None) -> str:
+                         anchor_ctx: dict[str, Context] | None = None, note: str = "") -> str:
     """Per mode, averaged over the corruptions in `df` (the clean stream is left out): each member's accuracy under
     that mode, then the duo's accuracy, ECE and NLL."""
     df, _ = split_clean(df)
@@ -523,7 +532,7 @@ def render_summary_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Temps,
     n_corr, n_seeds = df["segment"].nunique(), df["seed"].nunique()
     caption = (f"Accuracy (\\%) of each member under each way of adapting, and accuracy, ECE (\\%) and NLL of the duo, "
                f"averaged over the {n_corr} corruptions. " + _setting(ctx, tta, temps, ctx.g.severity, duo_ctx, single_ctx, anchor_ctx)
-               + (f" Mean $\\pm$ std over {n_seeds} seeds." if n_seeds > 1 else ""))
+               + (f" Mean $\\pm$ std over {n_seeds} seeds." if n_seeds > 1 else "") + (f" {note}" if note else ""))
     return latex_table(header, body, caption=caption, label=label, midrule_before=mid, star=False, resize=False,
                        source=source, models=provenance.run_label(ctx.duo, tta, ctx.bn))
 

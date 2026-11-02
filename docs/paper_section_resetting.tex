@@ -44,3 +44,20 @@ $\mathbf{c}_m = (\alpha_{\mathrm{f}}^{m}, \alpha_{\mathrm{s}}^{m}, W_0^{m}, \del
 Since the rule reads only a member's own proxy and the gate does not feed back into adaptation, a member's trajectory depends only on $(\eta_m, \mathbf{c}_m)$ and on its own
 reset times; the two members are therefore tuned independently, each on its own accuracy, on held-out corruptions that do not appear in the test stream
 (Appendix~\ref{app:reset_tuning}). The tuned values for our pairs are in Table~\ref{tab:reset_settings}.
+
+% ---- table of the tuned settings (ViT-B/16 + ResNet-50 V1, Tent, gate beta = 0.5, b = 256). Source: out/results/reset_tune/member__rates.json
+% The per-member procedure converged on these; on the test stream they are statistically tied with one shared setting for both members
+% ((0.05, 0.005, 20, 0.7); duo +0.05 +- 0.14 points), the ViT's lower threshold being worth about +0.6 (not significant) -- state that in the text if you cite the table.
+\begin{table}[t]
+  \centering\small
+  \caption{Tuned reset settings per member (held-out shifts only): averaging speeds $\alpha_{\mathrm f}, \alpha_{\mathrm s}$, warm-up $W_0$ (proxy batches), threshold $\delta$ (noise units) and learning rate $\eta$.}
+  \label{tab:reset_settings}
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Member & $\alpha_{\mathrm f}$ & $\alpha_{\mathrm s}$ & $W_0$ & $\delta$ & $\eta$ \\
+    \midrule
+    ViT-B/16 & 0.05 & 0.005 & 20 & 0.35 & $5.6 \cdot 10^{-4}$ \\
+    ResNet-50 & 0.02 & 0.005 & 100 & 0.7 & $8.84 \cdot 10^{-5}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}

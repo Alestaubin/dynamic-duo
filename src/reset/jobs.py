@@ -37,7 +37,7 @@ SCRIPT = "scripts/tune_reset.py"
 TIME = {"temperatures": "01:00:00", "continual": "01:35:00", "calibration": "02:15:00", "live": "01:50:00"}
 CHAIN_PREFIX = "rt_next_"                                # the name of the job that calls the driver again after a wave
 CHAIN_TIME = "02:00:00"                                  # it may run CPU stages inline (the screens: about a minute each)
-EXCLUDE = "kn117,kn101"                                  # nodes with an uncorrectable GPU ECC error (plan.md, rules for every chat)
+EXCLUDE = "kn117,kn101,kn104"                                # nodes with an uncorrectable GPU ECC error (plan.md, rules for every chat)
 KINDS = tuple(TIME)
 
 

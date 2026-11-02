@@ -156,6 +156,13 @@ python scripts/tune_reset.py --duo X --rotations 0 2           # pool two held-o
 python scripts/tune_reset.py --duo X --baseline fixed1000      # a comparison method that has only a rate to tune (independent only): none, fixed500, fixed1000, own_fast_vs_slow@<delta>
 ```
 
+**The final test of another duo** (`scripts/42_final_test.py`, any `--duo`): after the duo's tuning is complete (the stages above, plus `tune_reset.py --duo X --baseline none`,
+`--baseline fixed500` and `--baseline fixed1000` for the no-reset and schedule comparisons), `42 configs --duo X` freezes the held-out choices into `reset_tune/X/final_configs.json`
+(`src/reset/final_configs.py`; it names whatever is missing), `42 plan|submit --duo X` runs 8 methods x 5 test orderings (the random control waits for the rule's runs), and `42 report
+--duo X` writes the tables to `docs/tables_X/` and `results/reset_final/X/`. The frozen and episodic reference rows come from the 03b CSV, which for a duo without Joint DD runs is
+`scripts/03b_tab_gated_duos.py --duo X --bn --no_joint_dd` (CPU, after script 03). The episodic row's Vanilla DD column is the gate on the episodic Independent run's logits, its
+Fixed-TS column that run's static duo.
+
 What the script does not do: the duo's yaml (`cfgs/duos/<duo>.yaml`) and its episodic rates for the signal (`cfgs/duo_lrs/<duo>__indep.yaml`, `scripts/02c`;
 `<duo>__joint.yaml`, `scripts/02b`) must exist. Slurm runs the same script for one unit of work (`--job <spec>`, the specs are in
 `<out>/results/reset_tune/[<duo>/]jobs/`; `src/reset/workers.py`). State and results are under `out/results/`: `reset_tune/<duo>[__joint]/` (the main duo's independent

@@ -1,0 +1,13 @@
+# ViT-B/16 (torchvision, large: the same member as the main duo) + ConvNeXt-T (torchvision ConvNeXt_Tiny_Weights.DEFAULT, small: about the size of
+# ResNet-50, a different family: LayerNorm, no BatchNorm). Requested 2026-10-29 to run the temperature and adaptation tables on a duo whose small member is as
+# large as ResNet-50. Dataset paths, batch size, corruptions and severities come from cfgs/global.yaml; this file only names the models. Learning rates, per
+# regime (single / indep / joint / large_duo / small_duo): cfgs/duo_lrs/vitb16_convnextt__*.yaml (placeholders until tuned).
+NAME: vitb16_convnextt
+
+LARGE:
+  NAME: vit_b_16
+  NORM: LN
+
+SMALL:
+  NAME: convnext_tiny
+  NORM: LN

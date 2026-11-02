@@ -89,14 +89,24 @@
 \@writefile{toc}{\contentsline {paragraph}{What the test supports.}{15}{}\protected@file@percent }
 \@writefile{lot}{\contentsline {table}{\numberline {22}{\ignorespaces Final test, per corruption (severity 5; accuracy of Vanilla DD, $\beta =0.5$, \%): each corruption's accuracy averaged over the orderings of the stream (the episodic reset and the frozen duo: scripts/03b rows). Bold: the best method on that corruption.}}{16}{}\protected@file@percent }
 \newlabel{tab:final_per_shift}{{22}{16}}
-\@writefile{toc}{\contentsline {section}{\numberline {11}Limits and next steps}{16}{}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Reproduce.}{16}{}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Test stream, seed 0: Vanilla DD (top), the ViT-B/16{} and the ResNet-50{} (below) under every condition, accuracy over windows of 5,120 images; the dashed grey line is the frozen duo / member, dashed lines the references (episodic, oracle). Without a reset (black) both members die (accuracy below 5\% for four windows of 5,120 images): the ResNet-50{} from 158,720 images, the ViT-B/16{} from 430,080. \texttt  {both\_fast\_vs\_slow} (blue) leaves the ResNet-50{} at 0\% until about 400k.}}{18}{}\protected@file@percent }
-\newlabel{fig:overlay-test}{{1}{18}}
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces As Figure\nobreakspace  {}1\hbox {} on the held-out stream (4 shifts $\times $ 4 rounds, rotation 0).}}{19}{}\protected@file@percent }
-\newlabel{fig:overlay-held}{{2}{19}}
-\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \texttt  {gap\_fast\_vs\_slow}, test stream, seed 0: accuracy of the frozen duo, the fixed-TS duo, Vanilla DD and both members; the gate's weight on the ViT-B/16{}; the proxy scores it reads. A triangle marks each reset (dark: ViT-B/16{}, light: ResNet-50{}), a line the same reset in the weight panel. The ResNet-50{} is reset first and the ViT-B/16{} 20--69k images later, six times in a row in the first 400k images.}}{20}{}\protected@file@percent }
-\newlabel{fig:gap}{{3}{20}}
-\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \texttt  {own\_fast\_vs\_slow}, test stream, seed 0, as Figure\nobreakspace  {}3\hbox {}. It resets far less often: seven resets in all, the ResNet-50{} at 133k, 278k, 551k and 701k images and the ViT-B/16{} at 345k, 415k and 605k; the shaded band is the ResNet-50{}'s collapse episode, reset at 278k. Between 278k and 551k the ResNet-50{} is not reset.}}{21}{}\protected@file@percent }
-\newlabel{fig:own}{{4}{21}}
-\gdef \@abspage@last{21}
+\@writefile{lot}{\contentsline {table}{\numberline {23}{\ignorespaces Per-member search, best rate of each candidate (held-out rotations 0 and 2, the member's own accuracy in \%, resets per 1,000 proxy batches). Settings are $(\alpha _{\mathrm  f}, \alpha _{\mathrm  s}, W_0, \delta )$. Chosen: bold. The three ResNet settings are within one paired standard error, so the tie-break (fewest resets) decides.}}{16}{}\protected@file@percent }
+\newlabel{tab:member_search}{{23}{16}}
+\@writefile{toc}{\contentsline {section}{\numberline {11}Per-member detector settings}{16}{}\protected@file@percent }
+\newlabel{sec:permember}{{11}{16}}
+\@writefile{toc}{\contentsline {paragraph}{What the search chose.}{16}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Held-out (validation rotations 1 and 3, 32 visits, paired, per-member minus shared at the same rates).}{16}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Test stream (the same frozen protocol as Section\nobreakspace  {}10\hbox {}: 15 corruptions, five orderings, one random draw per ordering).}{16}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Controls (matched-random resets).}{17}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Claims of the protocol (fixed in advance), and what came out.}{17}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Caveats.}{17}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {12}Limits and next steps}{17}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Reproduce.}{18}{}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Test stream, seed 0: Vanilla DD (top), the ViT-B/16{} and the ResNet-50{} (below) under every condition, accuracy over windows of 5,120 images; the dashed grey line is the frozen duo / member, dashed lines the references (episodic, oracle). Without a reset (black) both members die (accuracy below 5\% for four windows of 5,120 images): the ResNet-50{} from 158,720 images, the ViT-B/16{} from 430,080. \texttt  {both\_fast\_vs\_slow} (blue) leaves the ResNet-50{} at 0\% until about 400k.}}{19}{}\protected@file@percent }
+\newlabel{fig:overlay-test}{{1}{19}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces As Figure\nobreakspace  {}1\hbox {} on the held-out stream (4 shifts $\times $ 4 rounds, rotation 0).}}{20}{}\protected@file@percent }
+\newlabel{fig:overlay-held}{{2}{20}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces \texttt  {gap\_fast\_vs\_slow}, test stream, seed 0: accuracy of the frozen duo, the fixed-TS duo, Vanilla DD and both members; the gate's weight on the ViT-B/16{}; the proxy scores it reads. A triangle marks each reset (dark: ViT-B/16{}, light: ResNet-50{}), a line the same reset in the weight panel. The ResNet-50{} is reset first and the ViT-B/16{} 20--69k images later, six times in a row in the first 400k images.}}{21}{}\protected@file@percent }
+\newlabel{fig:gap}{{3}{21}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces \texttt  {own\_fast\_vs\_slow}, test stream, seed 0, as Figure\nobreakspace  {}3\hbox {}. It resets far less often: seven resets in all, the ResNet-50{} at 133k, 278k, 551k and 701k images and the ViT-B/16{} at 345k, 415k and 605k; the shaded band is the ResNet-50{}'s collapse episode, reset at 278k. Between 278k and 551k the ResNet-50{} is not reset.}}{22}{}\protected@file@percent }
+\newlabel{fig:own}{{4}{22}}
+\gdef \@abspage@last{22}

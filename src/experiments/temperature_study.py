@@ -30,7 +30,7 @@ import torch.nn.functional as F
 
 from src.experiments import oracles as O
 from src.experiments.cache import MemberCache
-from src.experiments.protocols import build_segments
+from src.experiments.protocols import Segment, build_segments
 from src.experiments.cli import bn_tag
 from src.experiments.runner import Context, run_dir
 from src.experiments.specs import RunSpec
@@ -96,9 +96,10 @@ def study_spec(duo: str, g: GlobalConfig, *, tta: str = "tent", mode: str = "bot
                    num_samples=num_samples, protocol_args={"corruptions": corruptions, "clean": clean})
 
 
-def missing_streams(spec: RunSpec, ctx: Context) -> list[str]:
+def missing_streams(spec: RunSpec, ctx: Context, segments: Sequence[Segment] | None = None) -> list[str]:
+    """The labels of the streams (`segments`, default the protocol's) whose member logits are not cached."""
     cache = MemberCache(run_dir(spec, ctx))
-    return [s.label for s in build_segments(spec, ctx.g) if not cache.has(s.file_stem)]
+    return [s.label for s in (segments or build_segments(spec, ctx.g)) if not cache.has(s.file_stem)]
 
 
 def pool(streams: Sequence[Stream]) -> Stream:

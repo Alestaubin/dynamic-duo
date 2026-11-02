@@ -49,6 +49,9 @@ def main() -> int:
     ap.add_argument("--b_t", type=int, default=256, help="proxy batch size")
     ap.add_argument("--joint_dd_dir", default=None, metavar="DIR",
                     help="where script 09 wrote the Joint DD rows (default: <paths.out>/results/run_joint_dd_test)")
+    ap.add_argument("--no_joint_dd", action="store_true",
+                    help="Vanilla DD, frozen and the static duo only: skip script 09's Joint DD rows and script 03's joint mode (what the reset final test, scripts/42, needs of a duo that has "
+                         "no Joint DD run). The files get the suffix _vanillaonly, so a full table is never overwritten.")
     ap.add_argument("--temps_checkpoint", default=None, metavar="DIR", help="as in script 03 (default: the held-out fit it uses)")
     args = ap.parse_args()
     tta = "tent"            # Joint DD (and the joint mode it is compared with) exists for Tent only
@@ -57,13 +60,14 @@ def main() -> int:
     proxy = args.proxy or ctx.g.gate["proxy"]
     proxy = {"nuclear_norm": "nnn", "ac_mc": "msp"}.get(proxy, proxy)       # script 09 names runs by the pure.py key
     temps = AM.resolve_temperatures(ctx, AM.temperature_spec(args.duo, tta, None, None), args.temps_checkpoint, report_only=True)
-    duo_ctx = AM.joint_context(ctx, tta)
+    duo_ctx = ctx if args.no_joint_dd else AM.joint_context(ctx, tta)
     print(f"static duo: T_L = {temps.T_l}, T_S = {temps.T_s}  ({temps.folder})")
     for what, c in (("own-entropy", ctx), ("duo-entropy", duo_ctx)):
         print(f"{what} learning rates: " + ", ".join(f"{s.lower()} {c.duo[s]['NAME']} {c.duo[s]['OPTIM']['LR']:g}" for s in ("LARGE", "SMALL")))
     print(f"gate: {proxy}, proxy batch size {args.b_t}, beta {args.beta:g}")
 
-    jobs = AM.mode_jobs(args.duo, tta, None, seeds, None, temps, list(GD.MODES))
+    modes = [m for m in GD.MODES if m != "joint"] if args.no_joint_dd else list(GD.MODES)
+    jobs = AM.mode_jobs(args.duo, tta, None, seeds, None, temps, modes)
     gaps = AM.missing(ctx, jobs, duo_ctx)
     if gaps:
         for label, streams in gaps.items():
@@ -74,12 +78,13 @@ def main() -> int:
     spec_of = {(m.key, s.seed): s for m, s in jobs}
     for seed in seeds:
         rows += GD.vanilla_rows(spec_of[("indep_duo", seed)], ctx, gate)
-    directory = Path(args.joint_dd_dir) if args.joint_dd_dir else out.parent / "run_joint_dd_test"
-    rows += GD.joint_dd_rows(directory, args.duo, tta, rows[0]["protocol_tag"], proxy, args.b_t, args.beta, seeds)
+    if not args.no_joint_dd:
+        directory = Path(args.joint_dd_dir) if args.joint_dd_dir else out.parent / "run_joint_dd_test"
+        rows += GD.joint_dd_rows(directory, args.duo, tta, rows[0]["protocol_tag"], proxy, args.b_t, args.beta, seeds)
 
     df = pd.DataFrame(rows)
     tag = (f"{tta}__{args.duo}" + bn_tag(args)
-           + f"_{proxy}_bt{args.b_t}_beta{args.beta:g}")
+           + f"_{proxy}_bt{args.b_t}_beta{args.beta:g}" + ("_vanillaonly" if args.no_joint_dd else ""))
     save_rows(out / f"{tag}.csv", df)
     print("\naccuracy / ECE (%) and NLL, averaged over the 15 corruptions (clean left out)" +
           (f"; mean and std over seeds {seeds}" if len(seeds) > 1 else "") + f"\n{GD.summary(df).to_string()}")
