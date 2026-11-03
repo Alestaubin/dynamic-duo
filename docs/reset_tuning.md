@@ -63,6 +63,24 @@ so **one run measures both members**, whatever the partner's rate or setting is;
 **Joint:** the duo's whole-stream accuracy (the in-loop gate's prediction). Both members train on it, so a member's trajectory depends on its partner's rate and
 resets: nothing is measured per member, and a cell is a whole configuration.
 
+## The criterion: mean, or worst_shift
+
+The rules below choose by the **mean** (the default): the highest mean accuracy over the tuning rotation's visits, ties within one paired standard error. `--criterion worst_shift`
+(`--worst_tol POINTS`, default 1; `src/experiments/criteria.py`) chooses instead, among the configurations whose mean is within the tolerance of the best mean, the one with the highest
+**worst visit** (the lowest of the 16 per-visit accuracies: the shift on which it does worst); ties go to the higher mean, then the fewest resets, then the lowest rate. Why: a rate that
+gains on three shifts by collapsing one can win on the mean (ConvNeXt-T alone: 49.3% on average with Gaussian blur at 2%, against 20% frozen), and a worst-shift rule passes it over for a
+slightly lower rate that keeps every shift healthy.
+
+What changes in the search (`TU.choose`, `plan_1d`, `plan_member`, `plan_pair`, `plan_joint` take `criterion`): the candidates of a ladder are **every alive rung tried**, not only the mean's argmax
+and its neighbours; the chosen rung must have its own sqrt-2 neighbours tried (rule 2's analogue for the criterion's optimum), and rules 5 and 6 are unchanged (a choice at the end of the range tried
+extends the range, up to the cap; a dead configuration is out). The gate's beta and the detector candidates are chosen by the same rule. What does NOT change: the temperatures, the continual ladder's
+conservative and stress rates (a stability rule), the calibration streams and the screens: they are the same under both criteria and are not repeated.
+
+A study of the other criterion has **its own folder**, `reset_tune/<duo>[__joint]__worst_shift/` (its `config.json` pins `criterion` and the tolerance), and **shares every live run** with the mean study:
+a run's file is named by condition and rates, so a cell both studies want is run once, and only the extra cells the worst-shift choices ask for are new. Give `--rotations` as the mean study had them (the
+main duo's was pinned to `0 2`; a fresh study defaults to rotation 0). The final test reads a study with `42_final_test.py configs|plan|submit|report --duo <duo> --criterion worst_shift` (its tables go to
+`docs/tables_<duo>__worst_shift/`, its outputs to `reset_final/<duo>__worst_shift/`; the frozen and episodic rows come from the 03b CSV made with the same `--criterion`).
+
 ## The search, independent signal (per member)
 
 1. **Candidates.** The shared setting (the offline screen's choice for both members; the main duo: alpha 0.05 / 0.005, W0 20, delta 0.7) and up to
@@ -164,7 +182,7 @@ python scripts/tune_reset.py --duo X --baseline fixed1000      # a comparison me
 Fixed-TS column that run's static duo.
 
 What the script does not do: the duo's yaml (`cfgs/duos/<duo>.yaml`) and its episodic rates for the signal (`cfgs/duo_lrs/<duo>__indep.yaml`, `scripts/02c`;
-`<duo>__joint.yaml`, `scripts/02b`) must exist. Slurm runs the same script for one unit of work (`--job <spec>`, the specs are in
+`<duo>__joint.yaml`, `scripts/02b`, which tunes the pair for the fixed-TS duo only; `scripts/02f_tune_joint_gate.py` tunes it together with the gate's beta) must exist. Slurm runs the same script for one unit of work (`--job <spec>`, the specs are in
 `<out>/results/reset_tune/[<duo>/]jobs/`; `src/reset/workers.py`). State and results are under `out/results/`: `reset_tune/<duo>[__joint]/` (the main duo's independent
 files predate the folders and sit in `reset_tune/`), `reset_live/<duo>__tent_bn[_joint]/` (the live runs), `tune_continual_lr/`, `gate_stress/`, `screen_resets_stress/`.
 

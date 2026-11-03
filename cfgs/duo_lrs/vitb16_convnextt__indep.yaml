@@ -83,3 +83,61 @@ methods:
       duo_macro_accuracy: 0.55574
       late_duo_accuracy: 0.57687
       worst_stream_accuracy: 0.32265
+  tent@worst_shift:
+    large:
+      model: vit_b_16
+      norm: LN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 0.0001
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02c_tune_indep_pair.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seeds: &id002
+      - 0
+      - 1
+      - 2
+      temperatures: heldout_vitb16_convnextt_frozen_2cc8b343555e
+      note: tuned as a PAIR for this duo (static-duo accuracy)
+      criterion:
+        name: worst_shift
+        tol_points: 1.0
+      duo_macro_accuracy: 0.55295
+      late_duo_accuracy: 0.54665
+      worst_stream_accuracy: 0.33765
+    small:
+      model: convnext_tiny
+      norm: LN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 3.1e-06
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02c_tune_indep_pair.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seeds: *id002
+      temperatures: heldout_vitb16_convnextt_frozen_2cc8b343555e
+      note: tuned as a PAIR for this duo (static-duo accuracy)
+      criterion:
+        name: worst_shift
+        tol_points: 1.0
+      duo_macro_accuracy: 0.55295
+      late_duo_accuracy: 0.54665
+      worst_stream_accuracy: 0.33765

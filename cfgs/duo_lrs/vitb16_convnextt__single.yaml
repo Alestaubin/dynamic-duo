@@ -82,3 +82,61 @@ methods:
       macro_accuracy: 0.49279
       late_accuracy: 0.49811
       frozen_macro_accuracy: 0.43605
+  tent@worst_shift:
+    large:
+      model: vit_b_16
+      norm: LN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 7.0e-05
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02c_tune_indep_pair.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seeds: &id002
+      - 0
+      - 1
+      - 2
+      temperatures: heldout_vitb16_convnextt_frozen_2cc8b343555e
+      note: each model tuned ALONE
+      criterion:
+        name: worst_shift
+        tol_points: 1.0
+      macro_accuracy: 0.51766
+      late_accuracy: 0.53102
+      frozen_macro_accuracy: 0.48793
+    small:
+      model: convnext_tiny
+      norm: LN
+      batch_size: 64
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 2.2e-06
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: scripts/02c_tune_indep_pair.py
+      tuned_on:
+      - speckle_noise/s5
+      - gaussian_blur/s5
+      - spatter/s5
+      - saturate/s5
+      seeds: *id002
+      temperatures: heldout_vitb16_convnextt_frozen_2cc8b343555e
+      note: each model tuned ALONE
+      criterion:
+        name: worst_shift
+        tol_points: 1.0
+      macro_accuracy: 0.48581
+      late_accuracy: 0.51935
+      frozen_macro_accuracy: 0.43605

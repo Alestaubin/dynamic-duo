@@ -47,6 +47,19 @@ the 15 test ones, tag `<tag>_heldout`. The member cache of the independent-segme
 already ran is reused and only the missing (mode, seed) runs are computed (`--report_only` lists them, a `--shard auto` array computes them). These are
 the numbers the rates were selected on: they say what the tuning saw, not how the modes generalize.
 
+--gate_betas B [B ...]: the reliability gate beside the Fixed TS rows (beta = 0), for the two modes in which both members adapt. Each B > 0 adds a
+Vanilla DD row after Independent both (the gate OUTSIDE the loop: replayed on that run's cached logits, no model) and a Joint DD row after Joint (the
+gate INSIDE it: live runs of scripts/09_run_joint_dd.py, one per seed, read from --joint_dd_dir, default <paths.out>/results/run_joint_dd_gated). Each
+beta's Joint DD runs have their own learning rates (the pair scripts/02f_tune_joint_gate.py found at that beta), recorded in the run's .meta.json and
+listed in the caption, so a beta's runs go in the folder with the rest of them and nothing else:
+
+    sbatch --array=0-2 slurm/job.sh scripts/09_run_joint_dd.py --duo vitb16_rn50v1 --bn --streams test clean --cells nnn:256 --betas 0.25 \\
+        --seeds 0 1 2 --shard auto --lr_large 0.00113 --lr_small 0.00283 --eval <eval_duo_grid prefix> --out out/results/run_joint_dd_gated
+    (the same with --betas 0.5 --lr_large 0.0008 --lr_small 0.00283)
+    sbatch slurm/job_cpu.sh scripts/03_tab_adaptation_modes.py --bn --report_only --gate_betas 0.25 0.5
+
+The table is written under the tag <tag>_gate_<proxy>_bt<b_t>_beta<betas> (the summary table is not: it has no gated rows). Test corruptions only.
+
 Writes <paths.paper>/tab_adaptation_modes__<tag>.tex (accuracy per corruption: the duo under each mode, and each
 member alone adapting on its own entropy / frozen; a Clean column that is not part of Avg.),
 tab_adaptation_modes_summary__<tag>.tex (members' accuracy under each mode, duo accuracy / ECE / NLL, averaged over
@@ -66,6 +79,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
 
 from src.experiments import adaptation_modes as AM
+from src.experiments import gated_duos as GD
 from src.experiments.cli import add_common_args, select_jobs, setup
 from src.experiments.results import per_seed_average, save_rows
 from src.utils.tables import write_table
@@ -84,7 +98,18 @@ def main() -> int:
     ap = add_common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter))
     AM.add_args(ap)
     ap.add_argument("--heldout", action="store_true", help="the 4 held-out (tuning) corruptions instead of the 15 test ones; see the docstring")
+    ap.add_argument("--gate_betas", type=float, nargs="+", default=None, metavar="BETA",
+                    help="add the reliability gate to the table: for each BETA > 0, a Vanilla DD row (the gate replayed on the cached Independent "
+                         "both logits) and a Joint DD row (the gate inside the loss: script 09's live runs, read from --joint_dd_dir, each at "
+                         "the learning rates recorded in its .meta.json) beside the Fixed TS rows (beta = 0). The table is written under its own tag; "
+                         "the summary table is not (it has no gated rows)")
+    ap.add_argument("--gate_proxy", default=None, help="the gate's proxy (default: cfgs/global.yaml gate: proxy)")
+    ap.add_argument("--gate_b_t", type=int, default=256, help="the gate's proxy batch size")
+    ap.add_argument("--joint_dd_dir", default=None, metavar="DIR",
+                    help="where script 09 wrote the Joint DD rows (default: <paths.out>/results/run_joint_dd_gated)")
     args = ap.parse_args()
+    if args.gate_betas and (args.heldout or args.num_samples or any(b <= 0 for b in args.gate_betas)):
+        ap.error("--gate_betas takes betas > 0 (beta = 0 is the Fixed TS row) and works on the test corruptions only (no --heldout, no --num_samples)")
     ctx, seeds, out = setup(args, "tab_adaptation_modes")
     segments = AM.heldout_segments(ctx) if args.heldout else None      # None: the protocol's test corruptions and the clean stream
     ctx = AM.with_learning_rates(ctx, args.lr_large, args.lr_small)       # the own-entropy modes' rates (indep regime)
@@ -124,8 +149,33 @@ def main() -> int:
     if args.shard:
         return 0        # (a shard that finds the cache complete must not render too: with --lr_* the names carry a stamp)
 
-    df = pd.DataFrame(AM.duo_rows(jobs, ctx, temps, segments, duo_ctx=duo_ctx, single_ctx=single_ctx, anchor_ctx=anchor_ctx))
+    rows = AM.duo_rows(jobs, ctx, temps, segments, duo_ctx=duo_ctx, single_ctx=single_ctx, anchor_ctx=anchor_ctx)
+    gate_kw = {}
+    if args.gate_betas:
+        betas = sorted(set(args.gate_betas))
+        proxy = args.gate_proxy or ctx.g.gate["proxy"]
+        proxy = {"nuclear_norm": "nnn", "ac_mc": "msp"}.get(proxy, proxy)           # script 09 names its files by the pure.py key
+        jdir = Path(args.joint_dd_dir) if args.joint_dd_dir else ctx.g.path("out") / "results" / "run_joint_dd_gated"
+        have = {m.key for m, _ in jobs}
+        spec_of = {(m.key, s.seed): s for m, s in jobs}
+        rates = {}
+        for beta in betas:
+            if "indep_duo" in have:                  # Vanilla DD: a replay of the Independent both logits, no model
+                gate = GD.vanilla_gate(ctx.g, temps, proxy=proxy, beta=beta, b_t=args.gate_b_t)
+                for seed in seeds:
+                    rows += GD.vanilla_rows(spec_of[("indep_duo", seed)], ctx, gate, segments, mode=GD.gate_mode(GD.VANILLA, beta))
+            if "joint" in have:                      # Joint DD: script 09's live runs (the gate inside the loop)
+                rates[beta] = GD.joint_dd_rates(jdir, args.duo, proxy, args.gate_b_t, beta, seeds)
+                rows += GD.joint_dd_rows(jdir, args.duo, args.tta, rows[0]["protocol_tag"], proxy, args.gate_b_t, beta, seeds,
+                                         mode=GD.gate_mode(GD.JOINT_DD, beta))
+                print(f"Joint DD beta {beta:g}: ViT lr {rates[beta][0]:g}, ResNet lr {rates[beta][1]:g}  ({jdir})")
+        extra, relabel = GD.gated_row_defs(betas, indep="indep_duo" in have, joint="joint" in have)
+        gate_kw = dict(extra_rows=extra, relabel=relabel,
+                       gate_text=GD.gate_caption(ctx, proxy, args.gate_b_t, betas, rates))
+    df = pd.DataFrame(rows)
     tag = AM.output_tag(args, ap.get_default("duo"), stamp=time.strftime("%Y%m%d-%H%M%S")) + ("_heldout" if args.heldout else "")
+    if args.gate_betas:
+        tag += f"_gate_{proxy}_bt{args.gate_b_t}_beta" + "-".join(AM._lr_text(b) for b in betas)
     save_rows(out / f"{tag}.csv", df)
     corruptions, clean = AM.split_clean(df)
     mean_acc = lambda d: (per_seed_average(d.assign(series=d["mode"] + "/" + d["series"]))     # noqa: E731
@@ -136,10 +186,11 @@ def main() -> int:
     source = "scripts/03_tab_adaptation_modes.py"
     write_table(dest / f"tab_adaptation_modes__{tag}.tex", AM.render_corruption_table(
         df, ctx, args.tta, temps, label=f"tab:adaptation_modes:{tag}", source=source, duo_ctx=duo_ctx,
-        single_ctx=single_ctx, anchor_ctx=anchor_ctx, note=HELDOUT_NOTE if args.heldout else ""))
-    write_table(dest / f"tab_adaptation_modes_summary__{tag}.tex", AM.render_summary_table(
-        df, ctx, args.tta, temps, label=f"tab:adaptation_modes_summary:{tag}", source=source, duo_ctx=duo_ctx,
-        single_ctx=single_ctx, anchor_ctx=anchor_ctx, note=HELDOUT_NOTE if args.heldout else ""))
+        single_ctx=single_ctx, anchor_ctx=anchor_ctx, note=HELDOUT_NOTE if args.heldout else "", **gate_kw))
+    if not args.gate_betas:             # the summary has one row per mode and none for the gated runs
+        write_table(dest / f"tab_adaptation_modes_summary__{tag}.tex", AM.render_summary_table(
+            df, ctx, args.tta, temps, label=f"tab:adaptation_modes_summary:{tag}", source=source, duo_ctx=duo_ctx,
+            single_ctx=single_ctx, anchor_ctx=anchor_ctx, note=HELDOUT_NOTE if args.heldout else ""))
     return 0
 
 

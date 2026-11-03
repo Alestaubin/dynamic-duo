@@ -134,13 +134,17 @@ def main() -> int:
     ap.add_argument("--baseline", default="no_reset_tuned", help="report: the method every paired difference of the main table is taken against")
     ap.add_argument("--pairs", nargs="*", default=None, metavar="A:B", help="report: paired differences A - B between method names (default: every rule/schedule against the baseline, the control and the boundary reset)")
     ap.add_argument("--csv", default=None, help="the 03b CSV of the frozen and episodic rows (default: the one of --beta)")
+    ap.add_argument("--criterion", choices=("mean", "worst_shift"), default="mean",
+                    help="which tuning study's choices are the final configs: mean (default) or worst_shift (the study `tune_reset.py --criterion worst_shift` made, in "
+                         "reset_tune/<duo>[__joint]__worst_shift). Its tables and outputs carry the criterion in their folder names; the live runs are shared with the mean study")
     ap.add_argument("--tex_dir", default=None, help="report: default docs/tables (the main duo) or docs/tables_<duo>")
     ap.add_argument("--out_dir", default=None, help="report: default <out>/results/reset_final (the main duo) or reset_final/<duo>")
     args = ap.parse_args()
     g = load_global()
     folder = g.path("out") / "results" / "reset_live" / f"{args.duo}__tent_bn"
-    P = Paths(g, args.duo)
-    main_duo = args.duo == LEGACY_DUO
+    P = Paths(g, args.duo, criterion=args.criterion)
+    suffix = "" if args.criterion == "mean" else f"__{args.criterion}"
+    main_duo = args.duo == LEGACY_DUO and not suffix          # the main duo's MEAN study keeps its hand-written configs and flat folders; its other studies are built like any duo's
     if args.what == "configs":
         if main_duo:
             print("the main duo's final_configs.json was written by hand and is kept; pass another --duo")
@@ -153,7 +157,7 @@ def main() -> int:
         return 0
     cfg_path = Path(args.configs) if args.configs else P.tune_dir / "final_configs.json"
     if not cfg_path.is_file():
-        print(f"{cfg_path} does not exist: " + ("" if main_duo else f"write it from the held-out tuning with `python scripts/42_final_test.py configs --duo {args.duo}`"))
+        print(f"{cfg_path} does not exist: " + ("" if main_duo else f"write it from the held-out tuning with `python scripts/42_final_test.py configs --duo {args.duo}" + (f" --criterion {args.criterion}" if suffix else "") + "`"))
         return 1
     cfg = json.loads(cfg_path.read_text())
     cm = lambda side: provenance.model_name(load_duo(args.duo, g, tta="tent", regime="indep")[side.upper()]["NAME"]).split(" (")[0]
@@ -161,7 +165,7 @@ def main() -> int:
     methods = all_methods(cfg)
     folder_of = lambda m: Paths(g, args.duo, "joint").live_dir() if m.get("signal") == "joint" else folder          # a joint method's runs have their own folder
     orders = [(tok, order_of(tok)) for tok in args.orders]
-    csv = Path(args.csv) if args.csv else g.path("out") / "results" / "tab_gated_duos" / f"tent__{args.duo}_bn_nnn_bt256_beta{args.beta:g}.csv"
+    csv = Path(args.csv) if args.csv else g.path("out") / "results" / "tab_gated_duos" / f"tent__{args.duo}_bn{suffix}_nnn_bt256_beta{args.beta:g}.csv"
     if not args.csv and not csv.is_file():
         csv = csv.with_name(csv.stem + "_vanillaonly.csv")                           # 03b --no_joint_dd
     root = Path(__file__).resolve().parents[1]
@@ -205,8 +209,8 @@ def main() -> int:
             if p.exists():
                 recs[m["name"]][tok] = load_visits(p)
     rows = []
-    out_dir = Path(args.out_dir) if args.out_dir else g.path("out") / "results" / "reset_final" / ("" if main_duo else args.duo)
-    tex_dir = args.tex_dir or ("docs/tables" if main_duo else f"docs/tables_{args.duo}")
+    out_dir = Path(args.out_dir) if args.out_dir else g.path("out") / "results" / "reset_final" / ("" if main_duo else args.duo + suffix)
+    tex_dir = args.tex_dir or ("docs/tables" if main_duo else f"docs/tables_{args.duo}{suffix}")
     out_dir.mkdir(parents=True, exist_ok=True)
     labels = None
     for m in methods:

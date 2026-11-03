@@ -48,7 +48,7 @@ def main() -> int:
     ap.add_argument("--beta", type=float, default=0.5)
     ap.add_argument("--b_t", type=int, default=256, help="proxy batch size")
     ap.add_argument("--joint_dd_dir", default=None, metavar="DIR",
-                    help="where script 09 wrote the Joint DD rows (default: <paths.out>/results/run_joint_dd_test)")
+                    help="where script 09 wrote the Joint DD rows (default: <paths.out>/results/run_joint_dd_test[__<criterion>])")
     ap.add_argument("--no_joint_dd", action="store_true",
                     help="Vanilla DD, frozen and the static duo only: skip script 09's Joint DD rows and script 03's joint mode (what the reset final test, scripts/42, needs of a duo that has "
                          "no Joint DD run). The files get the suffix _vanillaonly, so a full table is never overwritten.")
@@ -79,11 +79,11 @@ def main() -> int:
     for seed in seeds:
         rows += GD.vanilla_rows(spec_of[("indep_duo", seed)], ctx, gate)
     if not args.no_joint_dd:
-        directory = Path(args.joint_dd_dir) if args.joint_dd_dir else out.parent / "run_joint_dd_test"
+        directory = Path(args.joint_dd_dir) if args.joint_dd_dir else out.parent / ("run_joint_dd_test" + ("" if args.criterion == "mean" else f"__{args.criterion}"))
         rows += GD.joint_dd_rows(directory, args.duo, tta, rows[0]["protocol_tag"], proxy, args.b_t, args.beta, seeds)
 
     df = pd.DataFrame(rows)
-    tag = (f"{tta}__{args.duo}" + bn_tag(args)
+    tag = (f"{tta}__{args.duo}" + bn_tag(args) + ("" if args.criterion == "mean" else f"__{args.criterion}")
            + f"_{proxy}_bt{args.b_t}_beta{args.beta:g}" + ("_vanillaonly" if args.no_joint_dd else ""))
     save_rows(out / f"{tag}.csv", df)
     print("\naccuracy / ECE (%) and NLL, averaged over the 15 corruptions (clean left out)" +

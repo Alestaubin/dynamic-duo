@@ -74,7 +74,8 @@ def run_joint_dd(ctx, segments, *, gate_kwargs: dict, seed: int, num_samples: in
     """Joint DD, live: both members adapt on the entropy of the gated prediction (the weight is a constant of the step),
     source weights and a fresh gate before every stream (episodic). Returns {"rows": [...], "gate_records": {...}}: one
     row per (stream, series) with series duo / large / small and the accuracy, ECE, NLL, entropy of the PRE-update logits,
-    and the gate's per-bucket records (proxy values, weights) per stream."""
+    the gate's per-bucket records (proxy values, weights) per stream, and "curves": per stream and series the per-batch sizes and
+    correct counts (what a late-stream accuracy and a collapse check read; scripts/09 does not keep them)."""
     for seg in segments:
         if seg.dataset.class_mask is not None:
             raise ValueError(f"{seg.label}: Joint DD gates the 1000-way logits; 200-class datasets are not supported")
@@ -83,7 +84,7 @@ def run_joint_dd(ctx, segments, *, gate_kwargs: dict, seed: int, num_samples: in
     rec = RecordingCalibrator(gate)
     runner = MemberRunner(ctx.duo, tta, tta_kwargs or {}, "both_duo", ctx.device, ctx.objective_logits,
                           models=ctx.model_factory() if ctx.model_factory else None, loop_calibrator=rec, bn=ctx.bn)
-    rows, records = [], {}
+    rows, records, curves = [], {}, {}
     for seg in segments:
         runner.reset()
         n = min(num_samples, len(seg.dataset)) if num_samples else len(seg.dataset)
@@ -95,8 +96,9 @@ def run_joint_dd(ctx, segments, *, gate_kwargs: dict, seed: int, num_samples: in
             metrics["large"].update(z_l, y)
             metrics["small"].update(z_s, y)
         rows += [{"segment": seg.label, "series": s, **m.result()} for s, m in metrics.items()]
+        curves[seg.label] = {s: {"batch_n": m.batch_n, "batch_correct": m.batch_correct} for s, m in metrics.items()}
         records[seg.label], gate.records = gate.records, []
-    return {"rows": rows, "gate_records": records}
+    return {"rows": rows, "gate_records": records, "curves": curves}
 
 
 if __name__ == "__main__":
@@ -167,6 +169,9 @@ if __name__ == "__main__":
         assert k == len(ref_out) == 10
         assert {r["series"] for r in res0["rows"]} == {"duo", "large", "small"} and len(res0["rows"]) == 6
         assert sorted(res0["gate_records"]) == ["s0/s5", "s1/s5"] and all(len(v) == 2 for v in res0["gate_records"].values())
+        for r in res0["rows"]:                       # the curves are the rows' accuracy, batch by batch
+            c = res0["curves"][r["segment"]][r["series"]]
+            assert sum(c["batch_n"]) == r["n"] == 150 and abs(sum(c["batch_correct"]) / 150 - r["accuracy"]) < 1e-12
 
         # beta > 0 really changes what the members learn
         res1 = run_joint_dd(ctx, segs, gate_kwargs=dict(proxy="msp", beta=8.0, b_t=64, T_l=T_L, T_s=T_S), seed=3)

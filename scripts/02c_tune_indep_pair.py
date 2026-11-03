@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
 
 from src.experiments import adaptation_modes as AM
+from src.experiments import criteria as C
 from src.experiments import indep_pair_tuning as IP
 from src.experiments import joint_lr_tuning as JL
 from src.experiments.cli import add_common_args, bn_tag, setup
@@ -82,9 +83,13 @@ def main() -> int:
     ap.add_argument("--momentum", type=float, default=0.9, help="SGD momentum of the stored members (scripts/04's default)")
     ap.add_argument("--temps_checkpoint", default=None, metavar="DIR", help="JointFixedTS checkpoint (default: the frozen-model fit)")
     ap.add_argument("--record", action="store_true", help="write the individual optima and the best pair to cfgs/duo_lrs (see above)")
+    C.add_tol_arg(ap)
     args = ap.parse_args()
-    tag = f"{args.duo}__{args.tta}{bn_tag(args)}" + (f"__n{args.num_samples}" if args.num_samples else "")
-    ctx, seeds, out = setup(args, f"tune_indep_pair/{tag}", default_seeds=[0])
+    crit = C.Criterion.from_args(args)             # how the optima are chosen and under which key they are recorded (mean unless --criterion worst_shift)
+    tag = f"{args.duo}__{args.tta}{bn_tag(args)}" + (f"__n{args.num_samples}" if args.num_samples else "") + C.folder_tag(crit)
+    ctx, seeds, out = setup(args, f"tune_indep_pair/{tag}", default_seeds=[0], criterion="mean")         # the anchors are the plain recorded rates
+    if crit.robust:
+        print(f"criterion: {crit.describe()}; recorded under {crit.key(args.tta)}")
 
     names = (provenance.model_name(ctx.duo["LARGE"]["NAME"]), provenance.model_name(ctx.duo["SMALL"]["NAME"]))
     print(provenance.footer(ctx.duo, args.tta, args.bn))
@@ -117,7 +122,7 @@ def main() -> int:
     per_seed = {first: IP.score_seed(store, large, small, stems, temps.T_l, temps.T_s, frozen)}
     agg = IP.aggregate(per_seed)
     print("\n== stage A: the full grid, seed " + str(first))
-    lines, choice = IP.report(agg, lrs_large, lrs_small, base, names)
+    lines, choice = IP.report(agg, lrs_large, lrs_small, base, names, crit)
     print("\n".join(lines))
     warnings = list(choice["warnings"])
 
@@ -147,7 +152,7 @@ def main() -> int:
                 print(f"seed {seed}: members missing; run:\n  " + "\n  ".join(cmds))
             return 1
         agg = IP.aggregate(per_seed, min_seeds=len(seeds))
-        lines, choice = IP.report(agg, sub_l, sub_s, base, names)
+        lines, choice = IP.report(agg, sub_l, sub_s, base, names, crit)
         print("\n".join(lines))
         warnings = sorted(set(warnings) | set(choice["warnings"]))
 
@@ -167,7 +172,7 @@ def main() -> int:
     save_rows(out / "ranking.csv", pd.DataFrame(rows))
     clean = lambda v: None if isinstance(v, float) and v != v else v                              # noqa: E731
     (out / "results.json").write_text(json.dumps({
-        "duo": args.duo, "tta": args.tta, "tta_kwargs": args.tta_kwargs, "bn": args.bn, "seeds": seeds, "num_samples": args.num_samples,
+        "duo": args.duo, "tta": args.tta, "tta_kwargs": args.tta_kwargs, "bn": args.bn, "seeds": seeds, "num_samples": args.num_samples, "criterion": crit.to_json(),
         "batch_size": ctx.batch_size, "streams": stems, "temperatures": {"T_l": temps.T_l, "T_s": temps.T_s, "checkpoint": temps.folder.name,
                                                                           "origin": temps.origin},
         "optim": {side.lower(): ctx.duo[side]["OPTIM"] for side in ("LARGE", "SMALL")}, "lrs_large": lrs_large, "lrs_small": lrs_small,

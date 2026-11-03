@@ -189,7 +189,8 @@ def load_global(path: str | Path | None = None) -> GlobalConfig:
     return _load(str(_resolve(chosen)))
 
 
-def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None, tta: str = "tent", regime: str = "indep") -> dict:
+def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None, tta: str = "tent", regime: str = "indep",
+             criterion: str | None = None) -> dict:
     """A duo config (LARGE/SMALL) merged with the global values under the key names the existing
     src/tta engine reads (TEST_DIR, VAL_DIR, BS, WORKERS, EVAL, CALIBRATOR). `name_or_path` is a file
     in cfgs/duos/ (with or without .yaml) or a path to a duo YAML; it names the two models (NAME, NORM) and nothing else.
@@ -199,7 +200,10 @@ def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None, t
     "small_duo" (only that member adapts, on the duo's entropy, the other is frozen: its own tuned rate, NotTuned until recorded;
     the frozen member gets its indep optimizer, which is never built). `tta` = the TTA
     method the run will use: the member's tuned entry for it, else (indep) its default. The entry must have been tuned for the same
-    NORM (otherwise the learning rate belongs to a different set of parameters)."""
+    NORM (otherwise the learning rate belongs to a different set of parameters).
+
+    `criterion` (default None = mean): the tuning criterion whose recorded winners are read, "mean" or "worst_shift" (src/experiments/criteria.py): the entries
+    recorded under `<tta>@<criterion>`; one that is not recorded raises NotTuned, it is never replaced by the mean criterion's rates."""
     from src.utils import duo_lrs
 
     g = global_cfg or load_global()
@@ -220,7 +224,7 @@ def load_duo(name_or_path: str | Path, global_cfg: GlobalConfig | None = None, t
             raise ValueError(f"{p}: {side}.OPTIM would be ignored: the learning rates live in cfgs/duo_lrs/ "
                              f"(python -m src.utils.duo_lrs --init_indep {duo['NAME']}), remove it from the duo file")
     root = g.path("duo_lrs") if "duo_lrs" in g.raw["paths"] else duo_lrs.LR_DIR
-    for side, optim in duo_lrs.resolve(duo, regime, tta, root=root, batch_size=g.batch_size).items():
+    for side, optim in duo_lrs.resolve(duo, regime, tta, root=root, batch_size=g.batch_size, criterion=criterion).items():
         duo[side]["OPTIM"] = optim
     sev = [g.severity]
     duo.update(

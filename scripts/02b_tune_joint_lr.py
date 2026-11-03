@@ -57,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
 
 from src.experiments import adaptation_modes as AM
+from src.experiments import criteria as C
 from src.experiments import joint_lr_tuning as JL
 from src.experiments.cli import add_common_args, bn_tag, select_jobs, setup
 from src.experiments.results import save_rows
@@ -65,13 +66,17 @@ from src.experiments.results import save_rows
 def main() -> int:
     ap = add_common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter))
     JL.add_args(ap)
+    C.add_tol_arg(ap)
     args = ap.parse_args()
-    tag = f"{args.duo}__{args.tta}{bn_tag(args)}" + (f"__n{args.num_samples}" if args.num_samples else "")
+    crit = C.Criterion.from_args(args)             # how the candidates are ranked, the finalists picked and the pair recorded (mean unless --criterion worst_shift)
+    tag = f"{args.duo}__{args.tta}{bn_tag(args)}" + (f"__n{args.num_samples}" if args.num_samples else "") + C.folder_tag(crit)
     if args.record and not args.rank_cache:
         ap.error("--record is for --rank_cache (a full --report_only run records the best pair anyway)")
     if args.rank_cache:
         args.report_only = True                        # nothing is computed: the cache is read as it is
-    ctx, seeds, out = setup(args, f"tune_joint_lr/{tag}", default_seeds=[0])
+    ctx, seeds, out = setup(args, f"tune_joint_lr/{tag}", default_seeds=[0], criterion="mean")      # the anchors are the plain recorded rates, whatever the criterion
+    if crit.robust:
+        print(f"criterion: {crit.describe()}; the pair is recorded under {crit.key(args.tta)}")
 
     current = {side: float(ctx.duo[side]["OPTIM"]["LR"]) for side in ("LARGE", "SMALL")}
     base = tuple(float(f"{current[side]:.6g}") for side in ("LARGE", "SMALL"))
@@ -141,7 +146,7 @@ def main() -> int:
         lrs_small = sorted({p["lr_small"] for p in points}) or lrs_small
     frozen = summaries.get(("frozen", None, None))
     floor = None if frozen is None else frozen["late_duo"]           # the guard: ending worse than the frozen duo is drift
-    ranked = JL.rank(points, late_floor=floor)
+    ranked = JL.rank(points, late_floor=floor, criterion=crit)
     if not ranked:
         print("every grid point diverged (non-finite logits): the learning rates are too large; use smaller --mults")
         return 1
@@ -161,6 +166,11 @@ def main() -> int:
     print(f"\nlate accuracy (%): the last {int(100 * JL.LATE_FRAC)}% of each stream (macro)\n"
           f"{JL.grid_table(points, lrs_large, lrs_small, 'late_duo', best)}")
     print(f"\n{JL.ranking_table(ranked)}")
+    if crit.robust:
+        top = max(p["duo"] for p in ranked)
+        n_ok = len(C.feasible(ranked, crit, lambda p: p["duo"]))
+        print(f"\ncriterion worst_shift: {n_ok} of {len(ranked)} points are within {100 * crit.tol:g} points of the best mean ({100 * top:.2f}); "
+              f"the one with the highest worst-stream accuracy wins")
     print(f"\nbest: large {best['lr_large']:g}, small {best['lr_small']:g}: duo {100 * best['duo']:.2f}, worst stream "
           f"{100 * best['worst']:.2f} ({best['worst_stream']}), large alone {100 * best['large']:.2f}, "
           f"small alone {100 * best['small']:.2f}")
@@ -178,9 +188,9 @@ def main() -> int:
     rows = JL.result_rows(summaries, ranked)
     save_rows(out / "ranking.csv", pd.DataFrame(rows).astype({"rank": "Int64"}))     # the references have no rank
     command = None if args.num_samples else JL.evaluate_command(      # no --joint_lr_*: script 03 reads the pair recorded below
-        duo=args.duo, tta=args.tta, tta_kwargs=args.tta_kwargs, bn=args.bn, temps_folder=temps.folder)
+        duo=args.duo, tta=args.tta, tta_kwargs=args.tta_kwargs, bn=args.bn, temps_folder=temps.folder, criterion=crit)
     (out / "results.json").write_text(json.dumps({
-        "duo": args.duo, "tta": args.tta, "tta_kwargs": args.tta_kwargs, "bn": args.bn, "seeds": seeds,
+        "duo": args.duo, "tta": args.tta, "tta_kwargs": args.tta_kwargs, "bn": args.bn, "seeds": seeds, "criterion": crit.to_json(),
         "num_samples": args.num_samples, "batch_size": ctx.batch_size, "streams": sorted(best["streams"]),
         "temperatures": {"T_l": temps.T_l, "T_s": temps.T_s, "checkpoint": str(temps.folder)},
         "optim": {side.lower(): ctx.duo[side]["OPTIM"] for side in ("LARGE", "SMALL")},

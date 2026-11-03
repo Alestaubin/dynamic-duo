@@ -523,7 +523,7 @@ def report(args, ctx, duo_ctx, temps, proxy: str, seeds: Sequence[int], path_of,
     stream = load_stream(path_of, seeds)
     tta = "tent"
     tag = RC.stream_tag(args.duo, tta, args.bn, args.rounds, args.images, seeds[0] if len(seeds) == 1 else "s".join(map(str, seeds)),
-                        args.order, getattr(args, "stream", "test")) + f"__{proxy}_bt{args.b_t}_beta{args.beta:g}"
+                        args.order, getattr(args, "stream", "test"), getattr(args, "criterion", "mean")) + f"__{proxy}_bt{args.b_t}_beta{args.beta:g}"
     print(summary_text(stream))
     pd.DataFrame(accuracy_rows(stream)).to_csv(out / f"{tag}__accuracy.csv", index=False)
     span = "continual" if args.rounds == 1 else f"{args.rounds} rounds"

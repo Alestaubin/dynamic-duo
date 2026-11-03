@@ -45,3 +45,48 @@ methods:
       - speckle_noise/s5
       duo_macro_accuracy: 0.55864
       worst_stream_accuracy: 0.32573
+  tent@worst_shift:
+    large:
+      model: vit_b_16
+      norm: LN
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 6.2e-06
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: /project/6104790/alxstaub/dynamic-duos/out/results/tune_joint_lr/vitb16_convnextt__tent_bn__worst_shift/results.json
+      tuned_on:
+      - gaussian_blur/s5
+      - saturate/s5
+      - spatter/s5
+      - speckle_noise/s5
+      duo_macro_accuracy: 0.55707
+      worst_stream_accuracy: 0.32893
+      criterion:
+        name: worst_shift
+        tol_points: 1.0
+    small:
+      model: convnext_tiny
+      norm: LN
+      OPTIM:
+        METHOD: SGD
+        STEPS: 1
+        LR: 5.0e-05
+        MOMENTUM: 0.9
+        DAMPENING: 0.0
+        WD: 0.0
+        NESTEROV: false
+      source: /project/6104790/alxstaub/dynamic-duos/out/results/tune_joint_lr/vitb16_convnextt__tent_bn__worst_shift/results.json
+      tuned_on:
+      - gaussian_blur/s5
+      - saturate/s5
+      - spatter/s5
+      - speckle_noise/s5
+      duo_macro_accuracy: 0.55707
+      worst_stream_accuracy: 0.32893
+      criterion:
+        name: worst_shift
+        tol_points: 1.0

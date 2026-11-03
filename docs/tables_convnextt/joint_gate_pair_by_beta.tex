@@ -1,0 +1,13 @@
+\begin{tabular}{@{}c cc c cc@{}}
+\toprule
+ & \multicolumn{3}{c}{best pair at this $\beta$} & \multicolumn{2}{c}{the pair tuned without the gate $(3.2{\cdot}10^{-3}, 4{\cdot}10^{-3})$} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-6}
+gate $\beta$ & \vit{} & ResNet-50 & duo (\%) & duo (\%) & flag \\
+\midrule
+0 & $3.2{\cdot}10^{-3}$ & $2.83{\cdot}10^{-3}$ & 61.98 & 61.94 & none \\
+0.25 & $1.6{\cdot}10^{-3}$ & $2.83{\cdot}10^{-3}$ & 61.30 & 55.22 & drift \\
+0.5 & $8{\cdot}10^{-4}$ & $4{\cdot}10^{-3}$ & 60.60 & 55.63 & drift \\
+0.75 & $8{\cdot}10^{-4}$ & $4{\cdot}10^{-3}$ & 60.28 & 54.73 & drift \\
+1 & $5.66{\cdot}10^{-4}$ & $4{\cdot}10^{-3}$ & 59.88 & 53.23 & drift \\
+\bottomrule
+\end{tabular}

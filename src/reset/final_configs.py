@@ -42,7 +42,9 @@ def build(P: Paths) -> dict:
             **{f"the {c} schedule's rates": d / f"{c}__rates.json" for c, _ in SCHEDULES}}
     for what, p in need.items():
         if not p.is_file():
-            hint = f"tune_reset.py --duo {P.duo} --baseline {Path(p).name.split('__')[0]}" if "__" in Path(p).name and not Path(p).name.startswith("member") else f"tune_reset.py --duo {P.duo}"
+            crit = "" if P.criterion == "mean" else f" --criterion {P.criterion}"                 # the study of that criterion: its own folder, its own tuning run
+            hint = (f"tune_reset.py --duo {P.duo}{crit} --baseline {Path(p).name.split('__')[0]}" if "__" in Path(p).name and not Path(p).name.startswith("member")
+                    else f"tune_reset.py --duo {P.duo}{crit}")
             missing.append(f"{what}: {p} (run {hint} --submit)")
     if missing:
         raise ValueError("the held-out tuning is not complete:\n  " + "\n  ".join(missing))

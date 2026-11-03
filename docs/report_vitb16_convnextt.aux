@@ -1,0 +1,94 @@
+\relax 
+\@writefile{toc}{\contentsline {section}{\numberline {1}What a run consists of}{1}{}\protected@file@percent }
+\newlabel{sec:parts}{{1}{1}}
+\@writefile{toc}{\contentsline {paragraph}{The duo.}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{The static duo and the gate.}{1}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Two ways to use the gate.}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Modes.}{2}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces The modes, what adapts on which entropy, and where the gate is. Regime = the key of the file that holds its learning rates (\texttt  {cfgs/duo\_lrs/<duo>\_\_<regime>.yaml}).}}{2}{}\protected@file@percent }
+\newlabel{tab:modes_def}{{1}{2}}
+\@writefile{toc}{\contentsline {paragraph}{Two settings.}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Streams.}{2}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}What has to be tuned}{2}{}\protected@file@percent }
+\newlabel{sec:inventory}{{2}{2}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}The tuning protocol}{2}{}\protected@file@percent }
+\newlabel{sec:protocol}{{3}{2}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Everything that is tuned (or fitted) for the runs. Scripts are in \texttt  {scripts/}; ``score'' is what the choice maximizes.}}{3}{}\protected@file@percent }
+\newlabel{tab:inventory}{{2}{3}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}How each mode is tuned, and why it has to be}{3}{}\protected@file@percent }
+\newlabel{sec:each}{{4}{3}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Temperatures}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Single model (Independent large / small), 02c}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Independent pair (Independent both, Vanilla DD's members), 02c}{3}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Large adapt and Small adapt, 02d and 02e}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}Joint (static duo), 02b}{4}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6}Joint DD: rates and gate together, 02f}{4}{}\protected@file@percent }
+\newlabel{sec:jointdd}{{4.6}{4}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Joint DD on the main duo (\texttt  {scripts/02f\_tune\_joint\_gate.py}, seed 0, the four tuning shifts, gate inside the loss): the best pair at each \(\beta \), and what the pair tuned without the gate does at the same \(\beta \). ``drift'': its late accuracy is below the frozen duo's. At \(\beta =0\) the best cell is \((3.2{\cdot }10^{-3}, 2.83{\cdot }10^{-3})\); the search's tie rule chose the lower \((2.26{\cdot }10^{-3}, 2.83{\cdot }10^{-3})\) (61.93).}}{5}{}\protected@file@percent }
+\newlabel{tab:betapair}{{3}{5}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7}The Vanilla DD gate, 07 and 08}{5}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.8}Continual runs and resets}{5}{}\protected@file@percent }
+\newlabel{sec:reset}{{4.8}{5}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Putting it together: the order, and why rates are not borrowed}{5}{}\protected@file@percent }
+\newlabel{sec:borrow}{{5}{5}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces The same member's recorded learning rate in each regime (Part\nobreakspace  {}II has scores, frozen references and sources). $-$: not run for that duo. Joint DD: the pair chosen by 02f (\(\beta =0\)), and in brackets the best pair at \(\beta =0.5\). With resets: the member's rate under its tuned per-member reset rule (independent signal).}}{6}{}\protected@file@percent }
+\newlabel{tab:borrow}{{4}{6}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}ViT-B/16{} + ResNet-50{} (the main duo)}{6}{}\protected@file@percent }
+\newlabel{sec:main}{{6}{6}}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces ViT-B/16{} + ResNet-50{}, episodic regimes (\texttt  {cfgs/duo\_lrs/vitb16\_rn50v1\_\_*.yaml}; \texttt  {docs/learning\_rates.md}). The Joint DD row is from the finished 02f search and is not recorded in the cfgs.}}{6}{}\protected@file@percent }
+\newlabel{tab:rates_main}{{5}{6}}
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces ViT-B/16{} + ResNet-50{}, continual and reset regimes (\texttt  {docs/learning\_rates.md}, \texttt  {out/results/reset\_tune/final\_configs.json}, \texttt  {vitb16\_rn50v1\_\_joint/joint\_\_choice.json}). Tuned on the tuning shifts concatenated, 4 rounds, one rotation (the main duo's study pools rotations 0 and 2). Detector settings: (fast speed \(\alpha _f\), slow speed \(\alpha _s\), warm-up \(W_0\), threshold \(\delta \)).}}{6}{}\protected@file@percent }
+\newlabel{tab:rates_main_reset}{{6}{6}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}ViT-B/16{} + ConvNeXt-T{}}{7}{}\protected@file@percent }
+\newlabel{sec:cnxrates}{{7}{7}}
+\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces ViT-B/16{} + ConvNeXt-T{}, episodic regimes (\texttt  {cfgs/duo\_lrs/vitb16\_convnextt\_\_*.yaml}; recorded 2026-10-31; 3 seeds). Joint here is the static duo (\(\beta =0\)); Joint DD with the gate has not been tuned for this duo.}}{7}{}\protected@file@percent }
+\newlabel{tab:rates_cnx}{{7}{7}}
+\@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces ViT-B/16{} + ConvNeXt-T{}, continual ladder (no reset; first stage of \texttt  {scripts/tune\_reset.py}, \texttt  {out/results/tune\_continual\_lr/vitb16\_convnextt\_\_tent\_bn/results.json}; 4 tuning shifts $\times $ 4 rounds, one seed). Stable = every visit ends within 2 points of the frozen member; stress = lowest rate that dies completely.}}{7}{}\protected@file@percent }
+\newlabel{tab:rates_cnx_cont}{{8}{7}}
+\@writefile{toc}{\contentsline {section}{\numberline {8}The tuning stages of this duo}{8}{}\protected@file@percent }
+\newlabel{sec:tuning}{{8}{8}}
+\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces The tuning stages of ViT-B/16{} + ConvNeXt-T{}. Every grid point is a full run over the four tuning streams; grids are in learning rates (``$\times $ single'' is a multiple of that member's single-model rate).}}{8}{}\protected@file@percent }
+\newlabel{tab:stages}{{9}{8}}
+\@writefile{toc}{\contentsline {paragraph}{What was chosen.}{8}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {9}The tables on the four tuning shifts}{8}{}\protected@file@percent }
+\newlabel{sec:held}{{9}{8}}
+\@writefile{lot}{\contentsline {table}{\numberline {10}{\ignorespaces Every mode, accuracy (\%) averaged over the corruptions of the stream, mean over 3 seeds; $\pm $ is the std over seeds of the duo's average. Left: the four tuning shifts. Right: the 15 test corruptions (Section\nobreakspace  {}12\hbox {}).}}{8}{}\protected@file@percent }
+\newlabel{tab:modes}{{10}{8}}
+\@writefile{lot}{\contentsline {table}{\numberline {11}{\ignorespaces The duo's accuracy (\%) on each tuning shift under every mode, mean over 3 seeds.}}{9}{}\protected@file@percent }
+\newlabel{tab:heldout_shift}{{11}{9}}
+\@writefile{toc}{\contentsline {paragraph}{Reading.}{9}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {10}ConvNeXt-T{} alone on its own entropy}{9}{}\protected@file@percent }
+\newlabel{sec:own}{{10}{9}}
+\@writefile{lot}{\contentsline {table}{\numberline {12}{\ignorespaces ConvNeXt-T{} alone, Tent on its own entropy, on the four tuning shifts (accuracy \%, mean $\pm $ std over 3 seeds). $\dagger $: the ConvNeXt-T{} rate of the independent pair; $\ddagger $: the rate tuned for ConvNeXt-T{} alone (highest average). ``worst shift'' is the lowest of the four shift averages.}}{9}{}\protected@file@percent }
+\newlabel{tab:own_held}{{12}{9}}
+\@writefile{toc}{\contentsline {paragraph}{The same member on the test corruptions.}{9}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {13}{\ignorespaces ConvNeXt-T{} alone on the 15 test corruptions (accuracy \%, mean $\pm $ std over 3 seeds): frozen, and Tent on its own entropy at the pair's rate and at the single-model rate. Both rates were selected on the tuning shifts.}}{10}{}\protected@file@percent }
+\newlabel{tab:own_test}{{13}{10}}
+\@writefile{toc}{\contentsline {section}{\numberline {11}Neighbouring rates}{10}{}\protected@file@percent }
+\newlabel{sec:nb}{{11}{10}}
+\@writefile{lot}{\contentsline {table}{\numberline {14}{\ignorespaces ViT-B/16{} alone, Tent on its own entropy, on the four tuning shifts (accuracy \%, mean over 3 seeds); bold: the chosen single-model rate.}}{10}{}\protected@file@percent }
+\newlabel{tab:nb_vit}{{14}{10}}
+\@writefile{lot}{\contentsline {table}{\numberline {15}{\ignorespaces Independent pair: the duo's accuracy on each tuning shift, and the members' averages, around the chosen pair (bold); mean over 3 seeds. ``ConvNeXt-T blur'' is the member's own accuracy on Gaussian blur (frozen: 20.4).}}{11}{}\protected@file@percent }
+\newlabel{tab:nb_pair}{{15}{11}}
+\@writefile{lot}{\contentsline {table}{\numberline {16}{\ignorespaces Large adapt: the duo's accuracy on each tuning shift and the ViT-B/16{}'s average, around the chosen rate (bold); mean over 3 seeds.}}{11}{}\protected@file@percent }
+\newlabel{tab:nb_large}{{16}{11}}
+\@writefile{lot}{\contentsline {table}{\numberline {17}{\ignorespaces Small adapt: the duo's accuracy on each tuning shift and the ConvNeXt-T{}'s average, around the chosen rate (bold); mean over 3 seeds.}}{11}{}\protected@file@percent }
+\newlabel{tab:nb_small}{{17}{11}}
+\@writefile{lot}{\contentsline {table}{\numberline {18}{\ignorespaces Joint: the duo's accuracy on each tuning shift, and the members' averages, around the chosen pair (bold); mean over 3 seeds.}}{11}{}\protected@file@percent }
+\newlabel{tab:nb_joint}{{18}{11}}
+\@writefile{toc}{\contentsline {section}{\numberline {12}The tables on the 15 test corruptions}{12}{}\protected@file@percent }
+\newlabel{sec:test}{{12}{12}}
+\@writefile{lot}{\contentsline {table}{\numberline {19}{\ignorespaces The duo's accuracy (\%) on each of the 15 test corruptions under every mode (mean over 3 seeds). Red: more than 5 points below the frozen duo.}}{12}{}\protected@file@percent }
+\newlabel{tab:test_corr}{{19}{12}}
+\@writefile{toc}{\contentsline {section}{\numberline {13}What is happening}{13}{}\protected@file@percent }
+\newlabel{sec:what}{{13}{13}}
+\@writefile{toc}{\contentsline {paragraph}{1. The selection is blind to single-shift collapses.}{13}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{2. The tuning shifts are not representative of the failures.}{13}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{3. The same pattern in the other new duo, but not in the main duo.}{13}{}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {20}{\ignorespaces Duo accuracy (\%) on the 15 test corruptions, 3 seeds, three duos. The first two rows are from plan.md (script 03, 2026-10-22).}}{13}{}\protected@file@percent }
+\newlabel{tab:duos}{{20}{13}}
+\@writefile{toc}{\contentsline {paragraph}{What this report does not establish.}{13}{}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {14}Open decisions}{13}{}\protected@file@percent }
+\newlabel{sec:open}{{14}{13}}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Provenance}{13}{}\protected@file@percent }
+\gdef \@abspage@last{14}

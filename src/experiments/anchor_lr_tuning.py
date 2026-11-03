@@ -42,6 +42,7 @@ from typing import Sequence
 import pandas as pd
 
 from src.experiments import adaptation_modes as AM
+from src.experiments import criteria as C
 from src.experiments import joint_lr_tuning as JL
 from src.experiments.cli import add_common_args, bn_tag, select_jobs, setup
 from src.experiments.results import save_rows
@@ -136,14 +137,15 @@ def adapt_points(summaries: dict[tuple, dict]) -> list[dict]:
     return sorted(({"lr": p[1], **s} for p, s in summaries.items() if p[0] == "adapt"), key=lambda p: p["lr"])
 
 
-def rank(points: Sequence[dict], late_floor: float | None = None) -> list[dict]:
-    """Finite points, best duo accuracy first. A tie goes to the smaller rate (the repo's convention of preferring the more conservative
+def rank(points: Sequence[dict], late_floor: float | None = None, criterion: C.Criterion = C.MEAN) -> list[dict]:
+    """Finite points, best first under `criterion`: by duo accuracy (mean), or (worst_shift) among the points whose duo accuracy is within the tolerance of the best by
+    the accuracy of their worst stream. A tie goes to the smaller rate (the repo's convention of preferring the more conservative
     setting). With `late_floor` (the frozen duo's late accuracy) a point whose late duo accuracy is below it is ruled out
     (`JL.guard_excluded` lists them); if that would leave nothing, the guard is dropped (the caller says so)."""
     finite = [p for p in points if not p["diverged"]]
     if late_floor is not None and (kept := [p for p in finite if not p.get("late_duo", NAN) < late_floor]):
         finite = kept
-    return sorted(finite, key=lambda p: (-round(p["duo"], 12), p["lr"]))
+    return C.rank(finite, criterion, mean=lambda p: p["duo"], worst=lambda p: p.get("worst", NAN), tie=lambda p: p["lr"])
 
 
 def edge_warning(best: dict, lrs: Sequence[float], side: str) -> str | None:
@@ -212,14 +214,14 @@ def result_rows(summaries: dict[tuple, dict], ranked: Sequence[dict]) -> list[di
 
 
 def evaluate_command(*, duo: str, tta: str, tta_kwargs: dict | None, bn: bool, temps_folder: Path, S: Side,
-                     lr: float | None = None) -> str:
+                     lr: float | None = None, criterion: C.Criterion = C.MEAN) -> str:
     """The script-03 command that scores the rate on the 15 test corruptions: this mode only, with the SAME temperatures as the
     tuning. Without `lr` script 03 reads the rate from cfgs/duo_lrs/<duo>__<regime>.yaml, where `record_best` has put it; with it
     (`--anchor_lr_<side>`) the rate is given by hand (that run's files then carry a rates tag and a time stamp)."""
     parts = ["python", "scripts/03_tab_adaptation_modes.py", "--duo", duo, "--tta", tta]
     if tta_kwargs:
         parts += ["--tta_kwargs", json.dumps(tta_kwargs)]
-    parts += (["--bn"] if bn else []) + ["--modes", S.key]
+    parts += (["--bn"] if bn else []) + ["--modes", S.key] + (["--criterion", criterion.name] if criterion.robust else [])
     if lr is not None:
         parts += [f"--anchor_lr_{S.side}", f"{lr:g}"]
     return shlex.join(parts + ["--temps_checkpoint", str(temps_folder)])
@@ -232,16 +234,17 @@ def record_best(results_json: Path, root: Path | None = None, duos_dir: Path | N
 
     r = json.loads(Path(results_json).read_text())
     duo, tta, side = r["duo"], r["tta"], r["side"]
+    crit = C.Criterion.from_json(r.get("criterion"))
     old = None
     try:
-        entry = duo_lrs.load(duo, f"{side}_duo", root)["methods"].get(tta)
+        entry = duo_lrs.load(duo, f"{side}_duo", root)["methods"].get(crit.key(tta))
         old = float(entry[side]["OPTIM"]["LR"]) if entry else None
     except FileNotFoundError:
         pass
     path = duo_lrs.import_anchor(results_json, root=root, duos_dir=duos_dir)
     new = float(r["best"]["lr"])
     note = "" if old is None else " (unchanged)" if old == new else f" (replacing {old:g})"
-    return f"recorded the best rate, {new:g}, as the {side} member's learning rate for adapting on the duo entropy of {duo} / {tta} in {path}{note}"
+    return f"recorded the best rate, {new:g}, as the {side} member's learning rate for adapting on the duo entropy of {duo} / {crit.key(tta)} in {path}{note}"
 
 
 # ------------------------------------------------------------------------------------------------ script plumbing
@@ -270,10 +273,14 @@ def run(side: str, doc: str, argv: Sequence[str] | None = None, segments: list |
     S = SIDES[side]
     ap = add_common_args(argparse.ArgumentParser(description=doc, formatter_class=argparse.RawDescriptionHelpFormatter))
     add_args(ap, side)
+    C.add_tol_arg(ap)
     args = ap.parse_args(argv)
-    tag = f"{args.duo}__{args.tta}{bn_tag(args)}" + (f"__n{args.num_samples}" if args.num_samples else "")
-    ctx, seeds, out = setup(args, f"tune_{side}_adapt_lr/{tag}", default_seeds=[0])
+    crit = C.Criterion.from_args(args)             # how the rates are ranked and under which key the best is recorded (mean unless --criterion worst_shift)
+    tag = f"{args.duo}__{args.tta}{bn_tag(args)}" + (f"__n{args.num_samples}" if args.num_samples else "") + C.folder_tag(crit)
+    ctx, seeds, out = setup(args, f"tune_{side}_adapt_lr/{tag}", default_seeds=[0], criterion="mean")      # the anchors are the plain recorded rates
     single = AM.single_context(ctx, args.tta)
+    if crit.robust:
+        print(f"criterion: {crit.describe()}; recorded under {crit.key(args.tta)}")
 
     print(provenance.footer(ctx.duo, args.tta, args.bn))
     base_lr = float(f"{single.duo[S.SIDE]['OPTIM']['LR']:.6g}")
@@ -310,7 +317,7 @@ def run(side: str, doc: str, argv: Sequence[str] | None = None, segments: list |
     points = adapt_points(summaries)
     frozen, own = summaries.get(("frozen", None)), summaries.get(("own", None))
     floor = None if frozen is None else frozen["late_duo"]           # the guard: ending worse than the frozen duo is drift
-    ranked = rank(points, late_floor=floor)
+    ranked = rank(points, late_floor=floor, criterion=crit)
     if not ranked:
         print("every grid point diverged (non-finite logits): the learning rates are too large; use smaller --mults")
         return 1
@@ -327,6 +334,10 @@ def run(side: str, doc: str, argv: Sequence[str] | None = None, segments: list |
     refs = {"frozen duo": frozen, f"{S.own_label} (own entropy, single rate {base_lr:g})": own}
     print(f"\n{S.label}: duo accuracy (%), macro over the 4 held-out streams, per learning rate of the {side} member; * = best\n"
           f"{lr_table(points, side, base_lr, best, refs)}")
+    if crit.robust:
+        n_ok = len(C.feasible(ranked, crit, lambda p: p["duo"]))
+        print(f"\ncriterion worst_shift: {n_ok} of {len(ranked)} rates are within {100 * crit.tol:g} points of the best mean ({100 * max(p['duo'] for p in ranked):.2f}); "
+              f"the one with the highest worst-stream accuracy wins")
     print(f"\nbest: {side} {best['lr']:g} ({best['lr'] / base_lr:.3g} x single): duo {100 * best['duo']:.2f}, worst stream "
           f"{100 * best['worst']:.2f} ({best['worst_stream']}), late {100 * best['late_duo']:.2f}, {side} alone {100 * best[side]:.2f}")
     for line in comparisons(summaries, best, base_lr, S):
@@ -347,9 +358,9 @@ def run(side: str, doc: str, argv: Sequence[str] | None = None, segments: list |
     rows = result_rows(summaries, ranked)
     save_rows(out / "ranking.csv", pd.DataFrame(rows).astype({"rank": "Int64"}))     # the references have no rank
     command = None if args.num_samples else evaluate_command(duo=args.duo, tta=args.tta, tta_kwargs=args.tta_kwargs, bn=args.bn,
-                                                             temps_folder=temps.folder, S=S, lr=None if args.record else best["lr"])
+                                                             temps_folder=temps.folder, S=S, lr=None if args.record else best["lr"], criterion=crit)
     (out / "results.json").write_text(json.dumps({
-        "duo": args.duo, "tta": args.tta, "tta_kwargs": args.tta_kwargs, "side": side, "bn": args.bn, "seeds": seeds,
+        "duo": args.duo, "tta": args.tta, "tta_kwargs": args.tta_kwargs, "side": side, "bn": args.bn, "seeds": seeds, "criterion": crit.to_json(),
         "num_samples": args.num_samples, "batch_size": ctx.batch_size, "streams": sorted(best["streams"]),
         "temperatures": {"T_l": temps.T_l, "T_s": temps.T_s, "checkpoint": str(temps.folder)},
         "optim": {side: single.duo[S.SIDE]["OPTIM"]}, "single_lr": base_lr, "lrs": lrs,
@@ -391,7 +402,7 @@ if __name__ == "__main__":
     from src.experiments.cache import MemberCache
     from src.experiments.protocols import Segment
     from src.experiments.runner import run_dir
-    from src.utils import config as C, duo_lrs
+    from src.utils import config as CFG, duo_lrs
     from src.utils.config import load_global
 
     torch.set_num_threads(2)
@@ -524,14 +535,14 @@ if __name__ == "__main__":
         (tmp / "duos" / "tiny.yaml").write_text(yaml.safe_dump({"NAME": "tiny", "LARGE": {"NAME": "tiny_ln", "NORM": "LN"},
                                                                  "SMALL": {"NAME": "tiny_bn", "NORM": "BN"}}))
         global setup
-        real_setup, real_single, real_dir, real_lr_dir = setup, AM.single_context, C.DUO_DIR, duo_lrs.DUO_DIR
+        real_setup, real_single, real_dir, real_lr_dir = setup, AM.single_context, CFG.DUO_DIR, duo_lrs.DUO_DIR
 
-        def fake_setup(args, script, default_seeds=None):
+        def fake_setup(args, script, default_seeds=None, criterion=None):
             out = tmp / "out" / "results" / script
             out.mkdir(parents=True, exist_ok=True)
             return ctx, list(args.seeds or default_seeds), out
 
-        setup, AM.single_context, C.DUO_DIR, duo_lrs.DUO_DIR = fake_setup, (lambda c, tta: c), tmp / "duos", tmp / "duos"
+        setup, AM.single_context, CFG.DUO_DIR, duo_lrs.DUO_DIR = fake_setup, (lambda c, tta: c), tmp / "duos", tmp / "duos"
         try:
             duo_lrs.init_indep("tiny", tmp / "duo_lrs", tmp / "duos", defaults={"large": ctx.duo["LARGE"]["OPTIM"], "small": ctx.duo["SMALL"]["OPTIM"]})
 
@@ -599,7 +610,7 @@ if __name__ == "__main__":
             except (FileNotFoundError, SystemExit):
                 pass
         finally:
-            setup, AM.single_context, C.DUO_DIR, duo_lrs.DUO_DIR = real_setup, real_single, real_dir, real_lr_dir
+            setup, AM.single_context, CFG.DUO_DIR, duo_lrs.DUO_DIR = real_setup, real_single, real_dir, real_lr_dir
 
         # ---- record_best: replaces, says so, never takes a capped run ----------------------------------------------------------
         (tmp / "duos2").mkdir()
@@ -623,4 +634,9 @@ if __name__ == "__main__":
         except ValueError:
             pass
         assert duo_lrs.load("tiny", "small_duo", lrs2)["methods"]["tent"]["small"]["OPTIM"]["LR"] == 4e-3, "the capped run changed nothing"
+    # ---- the worst_shift criterion on a 1-D grid, recorded beside the mean winner
+    pw = [{"lr": 2e-4, "diverged": False, "duo": 0.600, "worst": 0.20, "late_duo": 0.6},
+          {"lr": 1e-4, "diverged": False, "duo": 0.595, "worst": 0.35, "late_duo": 0.6},
+          {"lr": 5e-5, "diverged": False, "duo": 0.540, "worst": 0.45, "late_duo": 0.6}]
+    assert rank(pw)[0]["lr"] == 2e-4 and rank(pw, criterion=C.Criterion.parse("worst_shift", 1.0))[0]["lr"] == 1e-4
     print("anchor_lr_tuning self-test passed")

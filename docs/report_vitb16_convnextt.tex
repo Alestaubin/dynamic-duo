@@ -1,0 +1,442 @@
+% Report: how the Dynamic Duos' learning rates (and gate) are tuned and why every mode needs its own; the tuned rates of ViT-B/16 + ResNet-50 and ViT-B/16 + ConvNeXt-T;
+% and the ConvNeXt-T case (tables on the tuning shifts and on the test corruptions, what is happening).
+% Needs booktabs, amsmath, graphicx, enumitem, url, xcolor, float. The tables in tables_convnextt/ are generated from stored results by
+% out/_smoke/cnxt_heldout_tables/make_report_tables.py (script 03's CSVs under out/results/tab_adaptation_modes/, the per-learning-rate CSVs next to it, and
+% out/results/tune_joint_gate/*/report.txt); the numbers in the text come from the same files, from out/results/tune_*/ (rankings of the tuners), from
+% cfgs/duo_lrs/*.yaml, docs/learning_rates.md, docs/reset_tuning.md and plan.md.
+\documentclass[10pt]{article}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{float}
+\usepackage[hyphens]{url}
+\urlstyle{tt}
+\setlist{nosep,leftmargin=1.4em}
+\emergencystretch=3em
+\newcommand{\rl}[1]{\texttt{#1}}
+\newcommand{\vit}{ViT-B/16}
+\newcommand{\cnx}{ConvNeXt-T}
+\newcommand{\rn}{ResNet-50}
+\newcommand{\lr}[2]{\(#1{\cdot}10^{#2}\)}
+
+\title{How the learning rates of a Dynamic Duo are tuned, and why every mode needs its own:\\
+  \vit{} + \rn{}, \vit{} + \cnx{}, and the \cnx{} case}
+\author{Dynamic Duos, Tent, static duo, Vanilla DD and Joint DD}
+\date{2 November 2026}
+
+\begin{document}
+\maketitle
+
+\section*{Summary}
+\begin{itemize}
+  \item A duo is run in several \emph{modes} (each member alone, the independent pair, one member adapting on the duo's entropy, both adapting on it, with or without a gate, with or without resets). Each mode adapts on a different loss, so each has \textbf{its own learning rates}; none can be borrowed from another mode. Part~I lists what is tuned, how, and why (Sections~\ref{sec:parts}--\ref{sec:borrow}); the shared protocol is Section~\ref{sec:protocol}.
+  \item \textbf{Joint DD with the gate is the case where two things must be tuned together:} the gate sits inside the loss, so its \(\beta\) changes what each member learns, and the best rates depend on \(\beta\) (and \(\beta\) on the rates). On the main duo, the pair tuned without the gate drifts as soon as the gate is switched on (55.6\% at \(\beta=0.5\)), while the pair retuned at \(\beta=0.5\) reaches 60.6\%; the best \vit{} rate falls from \lr{3.2}{-3} at \(\beta=0\) to \lr{5.7}{-4} at \(\beta=1\) (Section~\ref{sec:jointdd}, Table~\ref{tab:betapair}). In that search the gate does not help (\(\beta=0\) wins), but this could only be known by retuning.
+  \item Part~II gives the tuned rates of the two duos (Tables~\ref{tab:rates_main}--\ref{tab:rates_cnx}), including the continual and reset regimes where they exist.
+  \item Part~III is the \vit{} + \cnx{} case. \textbf{On the four tuning shifts, adapting helps:} the duo goes from 50.9\% (frozen) to 55.6--56.0\% in four of the modes, tied within 0.4 points. \textbf{On the 15 test corruptions it does not transfer:} the frozen duo gets 41.0\%; Independent large (44.2\%) and Independent both (42.2\%) are above it, but Large adapt (41.2\%), Joint (38.0\%), Small adapt (33.6\%) and Independent small (20.1\%) are at or below it. \cnx{} adapting on its own entropy falls below 10\% on five of the fifteen corruptions at the independent pair's rate and on ten at its single-model rate.
+  \item \textbf{Why the tuning did not see it:} on the tuning shifts \cnx{}'s average is flat across rates because gains on three shifts offset a collapse on one (Gaussian blur, 20\% frozen to 2\%); the criterion accepts that trade, and the tuning shifts contain none of the corruptions that break it on the test set (fog, snow, frost, elastic, contrast, zoom blur). No selection was changed after seeing test numbers; whether to adopt a rule that sees single-shift collapses is open (Section~\ref{sec:open}).
+\end{itemize}
+
+%==================================================================================================================================================
+\section*{Part I. What has to be tuned, and why}
+
+\section{What a run consists of}\label{sec:parts}
+\paragraph{The duo.} A large and a small member (here \vit{} with \rn{} or \cnx{}; \vit{} and \cnx{} use LayerNorm, \rn{} BatchNorm), adapted with Tent: entropy minimization of the normalization layers' affine parameters, SGD with momentum 0.9, one step per batch of 64. Their logits are combined into one prediction.
+
+\paragraph{The static duo and the gate.} The \emph{static duo} combines the members with fixed temperatures, \(\hat z = \tfrac12\,(z_L/T_L + z_S/T_S)\). A \emph{gate} replaces the equal weights by \(w_L = \sigma(\beta\,(x_L - x_S))\) and \(w_S = 1-w_L\), where \(x_L, x_S\) are label-free reliability scores (a proxy, here the normalized nuclear norm of the member's predictions over proxy batches of 256 images, put on the logit scale). \(\beta = 0\) gives \(w_L = w_S = \tfrac12\), the static duo.
+
+\paragraph{Two ways to use the gate.} In \textbf{Vanilla DD} each member adapts on its \emph{own} entropy and the gate only combines their predictions at the output: the gate is outside the loss, so it changes the duo's prediction but not what the members learn. In \textbf{Joint DD} both members adapt on the entropy of the \emph{gated} prediction: the gate is inside the loss, so \(\beta\) changes what each member learns.
+
+\paragraph{Modes.} Table~\ref{tab:modes_def} lists the ways of adapting that the results compare, with the signal that drives the members. ``Joint'' without ``DD'' denotes the static duo (\(\beta=0\)) in the loss; this is the Joint row of script 03 and of Part~III.
+
+\begin{table}[H]
+  \centering\small
+  \caption{The modes, what adapts on which entropy, and where the gate is. Regime = the key of the file that holds its learning rates (\rl{cfgs/duo\_lrs/<duo>\_\_<regime>.yaml}).}
+  \label{tab:modes_def}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}l l l l l@{}}
+    \toprule
+    mode & who adapts & on which entropy & gate & regime \\
+    \midrule
+    Independent large / small & that member alone & its own & none & single \\
+    Independent both & both & each its own & none (static duo scores) & indep \\
+    Vanilla DD & both & each its own & outside the loss, \(\beta\) & indep \\
+    Large adapt / Small adapt & that member, partner frozen & the static duo's & none & large\_duo / small\_duo \\
+    Joint & both & the static duo's (\(\beta=0\)) & none & joint \\
+    Joint DD & both & the gated duo's & inside the loss, \(\beta\) & joint (+ \(\beta\)) \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\paragraph{Two settings.} \emph{Episodic}: every stream (one corruption) starts from the source weights, the members are reset before each corruption. \emph{Continual}: one long stream through several shifts with no reset, or with resets triggered by a detector (the \emph{resetting} experiments). The episodic modes are tuned in Sections~\ref{sec:each} (first seven subsections); the continual and reset regimes need their own tuning (Section~\ref{sec:reset}).
+
+\paragraph{Streams.} \emph{Tuning shifts} (the only data any choice is made on): ImageNet-C speckle noise, Gaussian blur, spatter and saturate at severity 5, 50,000 images each. \emph{Test corruptions}: the 15 standard ImageNet-C corruptions at severity 5; none of the tuning shifts is among them. Accuracy is the online accuracy of the pre-update predictions; ``Avg'' is the mean over the corruptions of a table; \(\pm\) is the std over stream-order seeds.
+
+\section{What has to be tuned}\label{sec:inventory}
+Table~\ref{tab:inventory} is the inventory. Everything that touches a member's weights or the combination has a number that must be chosen, on the tuning shifts only.
+
+\begin{table}[!t]
+  \centering\small
+  \caption{Everything that is tuned (or fitted) for the runs. Scripts are in \rl{scripts/}; ``score'' is what the choice maximizes.}
+  \label{tab:inventory}
+  \begin{tabular}{@{}l p{4.0cm} p{4.4cm} l@{}}
+    \toprule
+    item & what is searched & score & script \\
+    \midrule
+    temperatures \(T_L, T_S\) & fitted, not searched, on the frozen members' logits (pooled tuning shifts) & (a fit on frozen logits) & 01, 03 \\
+    single-model rate & each member alone, own entropy & the member's whole-stream accuracy & 02c \\
+    independent pair & (large rate, small rate), both on their own entropy & the static duo's whole-stream accuracy & 02c \\
+    Large / Small adapt rate & one member's rate on the duo entropy, partner frozen & the static duo's accuracy & 02d, 02e \\
+    Joint pair (static duo) & (large rate, small rate), both on the duo entropy, \(\beta=0\) & the static duo's accuracy & 02b \\
+    Joint DD & (large rate, small rate, \(\beta\)) \emph{together}, gate inside the loss & the gated duo's accuracy & 02f \\
+    Vanilla DD gate & proxy, proxy batch size, \(\beta\), at the independent pair's rates & the gated duo's accuracy, offline from stored logits & 07, 08 \\
+    continual rates & the stable (conservative) and the collapsing (stress) rate of each member on a long stream, no reset & stability on the stream & 04b / \rl{tune\_reset.py} \\
+    rates with resets & each member's rate with a reset schedule or rule running (independent) or the pair and \(\beta\) (joint) & whole-stream accuracy with resets counted & \rl{tune\_reset.py} \\
+    detector settings & per member: fast and slow speeds, warm-up, threshold \(\delta\) & false-alarm budget, delay, then accuracy & \rl{tune\_reset.py} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{The tuning protocol}\label{sec:protocol}
+One protocol is used for every item, so that the rows of a table differ only in how the members adapt:
+\begin{itemize}
+  \item \textbf{Tuning shifts only.} Nothing is chosen on a test corruption or on any stream built from one. The test stream is run once, with the frozen choices.
+  \item \textbf{Temperatures first and fixed.} \(T_L, T_S\) are fitted once on the \emph{frozen} members' logits (not refitted per mode or per rate), so a rate is never tuned against a temperature that moves with it.
+  \item \textbf{Rate only.} SGD with momentum 0.9, batch 64, one step; only the learning rate is searched, on a grid of ratio \(\sqrt2\) (a coarser \(\times2\) ladder first), extended until the optimum is interior, anchored on the member's single-model rate for the duo modes (``individual rates first, duos from them'').
+  \item \textbf{Criterion.} The whole-stream accuracy of the thing the mode outputs (the member's own for a single model, the static or gated duo's otherwise), the mean over the four tuning shifts. The worst stream is reported but does not decide.
+  \item \textbf{Late-stream guard.} A candidate whose accuracy on the last 20\% of each stream (mean over the shifts) is below the frozen reference's (the frozen member, or the frozen duo for a pair or duo-entropy mode) is ruled out as drifting.
+  \item \textbf{Interior optimum.} A winner on the edge of its grid is not recorded; the grid is extended.
+  \item \textbf{Seeds.} The search runs on one stream-order seed; the finalists (the leading few) run on seeds 0, 1, 2 and the final choice is made on the three.
+\end{itemize}
+
+\section{How each mode is tuned, and why it has to be}\label{sec:each}
+For each item: how it is tuned, why it cannot be taken from another, and, where we have one, a number.
+
+\subsection{Temperatures}
+Fitted per duo on the frozen members' logits over the pooled tuning shifts (\rl{checkpoints/fixed\_ts/}; main duo \(T_L = 0.651\), \(T_S = 1.0097\); \vit{} + \cnx{} \(T_L = 0.7157\), \(T_S = 0.9416\)). They depend on the members' logit scales, hence per duo; they are held fixed for every mode and every tuning below.
+
+\subsection{Single model (Independent large / small), 02c}
+Each member alone, Tent on its own entropy, its own accuracy on the four shifts; the rate must be interior and is then kept. These rates anchor every later grid, and are the rows ``Independent large / small''. They are \emph{not} what a member needs inside a duo (below).
+
+\subsection{Independent pair (Independent both, Vanilla DD's members), 02c}
+Both members adapt on their own entropy, scored by the \emph{duo}: a member's best rate alone is not necessarily best in the combination, because the duo's accuracy depends on both members' errors. For \vit{} + \cnx{} the two differ by a factor of eleven for the \cnx{} (single \lr{3.5}{-5}, pair \lr{3.1}{-6}): at the single rates the duo gets 52.3\%, at the pair 55.6\%. For the main duo they coincide (\lr{7}{-5}, \lr{5}{-4}). Because the members do not see each other's loss, their logits can be computed independently and every pair is scored from stored logits (a \(n\times n\) grid from \(n\) runs), which is why this is the cheap case.
+
+\subsection{Large adapt and Small adapt, 02d and 02e}
+One member adapts on the static duo's entropy while the other is frozen, so the member's loss is the entropy of a combination with a constant partner: a different loss, a different best rate. A one-dimensional grid from 0.5 to 64 times the single rate (extended downward when the optimum is at the edge: to 0.125 for the \cnx{}), finalists on three seeds. The numbers: on the main duo the rates are \lr{1.12}{-3} (\vit{}) and \lr{1.4}{-3} (\rn{}), against \lr{3.2}{-3} and \lr{4}{-3} in Joint; Large adapt had been run with the Joint pair's rate and was retuned on its own, which moved its test-stream average from 50.2\% to 56.2\% and Small adapt from 46.7\% to 50.5\% (plan.md, 2026-10-24).
+
+\subsection{Joint (static duo), 02b}
+Both members adapt on the same combined entropy, so their rates interact and are searched as a \emph{pair}: a \(\times2\) ladder of pairs from the single rates upward, a \(\sqrt2\) refinement around the best, the leading pairs on three seeds, with the late-stream guard against the frozen duo. The gate weights are all \(\tfrac12\): this tunes Joint at \(\beta=0\), not Joint DD. The result is far from the single rates (main duo \lr{3.2}{-3}, \lr{4}{-3}, i.e. 46 and 8 times them).
+
+\subsection{Joint DD: rates and gate together, 02f}\label{sec:jointdd}
+In Joint DD the gate is part of the loss: the weights \(w_L, w_S\) decide how much each member's predictions count in the entropy both members minimize. \(\beta\) therefore changes what each member learns, so a rate tuned without the gate (02b) is not the rate that is best with it, and the best \(\beta\) depends on the rates. Tuning rates at \(\beta=0\) and then choosing \(\beta\) (what 02b and script 09 did) cannot see this. 02f searches a \emph{cell} \((\text{lr}_L, \text{lr}_S, \beta)\) with one live run per cell (a gated run cannot be replayed from stored logits), over the four tuning shifts, in a \emph{nested} way: at every \(\beta\) of \(\{0, 0.25, 0.5, 0.75, 1\}\) the pair is searched on the \(\sqrt2\) grid anchored at the recorded Joint pair, then the betas are compared at their \emph{own} best pairs, ties going to the lowest \(\beta\) (so a choice of 0 means the gate does not help even with the rates retuned). A report-only confirmation on three seeds compares the recorded pair, the best pair without the gate and the chosen pair.
+
+\emph{Why nested.} A coordinate search (pair at one \(\beta\), then \(\beta\), as the reset tuning does) cannot follow a ridge on which the best pair moves with \(\beta\); a synthetic ridge of that shape stayed stuck at \(\beta=0.5\) in the first draft's test.
+
+\emph{What it found (main duo, Table~\ref{tab:betapair}).} The best \vit{} rate falls as \(\beta\) rises, \lr{3.2}{-3} (\(\beta=0\)), \lr{1.6}{-3}, \lr{8}{-4}, \lr{8}{-4}, \lr{5.7}{-4} (\(\beta=1\)), while the \rn{}'s stays near \lr{3}{-3}--\lr{4}{-3}; and the pair tuned without the gate \((3.2{\cdot}10^{-3}, 4{\cdot}10^{-3})\) \emph{drifts} (late accuracy below the frozen duo's) at every \(\beta>0\), scoring 53--56\% where the retuned pair scores 59.9--61.3\%. Retuning is therefore not optional once the gate is on. The gate itself did not help on these shifts: \(\beta=0\) is best (61.9\%), and the chosen pair (\lr{2.26}{-3}, \lr{2.83}{-3}) ties the recorded one (61.92 against 61.94 on three seeds, paired difference \(-0.03\pm0.01\)). The search ran 99 cells on seed 0 plus the confirmation runs. It was \textbf{not recorded}: the Joint file still holds the 02b pair, which script 03, script 09 and the reset tuning read. It has \textbf{not been run for \vit{} + \cnx{}}, whose Joint rates are the \(\beta=0\) pair.
+
+\begin{table}[H]
+  \centering\small
+  \caption{Joint DD on the main duo (\rl{scripts/02f\_tune\_joint\_gate.py}, seed 0, the four tuning shifts, gate inside the loss): the best pair at each \(\beta\), and what the pair tuned without the gate does at the same \(\beta\). ``drift'': its late accuracy is below the frozen duo's. At \(\beta=0\) the best cell is \((3.2{\cdot}10^{-3}, 2.83{\cdot}10^{-3})\); the search's tie rule chose the lower \((2.26{\cdot}10^{-3}, 2.83{\cdot}10^{-3})\) (61.93).}
+  \label{tab:betapair}
+  \input{tables_convnextt/joint_gate_pair_by_beta.tex}
+\end{table}
+
+\subsection{The Vanilla DD gate, 07 and 08}
+The gate is outside the loss, so it does not change the members: they are tuned alone (the independent pair) and the gate is chosen \emph{afterwards}, offline, from the stored logits: every proxy, \(\beta\) and proxy batch size is evaluated on the tuning shifts, the winner is the cell with \(\beta>0\) of best macro accuracy (ties to the proxy with the higher ordering accuracy). The gate of all reset experiments is the nuclear-norm proxy, proxy batch 256, \(\beta=0.5\) (\(\beta\) fixed by decision for the final comparison; it affects only the evaluation of Vanilla DD, not the members). This asymmetry, gate outside against inside the loss, is exactly why Vanilla DD and Joint DD are tuned differently: the first is two independent rate problems plus an offline gate choice, the second is one coupled problem.
+
+\subsection{Continual runs and resets}\label{sec:reset}
+A rate chosen from source weights at every shift (episodic) can collapse a member on a long stream, and a rate chosen without resets is wrong once a reset rule is running, because collapses are then caught and larger rates become usable. The continual setting is therefore tuned separately (\rl{docs/reset\_tuning.md}, \rl{scripts/tune\_reset.py}), on the tuning shifts concatenated (4 shifts \(\times\) 4 rounds, 800,000 images, one rotation), in stages:
+\begin{enumerate}
+  \item \textbf{Continual ladder (04b).} Each member's rate on a long \(\sqrt2\) ladder with no reset: the \emph{frontier} (largest stable rate), the \emph{conservative} rate (one rung below it) and the \emph{stress} rate (lowest that dies completely). They are used as healthy and collapsing streams to calibrate detectors, and as the no-reset baselines.
+  \item \textbf{Detector screen (offline).} For the rule \rl{own\_fast\_vs\_slow} (a member is reset when a fast moving average of its proxy falls more than \(\delta\) noise units below a slow one) a grid of settings is replayed against labelled degradation, keeping those within a false-alarm budget with the smallest delay.
+  \item \textbf{Search (live runs).} Independent signal: each member's rate and detector setting, on the member's own accuracy. Joint signal: the \emph{pair}, \(\beta\) and each member's detector together, scored on the duo (the same coupling as 02f).
+  \item \textbf{Baselines tuned the same way:} no reset, a reset every 500 and every 1,000 steps, each with its rates tuned with the schedule running.
+\end{enumerate}
+The effect on the rates is large (Table~\ref{tab:borrow}): the main duo's \vit{} goes from \lr{7}{-5} (episodic) to \lr{1.26}{-5} (no reset, conservative) to \lr{5.6}{-4} (with its reset rule).
+
+\section{Putting it together: the order, and why rates are not borrowed}\label{sec:borrow}
+The dependencies fix an order: temperatures \(\rightarrow\) single rates \(\rightarrow\) independent pair \(\rightarrow\) Large/Small adapt and Joint (anchored on the single rates) \(\rightarrow\) Joint DD with the gate (anchored on the Joint pair) \(\rightarrow\) the Vanilla DD gate (at the independent pair) \(\rightarrow\) the continual ladder \(\rightarrow\) reset schedules, rules and detector settings.
+
+Table~\ref{tab:borrow} puts the same member's recorded rate under each regime, for the two duos of Part~II. A member's rate spans between one and two orders of magnitude depending on the regime: the main duo's \vit{} runs from \lr{1.26}{-5} to \lr{3.2}{-3} (250 times), its \rn{} from \lr{2.2}{-5} to \lr{4}{-3}. Using one regime's rate in another is not a small error: it is the difference between a healthy run and a drift (the pair tuned without the gate drifts as soon as the gate is on, Table~\ref{tab:betapair}), or between 50.2\% and 56.2\% (Large adapt, above). Each regime therefore needs its own tuning run, on its own signal, with the rule of Section~\ref{sec:protocol}.
+
+\begin{table}[H]
+  \centering\small
+  \caption{The same member's recorded learning rate in each regime (Part~II has scores, frozen references and sources). $-$: not run for that duo. Joint DD: the pair chosen by 02f (\(\beta=0\)), and in brackets the best pair at \(\beta=0.5\). With resets: the member's rate under its tuned per-member reset rule (independent signal).}
+  \label{tab:borrow}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}l l c c c c c c c c@{}}
+    \toprule
+    duo & member & single & indep.\ pair & Large / Small adapt & Joint & Joint DD & no reset (conserv.) & with resets \\
+    \midrule
+    \vit{} + \rn{} & \vit{} & \lr{7}{-5} & \lr{7}{-5} & \lr{1.12}{-3} & \lr{3.2}{-3} & \lr{2.26}{-3} (\lr{8}{-4}) & \lr{1.26}{-5} & \lr{5.6}{-4} \\
+     & \rn{} & \lr{5}{-4} & \lr{5}{-4} & \lr{1.4}{-3} & \lr{4}{-3} & \lr{2.83}{-3} (\lr{4}{-3}) & \lr{2.2}{-5} & \lr{8.84}{-5} \\
+    \midrule
+    \vit{} + \cnx{} & \vit{} & \lr{7}{-5} & \lr{7}{-5} & \lr{4}{-4} & \lr{1.75}{-5} & $-$ & \lr{1.26}{-5} & $-$ \\
+     & \cnx{} & \lr{3.5}{-5} & \lr{3.1}{-6} & \lr{7}{-5} & \lr{7}{-5} & $-$ & \lr{1.09}{-6} & $-$ \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+%==================================================================================================================================================
+\section*{Part II. Tuned learning rates}
+
+All rates are SGD with momentum 0.9, batch 64, Tent. Scores are whole-stream accuracies on the four tuning shifts (\%), three seeds unless noted. A blank in the ``frozen'' column: not applicable.
+
+\section{\vit{} + \rn{} (the main duo)}\label{sec:main}
+Temperatures \(T_L = 0.651\), \(T_S = 1.0097\). Frozen on the tuning shifts: \vit{} 48.8, \rn{} 34.8 (BatchNorm on the test batch's statistics), duo 52.1.
+
+\begin{table}[H]
+  \centering\small
+  \caption{\vit{} + \rn{}, episodic regimes (\rl{cfgs/duo\_lrs/vitb16\_rn50v1\_\_*.yaml}; \rl{docs/learning\_rates.md}). The Joint DD row is from the finished 02f search and is not recorded in the cfgs.}
+  \label{tab:rates_main}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}l l c c l l@{}}
+    \toprule
+    regime & used by (mode) & \vit{} & \rn{} & tuning score & frozen \\
+    \midrule
+    single (02c) & Independent large / small & \lr{7}{-5} & \lr{5}{-4} & \vit{} 51.8; \rn{} 45.7 & 48.8; 34.8 \\
+    independent pair (02c) & Independent both, Vanilla DD & \lr{7}{-5} & \lr{5}{-4} & duo 56.6 & duo 52.1 \\
+    Large adapt (02d) & Large adapt & \lr{1.12}{-3} & frozen & duo 59.9 & duo 52.1 \\
+    Small adapt (02e) & Small adapt & frozen & \lr{1.4}{-3} & duo 55.3 & duo 52.1 \\
+    Joint, static duo (02b) & Joint (\(\beta=0\)) & \lr{3.2}{-3} & \lr{4}{-3} & duo 62.0 & duo 52.1 \\
+    Joint DD, with the gate (02f) & Joint DD & \lr{2.26}{-3} & \lr{2.83}{-3} & duo 61.9 at \(\beta=0\) (the gate does not help; ties the row above, \(-0.03\pm0.01\)) & duo 52.1 \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\begin{table}[H]
+  \centering\small
+  \caption{\vit{} + \rn{}, continual and reset regimes (\rl{docs/learning\_rates.md}, \rl{out/results/reset\_tune/final\_configs.json}, \rl{vitb16\_rn50v1\_\_joint/joint\_\_choice.json}). Tuned on the tuning shifts concatenated, 4 rounds, one rotation (the main duo's study pools rotations 0 and 2). Detector settings: (fast speed \(\alpha_f\), slow speed \(\alpha_s\), warm-up \(W_0\), threshold \(\delta\)).}
+  \label{tab:rates_main_reset}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}l c c l@{}}
+    \toprule
+    method (signal) & \vit{} & \rn{} & detector settings \\
+    \midrule
+    stress (collapsing; calibration only) & \lr{3.5}{-5} & \lr{2.5}{-4} & -- \\
+    no reset, accuracy-tuned & \lr{1.75}{-5} & \lr{3.1}{-5} & -- \\
+    no reset, conservative & \lr{1.26}{-5} & \lr{2.2}{-5} & -- \\
+    reset every 500 steps & \lr{1.4}{-4} & \lr{7.07}{-4} & -- \\
+    reset every 1,000 steps & \lr{7}{-5} & \lr{5}{-4} & -- \\
+    own fast/slow, one shared setting (independent) & \lr{5.6}{-4} & \lr{8.84}{-5} & one setting for both \\
+    own fast/slow, per member (independent) & \lr{5.6}{-4} & \lr{8.84}{-5} & \vit{} \((0.05, 0.005, 20, 0.35)\); \rn{} \((0.02, 0.005, 100, 0.7)\) \\
+    own fast/slow, per member (joint signal, \(\beta=0\)) & \lr{1.6}{-3} & \lr{7.07}{-4} & \vit{} \((0.1, 0.01, 20, 1.05)\); \rn{} \((0.1, 0.025, 20, 1.4)\) \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+Gate of the Vanilla DD runs: nuclear-norm proxy, proxy batch 256, \(\beta=0.5\); Joint DD (joint signal): \(\beta=0\) chosen by the search. The joint-signal rule's pair is tuned on the tuning shifts and is not converged after the two passes the search allows.
+
+\section{\vit{} + \cnx{}}\label{sec:cnxrates}
+Temperatures \(T_L = 0.7157\), \(T_S = 0.9416\). Frozen on the tuning shifts: \vit{} 48.8, \cnx{} 43.6, duo 50.9. The \vit{} is the same model as in the main duo, so its single-model rate and its continual ladder coincide with the main duo's.
+
+\begin{table}[H]
+  \centering\small
+  \caption{\vit{} + \cnx{}, episodic regimes (\rl{cfgs/duo\_lrs/vitb16\_convnextt\_\_*.yaml}; recorded 2026-10-31; 3 seeds). Joint here is the static duo (\(\beta=0\)); Joint DD with the gate has not been tuned for this duo.}
+  \label{tab:rates_cnx}
+  \resizebox{\linewidth}{!}{%
+  \begin{tabular}{@{}l l c c l l@{}}
+    \toprule
+    regime & used by (mode) & \vit{} & \cnx{} & tuning score & frozen \\
+    \midrule
+    single (02c) & Independent large / small & \lr{7}{-5} & \lr{3.5}{-5} & \vit{} 51.8; \cnx{} 49.3 & 48.8; 43.6 \\
+    independent pair (02c) & Independent both, Vanilla DD & \lr{7}{-5} & \lr{3.1}{-6} & duo 55.57 \(\pm\) 0.15 & duo 50.9 \\
+    Large adapt (02d) & Large adapt & \lr{4}{-4} & frozen & duo 56.0 & duo 50.9 \\
+    Small adapt (02e) & Small adapt & frozen & \lr{7}{-5} & duo 55.7 & duo 50.9 \\
+    Joint, static duo (02b) & Joint (\(\beta=0\)) & \lr{1.75}{-5} & \lr{7}{-5} & duo 55.9 (independent pair, same seeds: 55.6) & duo 50.9 \\
+    Joint DD, with the gate (02f) & Joint DD & $-$ & $-$ & not run & \\
+    \bottomrule
+  \end{tabular}}
+\end{table}
+
+\begin{table}[H]
+  \centering\small
+  \caption{\vit{} + \cnx{}, continual ladder (no reset; first stage of \rl{scripts/tune\_reset.py}, \rl{out/results/tune\_continual\_lr/vitb16\_convnextt\_\_tent\_bn/results.json}; 4 tuning shifts $\times$ 4 rounds, one seed). Stable = every visit ends within 2 points of the frozen member; stress = lowest rate that dies completely.}
+  \label{tab:rates_cnx_cont}
+  \begin{tabular}{@{}l c c c@{}}
+    \toprule
+    member & frontier (largest stable) & conservative (one rung below) & stress \\
+    \midrule
+    \vit{} & \lr{1.75}{-5} & \lr{1.26}{-5} & \lr{3.5}{-5} \\
+    \cnx{} & \lr{1.55}{-6} & \lr{1.09}{-6} & \lr{2.17}{-6} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+The \cnx{}'s stable continual rate (\lr{1.55}{-6}) is half the independent pair's episodic rate (\lr{3.1}{-6}), itself eleven times below its single-model rate. The later stages of the reset tuning for this duo (calibration streams, detector screens, the search with resets running) had been started but had not finished when this report was written, so no reset rates are given.
+
+%==================================================================================================================================================
+\section*{Part III. The \vit{} + \cnx{} case}
+
+The remaining sections are about this duo: how its rates were found stage by stage, what its tables show on the tuning shifts and on the test corruptions, and what is happening. The modes, the static duo and the protocol are those of Part~I; ``Joint'' is the static-duo Joint of Table~\ref{tab:modes_def}.
+
+\section{The tuning stages of this duo}\label{sec:tuning}
+\begin{table}[H]
+  \centering\small
+  \caption{The tuning stages of \vit{} + \cnx{}. Every grid point is a full run over the four tuning streams; grids are in learning rates (``$\times$ single'' is a multiple of that member's single-model rate).}
+  \label{tab:stages}
+  \begin{tabular}{@{}l p{4.2cm} p{7.3cm}@{}}
+    \toprule
+    stage & regime it records & grid and outcome \\
+    \midrule
+    02c, A & single model, independent pair & seed 0; \vit{} \(1.2{\cdot}10^{-5}\)--\(2{\cdot}10^{-4}\) (9 rates) by \cnx{} \(3.1{\cdot}10^{-6}\)--\(5{\cdot}10^{-5}\) (9 rates), 81 pairs from stored member logits; one \cnx{} rung (\(2.2{\cdot}10^{-6}\)) was added because the optimum was one step from the lower edge. \\
+    02c, B & same, 3 seeds & the two-rung neighbourhood of both optima on seeds 0, 1, 2 (\vit{} \(3.5{\cdot}10^{-5}\)--\(1.4{\cdot}10^{-4}\), \cnx{} all eight rates), recorded. \\
+    02b & Joint & seed 0, \(\times2\) ladder \vit{} \(7{\cdot}10^{-5}\)--\(4.5{\cdot}10^{-3}\) by \cnx{} \(4.4{\cdot}10^{-6}\)--\(2.8{\cdot}10^{-4}\) (49 points; the late guard ruled out 46); the optimum sat on the lower \vit{} edge, so the grid was extended three times (92 points on seed 0 in all); the 8 leading pairs on seeds 1 and 2; recorded. \\
+    02d & Large adapt & \(0.5\)--\(64\times\) single (8 rates), refinement and finalists \(2{\cdot}10^{-4}\)--\(5.6{\cdot}10^{-4}\) on 3 seeds; recorded. \\
+    02e & Small adapt & \(0.125\)--\(64\times\) single (10 rates), finalists \(3.5{\cdot}10^{-5}\)--\(10^{-4}\) on 3 seeds; recorded. \\
+    03 & all modes at the recorded rates & 15 test corruptions $\times$ 3 seeds, and (\rl{--heldout}) the four tuning shifts from the tuners' cache. \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{What was chosen.} Table~\ref{tab:rates_cnx} lists the recorded rates. Two features stand out: the independent pair's \cnx{} rate (\lr{3.1}{-6}) is eleven times smaller than the rate tuned for \cnx{} alone (\lr{3.5}{-5}), because the duo's accuracy falls at larger \cnx{} rates (52.3\% at \((7{\cdot}10^{-5}, 3.5{\cdot}10^{-5})\) against 55.6\% at the chosen pair); and Joint's \vit{} rate is four times \emph{smaller} than its single rate (\lr{1.75}{-5}), so the \vit{} is barely adapted there.
+
+\section{The tables on the four tuning shifts}\label{sec:held}
+Table~\ref{tab:modes} (left half) and Table~\ref{tab:heldout_shift} give every mode at its recorded rate on the shifts the rates were tuned on. These are the numbers the selection saw; they say what the tuning optimized, not how the modes generalize.
+
+\begin{table}[H]
+  \centering\small
+  \caption{Every mode, accuracy (\%) averaged over the corruptions of the stream, mean over 3 seeds; $\pm$ is the std over seeds of the duo's average. Left: the four tuning shifts. Right: the 15 test corruptions (Section~\ref{sec:test}).}
+  \label{tab:modes}
+  \input{tables_convnextt/modes_summary.tex}
+\end{table}
+
+\begin{table}[H]
+  \centering\small
+  \caption{The duo's accuracy (\%) on each tuning shift under every mode, mean over 3 seeds.}
+  \label{tab:heldout_shift}
+  \input{tables_convnextt/heldout_duo_per_shift.tex}
+\end{table}
+
+\paragraph{Reading.} Independent large helps the duo by 2.5 points. Independent both, Large adapt, Small adapt and Joint all land at 55.6--56.0, a spread of 0.4 points, which is comparable to the differences between neighbouring learning rates of the same mode (Section~\ref{sec:nb}); at this resolution the four modes are tied on these shifts. \textbf{Independent small is the exception} (50.7, 0.2 below frozen): \cnx{} adapting alone on its own entropy at \(3.5{\cdot}10^{-5}\) reaches 49.3 on average (frozen 43.6) but collapses on Gaussian blur (Table~\ref{tab:own_held}), and the duo follows it there (6.6 against 28.9 for the frozen duo). On Gaussian blur Large adapt improves most (35.8 against 28.9); the other modes that adapt the \vit{} or use the duo entropy are at 32.4--32.9.
+
+\section{\cnx{} alone on its own entropy}\label{sec:own}
+This is the clearest view of what the tuning criterion sees. Table~\ref{tab:own_held} gives \cnx{}'s own accuracy under Tent on its own entropy on each tuning shift, for every learning rate of the grid.
+
+\begin{table}[H]
+  \centering\small
+  \caption{\cnx{} alone, Tent on its own entropy, on the four tuning shifts (accuracy \%, mean $\pm$ std over 3 seeds). $\dagger$: the \cnx{} rate of the independent pair; $\ddagger$: the rate tuned for \cnx{} alone (highest average). ``worst shift'' is the lowest of the four shift averages.}
+  \label{tab:own_held}
+  \input{tables_convnextt/own_entropy_heldout.tex}
+\end{table}
+
+\begin{itemize}
+  \item Speckle noise, spatter and saturate improve at every step up to \(3.5{\cdot}10^{-5}\) (speckle \(34.7 \to 56.5\), spatter \(54.1 \to 68.3\)); Gaussian blur falls the other way (\(20.4 \to 2.0\)).
+  \item The average is therefore \emph{flat}, 48.6--49.3 from \(2.2{\cdot}10^{-6}\) to \(3.5{\cdot}10^{-5}\), and its maximum (49.3, at \(3.5{\cdot}10^{-5}\)) is the rate where blur is at 2\%.
+  \item The late-stream guard compares the mean late accuracy with the frozen member's, and the three healthy shifts keep that mean above the floor; the guard only fired at \(5{\cdot}10^{-5}\), where spatter also breaks (35 on average, with seeds disagreeing: std 29.8) and the average drops to 41.1.
+  \item Only \(2.2{\cdot}10^{-6}\) keeps blur at the frozen level (20.0 against 20.4); the rate of the independent pair (\(3.1{\cdot}10^{-6}\)) is already below it (17.8).
+\end{itemize}
+
+\paragraph{The same member on the test corruptions.} Table~\ref{tab:own_test} shows \cnx{} alone at the two own-entropy rates that were run on the test stream (those of Independent small and of Independent both).
+
+\begin{table}[H]
+  \centering\small
+  \caption{\cnx{} alone on the 15 test corruptions (accuracy \%, mean $\pm$ std over 3 seeds): frozen, and Tent on its own entropy at the pair's rate and at the single-model rate. Both rates were selected on the tuning shifts.}
+  \label{tab:own_test}
+  \input{tables_convnextt/own_entropy_test.tex}
+\end{table}
+
+At \(3.1{\cdot}10^{-6}\) the member gains on nine corruptions (up to \(+29\) on pixelate, \(+18\) on shot noise and on contrast) and loses 19--39 points on snow, frost, fog, elastic transform and zoom blur, so its average falls below the frozen member's (26.5 against 29.8). At \(3.5{\cdot}10^{-5}\) it is under 4\% on nine corruptions and averages 17.2. None of the corruptions that break it is among the four tuning shifts.
+
+\section{Neighbouring rates}\label{sec:nb}
+Tables~\ref{tab:nb_vit}--\ref{tab:nb_joint} give the chosen rate of each regime (bold) with the neighbouring rates that ran on all three seeds.
+
+\begin{table}[H]
+  \centering\small
+  \caption{\vit{} alone, Tent on its own entropy, on the four tuning shifts (accuracy \%, mean over 3 seeds); bold: the chosen single-model rate.}
+  \label{tab:nb_vit}
+  \input{tables_convnextt/nb_vit_alone.tex}
+\end{table}
+
+\begin{table}[H]
+  \centering\small
+  \caption{Independent pair: the duo's accuracy on each tuning shift, and the members' averages, around the chosen pair (bold); mean over 3 seeds. ``ConvNeXt-T blur'' is the member's own accuracy on Gaussian blur (frozen: 20.4).}
+  \label{tab:nb_pair}
+  \resizebox{\linewidth}{!}{\input{tables_convnextt/nb_indep_pair.tex}}
+\end{table}
+
+\begin{table}[H]
+  \centering\small
+  \caption{Large adapt: the duo's accuracy on each tuning shift and the \vit{}'s average, around the chosen rate (bold); mean over 3 seeds.}
+  \label{tab:nb_large}
+  \input{tables_convnextt/nb_large_adapt.tex}
+\end{table}
+
+\begin{table}[H]
+  \centering\small
+  \caption{Small adapt: the duo's accuracy on each tuning shift and the \cnx{}'s average, around the chosen rate (bold); mean over 3 seeds.}
+  \label{tab:nb_small}
+  \input{tables_convnextt/nb_small_adapt.tex}
+\end{table}
+
+\begin{table}[H]
+  \centering\small
+  \caption{Joint: the duo's accuracy on each tuning shift, and the members' averages, around the chosen pair (bold); mean over 3 seeds.}
+  \label{tab:nb_joint}
+  \resizebox{\linewidth}{!}{\input{tables_convnextt/nb_joint.tex}}
+\end{table}
+
+\begin{itemize}
+  \item \textbf{\vit{} is capped by spatter.} Alone, it improves on every shift up to \(7{\cdot}10^{-5}\); beyond that spatter collapses (48.0 at \(10^{-4}\), 34.7 at \(1.4{\cdot}10^{-4}\)) while speckle and blur keep improving. The macro average peaks at the rate just before the break. The same shape appears for Large adapt at a higher rate (spatter 58.1 at \(5.6{\cdot}10^{-4}\) against 61.5 at \(4{\cdot}10^{-4}\)).
+  \item \textbf{The independent pair and Joint sit on flat plateaus.} The five pairs of Table~\ref{tab:nb_pair} span 55.1--55.6, the six of Table~\ref{tab:nb_joint} span 55.7--55.9: the chosen pair is not distinguishable from its neighbours at this resolution. What does move across the independent pairs is \cnx{}'s blur accuracy (20.0, 17.8, 13.0 as the rate rises).
+  \item \textbf{Joint barely adapts the \vit{}.} At \(1.75{\cdot}10^{-5}\) the \vit{} is 49.5 in the duo (frozen 48.8) while the \cnx{} reaches 53.8; the \cnx{}'s blur accuracy is 28 in every Joint pair, against 2--20 on its own entropy.
+  \item \textbf{The duo entropy protects the \cnx{} on blur.} Under Small adapt the member keeps 28--29 on blur (frozen 20.4) at \(3.5{\cdot}10^{-5}\)--\(7{\cdot}10^{-5}\); the cliff is one step up (\(10^{-4}\): blur 22.8, duo 54.5, and the late guard rules it out).
+\end{itemize}
+
+\section{The tables on the 15 test corruptions}\label{sec:test}
+The right half of Table~\ref{tab:modes} and Table~\ref{tab:test_corr} score the same rates on the test corruptions. Red marks a cell more than 5 points below the frozen duo.
+
+\begin{table}[H]
+  \centering\small
+  \caption{The duo's accuracy (\%) on each of the 15 test corruptions under every mode (mean over 3 seeds). Red: more than 5 points below the frozen duo.}
+  \label{tab:test_corr}
+  \input{tables_convnextt/test_duo_per_corruption.tex}
+\end{table}
+
+\begin{itemize}
+  \item \textbf{Which modes beat frozen on average:} Independent large (\(+3.2\)) and Independent both (\(+1.2\)); Large adapt is level (\(+0.2\)); Joint (\(-3.1\)), Small adapt (\(-7.4\)) and Independent small (\(-20.9\)) are below. Counting corruptions on which the duo is more than 1 point below the frozen duo: Independent large 2 of 15, Large adapt 4, Independent both 5, Joint 6, Small adapt 8, Independent small 12.
+  \item \textbf{Joint and Small adapt are nearly the same method here} (Joint's \vit{} rate is small), and they fail on the same corruptions: contrast (1.8), snow (8.4), zoom blur (6.3), glass blur (14), motion blur (15). Both gain a lot where the \cnx{} adapts well: fog (\(+17\), 68.6 against 51.2), pixelate (\(+16\)), frost and elastic (\(+4.6\)). Joint is much better than Small adapt on the noise corruptions (Gaussian noise 45.1 against 13.7, impulse 47.0 against 26.4), where its small \vit{} adaptation matters.
+  \item \textbf{Large adapt} is level on average but not uniformly: it gains on contrast (\(+18\)) and loses on fog (\(-41\): 9.7 for the duo, 7.3 for the \vit{} itself against 51.2 frozen), snow (\(-14\)), elastic transform (\(-10\)) and glass blur (\(-12\)). Its \vit{} runs at \(4{\cdot}10^{-4}\), 5.7 times its single-model rate.
+  \item \textbf{The duo follows its collapsed member.} Whenever a member collapses, the static duo's accuracy is dragged to its level (Independent small: fog 1.5, snow 5.3, elastic 6.6): the fixed combination has no way to discount a member it cannot see failing.
+\end{itemize}
+
+\section{What is happening}\label{sec:what}
+\paragraph{1. The selection is blind to single-shift collapses.} The criterion averages over four shifts, and the guard compares an average with an average. For \cnx{} a rate can gain 22, 14 and 5 points on three shifts and lose 18 on the fourth and still win (Table~\ref{tab:own_held}). The optimum sits next to a cliff (the next rate up breaks spatter, and its seeds disagree), so a small distribution change moves the model over it.
+
+\paragraph{2. The tuning shifts are not representative of the failures.} Speckle noise, Gaussian blur, spatter and saturate contain no fog, snow, frost, elastic transform or contrast shift, and these are where the test collapses are (Tables~\ref{tab:own_test}, \ref{tab:test_corr}). The tuning shifts can only reveal collapses of the kind they contain (Gaussian blur, and spatter at larger rates).
+
+\paragraph{3. The same pattern in the other new duo, but not in the main duo.} Table~\ref{tab:duos} compares the three duos (plan.md, 2026-10-22, and this report): with the main duo (\vit{} + ResNet-50) the tuned rates transfer and Joint is +13 over the frozen duo; with ConvNeXt-B + DeiT-S the gain is small; with \vit{} + \cnx{} Joint is below frozen. (For ConvNeXt-B + DeiT-S the reset rule also loses to plain schedules on the test stream, plan.md, 2026-10-31.)
+
+\begin{table}[H]
+  \centering\small
+  \caption{Duo accuracy (\%) on the 15 test corruptions, 3 seeds, three duos. The first two rows are from plan.md (script 03, 2026-10-22).}
+  \label{tab:duos}
+  \begin{tabular}{@{}l ccc@{}}
+    \toprule
+    duo & frozen & Independent both & Joint \\
+    \midrule
+    \vit{} + ResNet-50 (main) & 46.1 & 52.2 & 59.1 \\
+    ConvNeXt-B + DeiT-S & 42.4 & 43.3 & 45.8 \\
+    \vit{} + \cnx{} & 41.0 & 42.2 & 38.0 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{What this report does not establish.} (i) Why ConvNeXt members collapse under Tent: no ablation was run (the step size, momentum, the choice of LayerNorm parameters and the batch size are untested); it may be specific to Tent on this architecture. (ii) Whether the failure is a property of the duo-entropy loss: Small adapt and Joint collapse on contrast, snow and zoom blur, but the \cnx{} also collapses on its own entropy, so the duo entropy shifts the failures rather than removing them. (iii) Behaviour at other rates on the test stream: only the two own-entropy rates and the recorded rates of each mode were run on the test corruptions. (iv) Any claim about the gate or the reset rules for this duo: none was run on it.
+
+\section{Open decisions}\label{sec:open}
+\begin{enumerate}
+  \item \textbf{Report the rows as they are,} as the case where tuning on a few shifts selects a rate beside a collapse. This needs no new runs.
+  \item \textbf{Adopt a selection rule that sees single-shift collapses,} for example the highest worst-shift accuracy among rates whose average is within a tolerance of the best, or a rate one grid step below the winner. On the tuning shifts this would choose \(2.2{\cdot}10^{-6}\) or \(3.1{\cdot}10^{-6}\) for \cnx{} on its own entropy (about frozen quality) and \(5{\cdot}10^{-5}\) for Small adapt. It would have to be applied to every duo, including the main one, and the tuning rerun. Whether it would have avoided the test collapses is not known: they are on corruptions the tuning shifts do not contain.
+  \item \textbf{Widen the tuning shifts} (add a weather and a digital shift), which changes the protocol for every duo.
+\end{enumerate}
+
+\appendix
+\section{Provenance}
+\begin{itemize}
+  \item Rates: \path{cfgs/duo_lrs/vitb16_convnextt__\{single,indep,joint,large_duo,small_duo\}.yaml}; tuner rankings: \path{out/results/tune_indep_pair/}, \path{tune_joint_lr/}, \path{tune_large_adapt_lr/}, \path{tune_small_adapt_lr/} (folder \path{vitb16_convnextt__tent_bn}).
+  \item Test and tuning-shift tables: \path{scripts/03_tab_adaptation_modes.py} (the latter with the new \path{--heldout}, which reads the tuners' member cache: the cache of the episodic and tuning protocols is shared), written to \path{out/paper/tab_adaptation_modes[_summary]__tent__vitb16_convnextt_bn[_heldout].tex}; the \cnx{}-alone tables to \path{out/paper/tab_convnextt_alone_own_entropy[_heldout].tex}.
+  \item The tables of this report: \path{out/_smoke/cnxt_heldout_tables/make_report_tables.py} (from the CSVs next to it and script 03's CSVs); per-learning-rate CSVs: \path{make_tables.py}, \path{make_tables2.py}, \path{make_table4.py} in the same folder.
+  \item Seeds 0, 1, 2 are stream orders. Learning-rate tuning used the logit store (own-entropy members) and the member cache (duo-entropy modes); a faulty GPU node killed 21 array tasks, which were rerun and do not affect the results.
+\end{itemize}
+\end{document}

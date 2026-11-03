@@ -74,7 +74,7 @@ def main() -> int:
     print(f"stream: continual, {what} x {args.images} images; gate {proxy}, proxy batch size {args.b_t}, beta {args.beta:g}")
 
     def path_of(run: str, seed: int) -> Path:
-        tag = RC.stream_tag(args.duo, tta, args.bn, args.rounds, args.images, seed, args.order, args.stream)
+        tag = RC.stream_tag(args.duo, tta, args.bn, args.rounds, args.images, seed, args.order, args.stream, args.criterion)
         return RC.run_path(out, tag, run, proxy, args.b_t, args.beta)
 
     jobs = [(run, seed) for seed in seeds for run in args.runs]

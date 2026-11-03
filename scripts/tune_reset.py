@@ -24,6 +24,9 @@ A job is submitted once: one already queued under its name is skipped, so callin
     --chain              with --submit: after a wave, also submit a small CPU job that calls this script again once the wave has finished OK (a failed job cancels
                          the chain), so the tuning runs itself until it is done or needs a decision (a blocked stage, a failed job: look at its log).
     --baseline COND      the same machinery for a comparison method that has only a rate to tune: none, fixed500, fixed1000, own_fast_vs_slow@<delta> (independent only).
+    --criterion C        how the search chooses (mean, the default: the highest mean accuracy over the visits; worst_shift: among the choices whose mean is within --worst_tol
+                         points (default 1) of the best, the one with the highest WORST visit). A study of another criterion has its own folder, reset_tune/<duo>[__joint]__worst_shift,
+                         and shares every run, calibration stream and screen with the mean study (only the choices differ): give --rotations as the mean study had them.
 
 Slurm runs this same script for one unit of work (`--job <spec>`, written by the driver under <out>/results/reset_tune[/<duo>]/jobs/): see src/reset/workers.py.
 Setup that this script does not do: the duo's yaml (cfgs/duos/<duo>.yaml) and its episodic rates for the signal (cfgs/duo_lrs/<duo>__indep.yaml, scripts/02c;
@@ -37,6 +40,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.experiments import criteria as C
 
 
 def main() -> int:
@@ -53,6 +58,8 @@ def main() -> int:
     ap.add_argument("--mults", type=float, nargs="+", default=None, metavar="X")
     ap.add_argument("--betas", type=float, nargs="+", default=None, metavar="B", help="joint signal: the gate's beta grid")
     ap.add_argument("--rotations", type=int, nargs="+", default=None, metavar="K", help="the held-out rotation(s) of the search (default: 0)")
+    ap.add_argument("--criterion", choices=("mean", "worst_shift"), default="mean", help="how the search chooses (default %(default)s)")
+    C.add_tol_arg(ap)
     ap.add_argument("--job", default=None, metavar="SPEC", help="(what Slurm runs) execute the job of this spec file")
     ap.add_argument("--device", default=None, choices=["cuda", "cpu"], help="with --job")
     args = ap.parse_args()
@@ -61,10 +68,11 @@ def main() -> int:
         from src.reset.workers import run_job
         return run_job(args.job, args.device)
     from src.reset.pipeline import drive
+    crit = C.Criterion.from_args(args)
     overrides = {"stress": args.stress, "stress_up": args.stress_up, "healthy": args.healthy, "mults": args.mults, "betas": args.betas,
                  "tuning_rotations": args.rotations}
     return drive(args.duo, submit=args.submit, force=args.force, baseline=args.baseline, overrides=overrides, signal="joint" if args.signal == "joint" else "indep",
-                 chain=args.chain)
+                 chain=args.chain, criterion=crit, tol_explicit=args.worst_tol is not None)
 
 
 if __name__ == "__main__":

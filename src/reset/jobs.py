@@ -164,7 +164,7 @@ def chain(paths: Paths, jobs: Sequence[Job], driver_args: Sequence[str], *, go: 
     """Submit one small CPU job that runs `scripts/tune_reset.py <driver_args>` once every job of this wave has finished OK (`afterok`: a failed job cancels the
     chain, so a broken wave is not retried forever). One chain job per duo, signal and `tag`; one already queued is left alone. Called from a chain job itself,
     it refuses to chain a wave identical to the previous one (the jobs ran and changed nothing). Returns whether a chain job is now waiting."""
-    name = CHAIN_PREFIX + paths.name + (f"_{re.sub(r'[^A-Za-z0-9]+', '', tag)}" if tag else "")
+    name = CHAIN_PREFIX + paths.study + (f"_{re.sub(r'[^A-Za-z0-9]+', '', tag)}" if tag else "")
     names = sorted(j.name for j in jobs)
     state = paths.jobs_dir / f"chain__{name[len(CHAIN_PREFIX):]}.json"
     from_chain = os.environ.get("SLURM_JOB_NAME", "").startswith(CHAIN_PREFIX)

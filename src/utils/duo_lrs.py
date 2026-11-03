@@ -36,6 +36,17 @@ cache fingerprint as before: the OPTIM block is part of every member's key):
 A member is resolved on its own: its tuned entry for the method if there is one, else (indep only) its default. A `stale:` note on
 an entry (tuned on the old input pipeline, say) makes every use of it warn.
 
+CRITERIA. The entries above are the winners under the default criterion (`mean`: the highest mean accuracy over the tuning shifts). The winner under another
+criterion (src/experiments/criteria.py; `worst_shift`: the highest worst-shift accuracy among the rates whose mean is within a tolerance of the best) is recorded
+BESIDE it in the same file, under the key `<tta>@<criterion>`:
+
+    methods:
+      tent:               {large: ..., small: ...}      # mean
+      tent@worst_shift:   {large: ..., small: ...}      # worst_shift (each entry says the tolerance it was chosen with, under `criterion:`)
+
+`resolve(..., criterion="worst_shift")` / `load_duo(..., criterion=...)` / `--criterion worst_shift` of an evaluation script read the second set. They never fall back
+to the first (nor to `defaults`): a criterion that is not recorded for a regime is a NotTuned error that names the tuning command.
+
     from src.utils import duo_lrs
     duo_lrs.resolve(duo_yaml_dict, "indep", "tent")                      # {"LARGE": OPTIM, "SMALL": OPTIM}
     Context.create("vitb16_rn50v1", tta="tent", regime="joint")          # goes through load_duo; NotTuned while pending
@@ -56,6 +67,8 @@ import warnings
 from pathlib import Path
 
 import yaml
+
+from src.experiments.criteria import Criterion, method_key, split_key
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LR_DIR = REPO_ROOT / "cfgs" / "duo_lrs"
@@ -140,25 +153,37 @@ def _check_member(entry: dict, spec: dict, where: str, side: str) -> None:
                          f"{spec['NAME']}: retune (scripts/02_tune_tta.py) or fix NORM")
 
 
-def _side_optim(doc: dict, duo_spec: dict, regime: str, tta: str, side: str, where: str, batch_size: int | None) -> dict:
-    """The OPTIM of one member from the loaded file `doc`: its tuned entry for `tta`, else (indep / single) its default."""
+def recorded_criteria(doc: dict, tta: str) -> list[str]:
+    """The criteria under which `doc` (a loaded regime file) holds entries for the TTA method `tta`: ['mean', 'worst_shift', ...]."""
+    return sorted({c for k in doc["methods"] for t, c in [split_key(k)] if t == tta}, key=lambda c: (c != "mean", c))
+
+
+def _side_optim(doc: dict, duo_spec: dict, regime: str, tta: str, side: str, where: str, batch_size: int | None,
+                criterion: Criterion | str | None = None) -> dict:
+    """The OPTIM of one member from the loaded file `doc`: its tuned entry for `tta` under `criterion`, else (indep / single, criterion mean only) its default."""
     spec = duo_spec[side.upper()]
-    entry = doc["methods"].get(tta, {}).get(side)
+    key = method_key(tta, criterion)
+    entry = doc["methods"].get(key, {}).get(side)
     if entry is not None:
         _check_member(entry, spec, f"{where}: {tta}/{side}", side)
         if entry.get("stale"):
             warnings.warn(f"{where}: {tta}/{side} is stale: {entry['stale']}")
         if batch_size is not None and entry.get("batch_size") not in (None, batch_size):
             warnings.warn(f"{where}: {tta}/{side} was tuned at batch size {entry['batch_size']}, the protocol uses {batch_size}")
-    elif regime in ("indep", "single") and side in doc["defaults"]:
+    elif key == tta and regime in ("indep", "single") and side in doc["defaults"]:
         entry = doc["defaults"][side]
         _check_member(entry, spec, f"{where}: defaults/{side}", side)
+    elif key != tta:
+        crit = split_key(key)[1]
+        raise NotTuned(f"{duo_spec['NAME']} / {regime} / {tta} / {side}: no learning rate recorded under the criterion {crit!r} in {where} "
+                       f"(recorded there: {recorded_criteria(doc, tta) or 'none'}); tune it with the regime's script and --criterion {crit} --record. "
+                       f"The other criterion's rates are NOT a substitute")
     else:
         raise NotTuned(f"{duo_spec['NAME']} / {regime} / {tta} / {side}: no tuned learning rate and no default in {where}")
     return copy.deepcopy(entry["OPTIM"])
 
 
-def _resolve_adapting(duo_spec: dict, regime: str, tta: str, root, batch_size: int | None) -> dict[str, dict]:
+def _resolve_adapting(duo_spec: dict, regime: str, tta: str, root, batch_size: int | None, criterion: Criterion | str | None = None) -> dict[str, dict]:
     """The one-member regimes (large_duo / small_duo): the adapting member's tuned entry; the other member, which is frozen, gets its
     indep optimizer so that the duo dict is complete (it is never built, and not part of the cache key)."""
     name, side = duo_spec["NAME"], ADAPTING[regime]
@@ -168,36 +193,46 @@ def _resolve_adapting(duo_spec: dict, regime: str, tta: str, root, batch_size: i
     except FileNotFoundError:
         doc = None
     where = f"{path(name, regime, root)}"
-    if doc is None or side not in doc["methods"].get(tta, {}):
-        why = doc and doc["pending"].get(tta)
+    key = method_key(tta, criterion)
+    crit = split_key(key)[1]
+    if doc is None or side not in doc["methods"].get(key, {}):
+        why = doc and key == tta and doc["pending"].get(tta)
         raise NotTuned(f"{name} / {regime} / {tta}: the {side} member's rate for adapting on the duo entropy with the {other} member frozen "
-                       f"is " + (f"not tuned yet ({why})" if why else f"not in {where}" + (f" (tuned there: {sorted(doc['methods'])})"
-                                                                                              if doc and doc["methods"] else ""))
-                       + f". Tune it with {TUNING_SCRIPT[regime]} --record, or pass the rate by hand; the joint pair's rates are NOT "
-                         f"a substitute")
-    out = {other.upper(): _side_optim(load(name, "indep", root), duo_spec, "indep", tta, other, f"{path(name, 'indep', root)}", batch_size)}
-    out[side.upper()] = _side_optim(doc, duo_spec, regime, tta, side, where, batch_size)
+                       f"is " + (f"not tuned yet ({why})" if why else f"not in {where}" + (f" under the criterion {crit!r}" if crit != "mean" else "")
+                                 + (f" (tuned there: {sorted(doc['methods'])})" if doc and doc["methods"] else ""))
+                       + f". Tune it with {TUNING_SCRIPT[regime]} " + (f"--criterion {crit} " if crit != "mean" else "")
+                       + f"--record, or pass the rate by hand; the joint pair's rates are NOT a substitute")
+    out = {other.upper(): _side_optim(load(name, "indep", root), duo_spec, "indep", tta, other, f"{path(name, 'indep', root)}", batch_size)}   # inert: the frozen member's optimizer is never built
+    out[side.upper()] = _side_optim(doc, duo_spec, regime, tta, side, where, batch_size, criterion)
     return {s.upper(): out[s.upper()] for s in SIDES}
 
 
-def resolve(duo_spec: dict, regime: str, tta: str, root=None, batch_size: int | None = None) -> dict[str, dict]:
+def resolve(duo_spec: dict, regime: str, tta: str, root=None, batch_size: int | None = None, criterion: Criterion | str | None = None) -> dict[str, dict]:
     """{"LARGE": OPTIM, "SMALL": OPTIM} for `duo_spec` (a cfgs/duos yaml: NAME, LARGE{NAME, NORM}, SMALL{...}). Each member on its own:
     its tuned entry for `tta`, else (indep) its default. Raises NotTuned for a joint method that is pending or absent, for an
-    indep member with neither, and for a one-member regime (large_duo / small_duo) whose adapting member is not tuned."""
+    indep member with neither, and for a one-member regime (large_duo / small_duo) whose adapting member is not tuned. `criterion` (default mean): the
+    criterion whose recorded winners are read (see the module docstring); one that is not recorded is NotTuned, never replaced by another's."""
     name = duo_spec["NAME"]
+    key = method_key(tta, criterion)
     if regime in ADAPTING:
-        return _resolve_adapting(duo_spec, regime, tta, root, batch_size)
+        return _resolve_adapting(duo_spec, regime, tta, root, batch_size, criterion)
     if regime == "single" and not path(name, "single", root).exists():
+        if key != tta:
+            raise NotTuned(f"{name} / single / {tta}: there is no single file, so nothing is recorded under the criterion {split_key(key)[1]!r} "
+                           f"(the indep entries that stand in for a missing single file are the mean criterion's only)")
         return resolve(duo_spec, "indep", tta, root, batch_size)          # no single file: the indep entries are the member-by-member ones
     doc = load(name, regime, root)
     where = f"{path(name, regime, root)}"
-    methods = doc["methods"].get(tta, {})
+    methods = doc["methods"].get(key, {})
     if regime == "joint" and not all(s in methods for s in SIDES):
-        why = doc["pending"].get(tta)
+        why = key == tta and doc["pending"].get(tta)
+        crit = split_key(key)[1]
         raise NotTuned(f"{name} / joint / {tta}: " + (f"not tuned yet ({why}). Pass explicit rates or wait; "
                        f"the indep rates are NOT a substitute" if why else
-                       f"no tuned learning rate pair in {where} (tuned there: {sorted(doc['methods']) or 'none'})"))
-    return {side.upper(): _side_optim(doc, duo_spec, regime, tta, side, where, batch_size) for side in SIDES}
+                       f"no tuned learning rate pair in {where}" + (f" under the criterion {crit!r}" if crit != "mean" else "")
+                       + f" (tuned there: {sorted(doc['methods']) or 'none'})"
+                       + (f"; tune it with scripts/02b_tune_joint_lr.py --criterion {crit} (or 02f) --record" if crit != "mean" else "")))
+    return {side.upper(): _side_optim(doc, duo_spec, regime, tta, side, where, batch_size, criterion) for side in SIDES}
 
 
 # ------------------------------------------------------------------------------------------------------ writing
@@ -324,6 +359,7 @@ def import_joint(results_json, root=None, duos_dir=None) -> Path:
     if r.get("num_samples"):
         raise ValueError(f"{results_json} is a capped run (--num_samples {r['num_samples']}); only full runs are imported")
     duo, tta = r["duo"], r["tta"]
+    crit = Criterion.from_json(r.get("criterion"))                           # the criterion the run chose its best pair by (mean when the run predates criteria)
     spec = _duo_spec(duo, duos_dir)
     init_joint(duo, root)
     doc = load(duo, "joint", root)
@@ -336,8 +372,15 @@ def import_joint(results_json, root=None, duos_dir=None) -> Path:
                        "worst_stream_accuracy": round(float(r["best"]["worst"]), 5)}
     entry["temperatures"] = dict(r["temperatures"])                          # the static duo the grid was scored with
     entry["grid"] = {"lrs_large": r["lrs_large"], "lrs_small": r["lrs_small"], "bn": r.get("bn"), "seeds": r["seeds"]}
-    doc["methods"][tta] = entry
-    doc["pending"].pop(tta, None)
+    if r.get("gate"):                                                        # scripts/02f: the pair was tuned with the gate inside the loss, at this beta (per member: _write keeps only those)
+        for side in SIDES:
+            entry[side]["gate"] = dict(r["gate"])
+    if crit.robust:
+        for side in SIDES:
+            entry[side]["criterion"] = crit.to_json()
+    doc["methods"][crit.key(tta)] = entry
+    if not crit.robust:
+        doc["pending"].pop(tta, None)
     return _write(doc, root)
 
 
@@ -355,6 +398,7 @@ def import_anchor(results_json, root=None, duos_dir=None) -> Path:
     if r.get("num_samples"):
         raise ValueError(f"{results_json} is a capped run (--num_samples {r['num_samples']}); only full runs are imported")
     duo, tta, side = r["duo"], r["tta"], r["side"]
+    crit = Criterion.from_json(r.get("criterion"))
     regime = f"{side}_duo"
     if regime not in ADAPTING:
         raise ValueError(f"{results_json}: side must be 'large' or 'small', got {side!r}")
@@ -372,8 +416,11 @@ def import_anchor(results_json, root=None, duos_dir=None) -> Path:
         entry["late_accuracy"] = round(float(r["best"]["late_duo"]), 5)
     if r.get("frozen_duo") is not None:
         entry["frozen_duo_macro_accuracy"] = round(float(r["frozen_duo"]), 5)
-    doc["methods"][tta] = {side: {k: v for k, v in entry.items() if v is not None}}
-    doc["pending"].pop(tta, None)
+    if crit.robust:
+        entry["criterion"] = crit.to_json()
+    doc["methods"][crit.key(tta)] = {side: {k: v for k, v in entry.items() if v is not None}}
+    if not crit.robust:
+        doc["pending"].pop(tta, None)
     return _write(doc, root)
 
 
@@ -426,9 +473,9 @@ def describe(duo: str, regime: str, root=None) -> str:
             lines.append(f"  default {side:5s} {d['model']} {d['OPTIM']['METHOD']} lr {d['OPTIM']['LR']:g}   ({d['source']})")
     for tta, m in sorted(doc["methods"].items()):
         bits = [f"{s} {m[s]['model']} lr {m[s]['OPTIM']['LR']:g}" for s in SIDES if s in m]
-        lines.append(f"  {tta:5s} " + "   ".join(bits) + (f"   ({m['large']['source']})" if "large" in m else ""))
+        lines.append(f"  {tta:18s} " + "   ".join(bits) + (f"   ({m['large']['source']})" if "large" in m else ""))
     for tta, why in sorted(doc["pending"].items()):
-        lines.append(f"  {tta:5s} PENDING: {why}")
+        lines.append(f"  {tta:18s} PENDING: {why}")
     return "\n".join(lines)
 
 

@@ -97,10 +97,11 @@ def stream_parts(ctx: Context, *, rounds: int, seed: int, order: int | None = No
     return [Part(seg, r, seed + 1000 * r) for r in range(rounds) for seg in segments]
 
 
-def stream_tag(duo: str, tta: str, bn: bool, rounds: int, images: int, seed: int, order: int | None = None, stream: str = "test") -> str:
+def stream_tag(duo: str, tta: str, bn: bool, rounds: int, images: int, seed: int, order: int | None = None, stream: str = "test", criterion: str = "mean") -> str:
     span = "heldout" if stream == "heldout" else "continual" if rounds == 1 else f"R{rounds}"
     which = f"rot{order or 0}" if stream == "heldout" else "std" if order is None else f"order{order}"
-    return f"{duo}__{tta}{'_bn' if bn else ''}__{span}_n{images}_{which}_seed{seed}"
+    crit = "" if criterion == "mean" else f"__{criterion}"                 # runs at the rates recorded under another criterion are other runs
+    return f"{duo}__{tta}{'_bn' if bn else ''}{crit}__{span}_n{images}_{which}_seed{seed}"
 
 
 def run_path(directory: Path, tag: str, run: str, proxy: str, b_t: int, beta: float) -> Path:
@@ -217,6 +218,7 @@ if __name__ == "__main__":
         assert [p.round for p in std] == [0] * 15 + [1] * 15 and {p.seed for p in std[:15]} == {5} and {p.seed for p in std[15:]} == {1005}
         assert [p.label.split("/")[0] for p in stream_parts(ctx, rounds=1, seed=0, order=3)] == g.cotta_orders[3]
         assert stream_tag("d", "tent", True, 1, 50000, 0) == "d__tent_bn__continual_n50000_std_seed0"
+        assert stream_tag("d", "tent", True, 1, 50000, 0, criterion="worst_shift") == "d__tent_bn__worst_shift__continual_n50000_std_seed0"
         assert stream_tag("d", "tent", True, 10, 5000, 0) == "d__tent_bn__R10_n5000_std_seed0"
         assert stream_tag("d", "tent", True, 1, 50000, 0, 2, "heldout") == "d__tent_bn__heldout_n50000_rot2_seed0"
         assert stream_tag("d", "tent", True, 1, 50000, 0, None, "heldout") == "d__tent_bn__heldout_n50000_rot0_seed0"

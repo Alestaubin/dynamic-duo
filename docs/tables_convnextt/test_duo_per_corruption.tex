@@ -1,0 +1,30 @@
+\begin{tabular}{@{}l ccccccc@{}}
+\toprule
+Corruption & Frozen & Ind.\ large & Ind.\ small & Ind.\ both & Large adapt & Small adapt & Joint \\
+\midrule
+\multicolumn{8}{@{}l}{\emph{Noise}} \\
+\quad Gaussian noise & 32.5 & 39.6 & \textcolor{red!70!black}{6.1} & 38.8 & 35.2 & \textcolor{red!70!black}{13.7} & 45.1 \\
+\quad Shot noise & 32.5 & 40.2 & \textcolor{red!70!black}{21.6} & 44.6 & 40.7 & \textcolor{red!70!black}{19.1} & 30.5 \\
+\quad Impulse noise & 33.5 & 41.2 & \textcolor{red!70!black}{3.5} & 41.1 & 41.4 & \textcolor{red!70!black}{26.4} & 47.0 \\
+\midrule
+\multicolumn{8}{@{}l}{\emph{Blur}} \\
+\quad Defocus blur & 31.1 & 34.6 & \textcolor{red!70!black}{9.0} & 35.3 & 38.1 & 34.6 & 34.4 \\
+\quad Glass blur & 23.4 & 28.9 & \textcolor{red!70!black}{6.1} & 30.0 & \textcolor{red!70!black}{11.9} & \textcolor{red!70!black}{13.2} & \textcolor{red!70!black}{14.3} \\
+\quad Motion blur & 35.7 & 40.8 & \textcolor{red!70!black}{24.2} & 45.3 & 41.7 & \textcolor{red!70!black}{15.7} & \textcolor{red!70!black}{15.4} \\
+\quad Zoom blur & 34.7 & 38.1 & \textcolor{red!70!black}{8.3} & 32.0 & 40.3 & \textcolor{red!70!black}{6.3} & \textcolor{red!70!black}{6.3} \\
+\midrule
+\multicolumn{8}{@{}l}{\emph{Weather}} \\
+\quad Snow & 44.9 & 46.7 & \textcolor{red!70!black}{5.3} & \textcolor{red!70!black}{32.5} & \textcolor{red!70!black}{31.4} & \textcolor{red!70!black}{8.8} & \textcolor{red!70!black}{8.4} \\
+\quad Frost & 56.7 & 55.0 & \textcolor{red!70!black}{3.9} & \textcolor{red!70!black}{39.5} & 57.3 & 61.5 & 61.3 \\
+\quad Fog & 51.2 & \textcolor{red!70!black}{36.9} & \textcolor{red!70!black}{1.5} & \textcolor{red!70!black}{20.9} & \textcolor{red!70!black}{9.7} & 68.4 & 68.6 \\
+\quad Brightness & 73.7 & 74.1 & 76.3 & 75.6 & 74.9 & 76.0 & 76.1 \\
+\midrule
+\multicolumn{8}{@{}l}{\emph{Digital}} \\
+\quad Contrast & 31.9 & 36.6 & \textcolor{red!70!black}{9.3} & 47.2 & 50.1 & \textcolor{red!70!black}{1.8} & \textcolor{red!70!black}{1.8} \\
+\quad Elastic & 39.7 & 42.9 & \textcolor{red!70!black}{6.6} & \textcolor{red!70!black}{34.3} & \textcolor{red!70!black}{29.3} & 45.1 & 44.3 \\
+\quad Pixelate & 39.5 & 50.7 & 58.2 & 56.0 & 57.0 & 53.5 & 55.5 \\
+\quad JPEG & 54.5 & 56.9 & 62.0 & 59.2 & 59.0 & 59.5 & 60.0 \\
+\midrule
+Avg & 41.0 & 44.2 & 20.1 & 42.2 & 41.2 & 33.6 & 38.0 \\
+\bottomrule
+\end{tabular}

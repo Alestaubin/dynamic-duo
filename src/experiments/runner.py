@@ -51,16 +51,22 @@ class Context:
     # eval() mode with the source statistics (False). Like batch_size, it is a setting of the whole run
     # environment that changes the members' logits, so it enters the cache key (RunSpec.fingerprint).
     bn: bool = False
+    # The tuning criterion whose recorded learning rates this context (and every context derived from it by `replace`: the single / joint / Large- and
+    # Small-adapt contexts of adaptation_modes) reads: "mean" (the default, the plain entries of cfgs/duo_lrs) or "worst_shift" (the `<tta>@worst_shift` ones).
+    # It is NOT part of the cache key: the rates it selects are (the OPTIM blocks), so two criteria that pick the same rate share the run.
+    criterion: str = "mean"
 
     @classmethod
     def create(cls, duo_name: str, g: GlobalConfig | None = None, device: str | None = None,
-               tta: str = "tent", bn: bool = False, regime: str = "indep") -> "Context":
+               tta: str = "tent", bn: bool = False, regime: str = "indep", criterion: str = "mean") -> "Context":
         """The optimizer settings are the ones of cfgs/duo_lrs/<duo>__<regime>.yaml for the TTA method `tta`: `regime` "indep" (each
-        member on its own entropy: Vanilla DD) or "joint" (both on the duo's entropy: Joint DD; NotTuned while its rates are pending)."""
+        member on its own entropy: Vanilla DD) or "joint" (both on the duo's entropy: Joint DD; NotTuned while its rates are pending), recorded under
+        `criterion` ("mean", or "worst_shift": the winners of src/experiments/criteria.py's worst-shift rule; NotTuned where they are not recorded)."""
         g = g or load_global()
         device = get_device(device)
-        print(f"device: {describe_device(device)}" + (" | frozen BN members use test-batch statistics" if bn else ""))
-        return cls(g, load_duo(duo_name, g, tta=tta, regime=regime), device, bn=bn)
+        print(f"device: {describe_device(device)}" + (" | frozen BN members use test-batch statistics" if bn else "")
+              + ("" if criterion == "mean" else f" | learning rates recorded under the criterion {criterion!r}"))
+        return cls(g, load_duo(duo_name, g, tta=tta, regime=regime, criterion=criterion), device, bn=bn, criterion=criterion)
 
     @property
     def batch_size(self) -> int:

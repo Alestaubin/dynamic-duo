@@ -26,6 +26,12 @@ shared setting from the screen, the candidates' start rungs from the shared ladd
 flags `--stress`, `--stress_up`, `--healthy`, `--mults`, `--betas`, `--rotations`, or by hand: also `ladders`, explicit continual rates per member, `confirm_rotations`,
 `max_passes`); the main duo's file records the choices its earlier runs were made with.
 `baseline=<condition>` runs the same machinery for a comparison method with only a rate to tune: `none`, `fixed500`, `fixed1000`, `own_fast_vs_slow@<delta>` (independent only).
+
+The CRITERION (`criterion`, `--criterion mean|worst_shift --worst_tol POINTS`; src/experiments/criteria.py, src/reset/tuning.py): how the search chooses among rates, settings and
+betas. `mean` (default): the highest mean accuracy over the visits, ties within one paired SE. `worst_shift`: among those within the tolerance of the best mean, the highest worst
+visit. A study of another criterion has its own tune folder (`reset_tune/<duo>[__joint]__worst_shift`, its config.json records the criterion and tolerance) and shares every run,
+calibration stream and screen with the mean study: the stages before the search (temperatures, the continual ladder's conservative and stress rates, calibration, screens) are
+criterion-independent and are not repeated. Pass `--rotations` as the mean study did (the main duo's was pinned to 0 2) for a comparable study.
 """
 
 from __future__ import annotations
@@ -42,6 +48,7 @@ import pandas as pd
 from src.experiments import adaptation_modes as AM
 from src.experiments import continual as RC
 from src.experiments import continual_tuning as CT
+from src.experiments import criteria as C
 from src.experiments import joint_lr_tuning as JL
 from src.experiments.runner import Context
 from src.reset import jobs as J
@@ -78,11 +85,13 @@ class Setup:
     grid: TU.Grid
     duo_cfg: dict = field(repr=False, default_factory=dict)
     signal: str = "indep"
+    criterion: C.Criterion = C.MEAN
 
     @classmethod
-    def load(cls, duo: str, g: GlobalConfig | None = None, overrides: dict | None = None, log=print, signal: str = "indep") -> "Setup":
+    def load(cls, duo: str, g: GlobalConfig | None = None, overrides: dict | None = None, log=print, signal: str = "indep",
+             criterion: C.Criterion = C.MEAN, tol_explicit: bool = False) -> "Setup":
         g = g or load_global()
-        P = Paths(g, duo, signal)
+        P = Paths(g, duo, signal, criterion.name)
         try:
             duo_cfg = load_duo(duo, g, tta=TTA, regime=signal)
         except FileNotFoundError:
@@ -94,6 +103,10 @@ class Setup:
             raise SystemExit(f"{duo}: no tuned episodic learning rate for the {[x for x in SIDES if x not in tuned]} member in cfgs/duo_lrs/{duo}__{signal}.yaml "
                              f"(a placeholder default is not an anchor): run scripts/{'02b_tune_joint_lr' if signal == 'joint' else '02c_tune_indep_pair'}.py --record first")
         cfg = json.loads(P.config_path.read_text()) if P.config_path.is_file() else {}
+        if criterion.robust:                                            # the study's tolerance is pinned in its config.json; a flag changes it only when it is given
+            if cfg.get("criterion") and not tol_explicit:
+                criterion = C.Criterion.from_json(cfg["criterion"])
+            overrides = {**(overrides or {}), "criterion": criterion.to_json()}
         changed = {k: v for k, v in (overrides or {}).items() if v is not None and cfg.get(k) != v}
         if changed:
             cfg.update(changed)
@@ -102,7 +115,7 @@ class Setup:
             log(f"config {P.config_path}: set " + ", ".join(f"{k} = {v}" for k, v in changed.items()))
         episodic = {s: float(duo_cfg[s.upper()]["OPTIM"]["LR"]) for s in SIDES}
         names = {s: provenance.model_name(duo_cfg[s.upper()]["NAME"]).split(" (")[0] for s in SIDES}
-        return cls(g, duo, P, cfg, names, episodic, TU.Grid(episodic), duo_cfg, signal)
+        return cls(g, duo, P, cfg, names, episodic, TU.Grid(episodic), duo_cfg, signal, criterion)
 
     @property
     def joint(self) -> bool:
@@ -346,7 +359,7 @@ def member_plans(S: Setup) -> dict[str, TU.MemberPlan]:
     shared, store = S.shared, S.store
     start = S.cfg.get("candidate_start") or {}
     return {s: TU.plan_member(s, lambda st, k, rot, s=s: store.member_cell(s, st, rot, S.grid.rate(s, k)), shared, SCR.candidates_of(S.P, s),
-                              candidate_start=start.get(s), rots=S.rots) for s in SIDES}
+                              candidate_start=start.get(s), rots=S.rots, criterion=S.criterion) for s in SIDES}
 
 
 def _rots_label(S: Setup) -> str:
@@ -358,7 +371,7 @@ def stage_tune(S: Setup, log=print) -> Step:
         return stage_tune_joint(S)
     shared, plans = S.shared, member_plans(S)
     cands = {s: SCR.candidates_of(S.P, s) for s in SIDES}
-    notes = []
+    notes = [f"criterion: {S.criterion.describe()}"] if S.criterion.robust else []
     for side, pl in plans.items():
         notes.append(f"{side} ({S.names[side]}): candidates " + ", ".join("shared" if c == shared else str(tuple(c)) for c in [shared, *cands[side]]))
         notes.append("   " + "; ".join(pl.notes))
@@ -376,6 +389,8 @@ def stage_tune(S: Setup, log=print) -> Step:
     cond = MR.condition(final["large"][0], final["small"][0])
     rates = [S.grid.rate(s, final[s][1]) for s in SIDES]
     state = {"cond": cond, "chosen": rates, "settings": {s: list(final[s][0]) for s in SIDES}, "tables": {s: plans[s].table for s in SIDES}}
+    if S.criterion.robust:
+        state["criterion"] = S.criterion.to_json()
     S.P.tune_dir.mkdir(parents=True, exist_ok=True)
     (S.P.tune_dir / "member__rates.json").write_text(json.dumps(state, default=float, indent=1))
     return Step("tune", "done", notes + [f"final: {cond} at {S.names['large']} {rates[0]:g}, {S.names['small']} {rates[1]:g}"])
@@ -410,8 +425,8 @@ def stage_tune_joint(S: Setup) -> Step:
         cond, (rl, rs), beta = run_args(k)
         return store.cell(cond, rot, large=rl, small=rs, beta=beta)
 
-    jp = TU.plan_joint(cell_of, shared, cands, betas=S.betas, rots=S.rots, max_passes=int(S.cfg.get("max_passes", 2)))
-    notes = [f"shared detector setting {tuple(shared)}; candidates: " + "; ".join(f"{s}: " + ", ".join(str(tuple(c)) for c in cands[s]) for s in SIDES)]
+    jp = TU.plan_joint(cell_of, shared, cands, betas=S.betas, rots=S.rots, max_passes=int(S.cfg.get("max_passes", 2)), criterion=S.criterion)
+    notes = ([f"criterion: {S.criterion.describe()}"] if S.criterion.robust else []) + [f"shared detector setting {tuple(shared)}; candidates: " + "; ".join(f"{s}: " + ", ".join(str(tuple(c)) for c in cands[s]) for s in SIDES)]
     notes += [f"   {n}" for n in jp.notes] + _joint_lines(S, jp)
     if jp.requests:
         jobs = []
@@ -425,6 +440,8 @@ def stage_tune_joint(S: Setup) -> Step:
     (kv, ks), _, sl, ss = jp.final
     state = {"cond": cond, "chosen": list(rates), "rungs": [kv, ks], "beta": beta, "settings": {"large": list(sl), "small": list(ss)}, "converged": jp.converged,
              "notes": jp.notes, "table": jp.table}
+    if S.criterion.robust:
+        state["criterion"] = S.criterion.to_json()
     S.P.tune_dir.mkdir(parents=True, exist_ok=True)
     (S.P.tune_dir / "joint__choice.json").write_text(json.dumps(state, default=float, indent=1))
     return Step("tune", "done", notes + [f"final: {cond} at {S.names['large']} {rates[0]:g}, {S.names['small']} {rates[1]:g}, gate beta {beta:g}" +
@@ -509,11 +526,11 @@ def stage_baseline_rates(S: Setup, cond: str) -> Step:
                     return cache[i]
                 return store.cell("none", rot, **{side: lad[side][i]})
             return f
-        plans = {side: TU.plan_1d(side=side, start=tuple(range(n)), neighbours=lambda i: (i - 1, i + 1), cell_of=cell_of(side), rots=S.rots) for side in SIDES}
+        plans = {side: TU.plan_1d(side=side, start=tuple(range(n)), neighbours=lambda i: (i - 1, i + 1), cell_of=cell_of(side), rots=S.rots, criterion=S.criterion) for side in SIDES}
         rate_of = lambda side, i: lad[side][i]
     else:
         plans = {side: TU.plan_1d(side=side, start=TU.X2[side], neighbours=lambda k: (k - 1, k + 1), rots=S.rots,
-                                  cell_of=lambda k, rot, side=side: store.cell(cond, rot, **{side: S.grid.rate(side, k)})) for side in SIDES}
+                                  cell_of=lambda k, rot, side=side: store.cell(cond, rot, **{side: S.grid.rate(side, k)}), criterion=S.criterion) for side in SIDES}
         rate_of = S.grid.rate
     notes = [line for side in SIDES for line in _show_ladder(S, plans[side], side, rate_of)]
     needs = {s: plans[s].requests for s in SIDES}
@@ -527,6 +544,8 @@ def stage_baseline_rates(S: Setup, cond: str) -> Step:
     tables = {s: plans[s].table for s in SIDES}
     # the formats the report scripts read: the no-reset baseline stores {side: rate}, the others a [large, small] list
     state = {"chosen": dict(zip(SIDES, chosen)), "tables": tables} if cond == "none" else {"cond": cond, "chosen": chosen, "tables": tables}
+    if S.criterion.robust:
+        state["criterion"] = S.criterion.to_json()
     notes.append(f"chosen: {S.names['large']} {chosen[0]:g}, {S.names['small']} {chosen[1]:g} (each member on its own accuracy)")
     if state_path.is_file():                                          # the frozen record of the comparison method: never overwritten
         old = json.loads(state_path.read_text())["chosen"]
@@ -567,13 +586,13 @@ def legacy_wave_in_queue() -> bool:
 
 
 def drive(duo: str, *, submit: bool = False, force: bool = False, baseline: str | None = None, overrides: dict | None = None, log=print, signal: str = "indep",
-          chain: bool = False) -> int:
+          chain: bool = False, criterion: C.Criterion = C.MEAN, tol_explicit: bool = False) -> int:
     """Find the first stage of `duo` (for the `signal`'s runs) that is not done and print / do its work. Returns 0, or 1 where a decision is needed.
     With `chain`, a wave of jobs is followed by one CPU job that calls this again when the wave has finished (jobs.chain)."""
     if baseline and signal == "joint":
         log("the comparison methods (none, fixed schedules) are tuned for the independent signal only: the joint signal's members are coupled, which needs a pair search per method")
         return 1
-    S = Setup.load(duo, overrides=overrides, log=log, signal=signal)
+    S = Setup.load(duo, overrides=overrides, log=log, signal=signal, criterion=criterion, tol_explicit=tol_explicit)
     log(f"duo {duo}: {S.names['large']} + {S.names['small']}; {'JOINT signal (both members on the gated duo entropy, the gate inside the loss)' if S.joint else 'independent signal (each member on its own entropy)'}"
         f"; tuning rotation(s) {list(S.rots)}" + (f"; comparison method {baseline}" if baseline else ""))
     if baseline:
@@ -607,7 +626,8 @@ def drive(duo: str, *, submit: bool = False, force: bool = False, baseline: str 
                 n = J.submit(S.P, step.jobs, go=submit, force=force, cwd=Path(__file__).resolve().parents[2])
                 log(f"  {len(step.jobs)} job(s)" + (f", {n} submitted" if submit else ": add --submit to launch them"))
                 if chain:
-                    again = ["--duo", duo, *(["--signal", "joint"] if S.joint else []), *(["--baseline", baseline] if baseline else []), "--submit", "--chain"]
+                    again = ["--duo", duo, *(["--signal", "joint"] if S.joint else []), *(["--baseline", baseline] if baseline else []),
+                             *(["--criterion", S.criterion.name, "--worst_tol", f"{100 * S.criterion.tol:g}"] if S.criterion.robust else []), "--submit", "--chain"]
                     if not J.chain(S.P, step.jobs, again, go=submit, tag=baseline or "", cwd=Path(__file__).resolve().parents[2]) and submit:
                         log("  no chain job: call this again by hand when the wave has finished")
                 return 0
@@ -673,6 +693,15 @@ if __name__ == "__main__":
         cfg = json.loads(S.P.config_path.read_text())
         S.P.config_path.write_text(json.dumps({k: v for k, v in cfg.items() if k not in ("stress", "stress_up")}))          # back to the derived rates
         S = Setup.load("convnextb_deits", g=g, log=quiet)
+        # a study of the worst_shift criterion: its own folder and config.json (the tolerance pinned there), everything before the search shared with the mean study
+        WSC = C.Criterion.parse("worst_shift", 2.0)
+        W = Setup.load("convnextb_deits", g=g, log=quiet, criterion=WSC, tol_explicit=True)
+        assert W.criterion == WSC and W.P.tune_dir != S.P.tune_dir and str(W.P.tune_dir).endswith("convnextb_deits__worst_shift"), W.P.tune_dir
+        assert json.loads(W.P.config_path.read_text())["criterion"] == {"name": "worst_shift", "tol_points": 2.0} and "criterion" not in json.loads(S.P.config_path.read_text())
+        assert W.P.continual_dir == S.P.continual_dir and W.P.live_dir() == S.P.live_dir() and W.P.shared_screen == S.P.shared_screen and calibration_rates(W) == calibration_rates(S)
+        assert Setup.load("convnextb_deits", g=g, log=quiet, criterion=C.Criterion.parse("worst_shift"), tol_explicit=False).criterion == WSC, "the pinned tolerance is kept unless a flag gives one"
+        assert Setup.load("convnextb_deits", g=g, log=quiet, criterion=C.Criterion.parse("worst_shift", 0.5), tol_explicit=True).criterion.tol == 0.005, "a given tolerance is saved"
+        assert Setup.load("convnextb_deits", g=g, log=quiet).criterion == C.MEAN, "the default study is unchanged"
         jobs = calibration_jobs(S)
         assert len(jobs) == 10 and sum(j.args["name"] == "S" for j in jobs) == 8 and sum(j.args["name"] == "H" for j in jobs) == 2
         assert {j.args["rotation"] for j in jobs if j.args["name"] == "S"} == {0, 1, 2, 3} and all(j.args["stop_mode"] == "all" for j in jobs if j.args["name"] == "S")

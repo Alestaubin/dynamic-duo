@@ -32,6 +32,7 @@ from typing import Mapping, Sequence
 import numpy as np
 import torch
 
+from src.experiments import criteria as C
 from src.experiments import joint_lr_tuning as JL
 from src.experiments.grids import sgd_optim
 from src.experiments.logit_runs import run_member_specs, with_optim
@@ -194,20 +195,27 @@ def aggregate(per_seed: Mapping[int, dict], min_seeds: int = 1) -> dict:
 
 # ------------------------------------------------------------------------------------------------------------ choosing
 
-def best_member(table: Mapping[float, dict], late_floor: float | None) -> tuple[float | None, dict]:
-    """(the best rate of one model alone, a description): highest accuracy among the finite candidates, ties to the smaller rate; with
-    `late_floor` those ending below it are ruled out (dropped if that would leave nothing). `interior`: a lower AND a higher rate were
-    tried and both are worse (a neighbour that diverged or was ruled out by the guard counts as worse); `edge` says why not otherwise."""
+def best_member(table: Mapping[float, dict], late_floor: float | None, criterion: C.Criterion = C.MEAN) -> tuple[float | None, dict]:
+    """(the best rate of one model alone, a description): under the criterion `mean`, the highest accuracy among the finite candidates, ties to the smaller rate;
+    under `worst_shift`, among those whose accuracy is within the tolerance of the best, the one whose worst stream is best (ties: higher accuracy, smaller rate).
+    With `late_floor` the candidates ending below it are ruled out (dropped if that would leave nothing). `interior`: a lower AND a higher rate were
+    tried and both are worse under the criterion (a neighbour that diverged or was ruled out by the guard counts as worse); `edge` says why not otherwise."""
     finite = {lr: r for lr, r in table.items() if not r["diverged"]}
     if not finite:
         return None, {"interior": False, "excluded": [], "guard_dropped": False}
     excluded = [lr for lr, r in finite.items() if late_floor is not None and r["late"] < late_floor]
     pool = {lr: r for lr, r in finite.items() if lr not in excluded} or finite
-    best = sorted(pool, key=lambda lr: (-round(pool[lr]["acc"], 12), lr))[0]
+    best = C.rank(list(pool), criterion, mean=lambda lr: pool[lr]["acc"], worst=lambda lr: pool[lr].get("worst", NAN), tie=lambda lr: lr)[0]
     lrs = sorted(table)
     i = lrs.index(best)
-    def worse(lr: float) -> bool:           # a neighbour that diverged, was ruled out by the guard, or scores lower brackets the optimum
-        return table[lr]["diverged"] or lr in excluded or table[lr]["acc"] < pool[best]["acc"]
+    top = max(r["acc"] for r in pool.values())
+
+    def worse(lr: float) -> bool:           # a neighbour that diverged, was ruled out by the guard, or scores lower (under the criterion) brackets the optimum
+        if table[lr]["diverged"] or lr in excluded:
+            return True
+        if not criterion.robust:
+            return table[lr]["acc"] < pool[best]["acc"]
+        return (C.score(criterion, table[lr]["acc"], table[lr].get("worst", NAN), top) < C.score(criterion, pool[best]["acc"], pool[best].get("worst", NAN), top))
 
     lower_worse = i > 0 and worse(lrs[i - 1])
     higher_worse = i < len(lrs) - 1 and worse(lrs[i + 1])
@@ -226,12 +234,16 @@ def _p(x: float) -> str:
     return "  div." if x != x else f"{100 * x:5.2f}"
 
 
-def member_table(name: str, table: Mapping[float, dict], frozen: Mapping | None, best: float | None, late_floor: float | None) -> str:
+def member_table(name: str, table: Mapping[float, dict], frozen: Mapping | None, best: float | None, late_floor: float | None,
+                 criterion: C.Criterion = C.MEAN) -> str:
     lines = [f"{name} alone (SGD momentum 0.9), macro over the held-out streams, %", f"{'lr':>10} {'acc':>7} {'std':>6} {'late':>7} {'worst':>7} {'seeds':>5}  note"]
     for lr in sorted(table):
         r = table[lr]
         note = ("<- best" if lr == best else "") + (" ruled out: late accuracy below the frozen model's" if not r["diverged"] and late_floor is not None
                                                      and r["late"] < late_floor else "")
+        if criterion.robust and not r["diverged"] and lr != best and "ruled out" not in note:
+            ok = [x["acc"] for x in table.values() if not x["diverged"] and (late_floor is None or x["late"] >= late_floor)]
+            note += "" if (ok and r["acc"] >= max(ok) - criterion.tol - 1e-9) else " mean more than the tolerance below the best"
         std = "" if r["diverged"] or r.get("std", NAN) != r.get("std", NAN) else f"{100 * r['std']:6.2f}"
         lines.append(f"{lr:>10g} {_p(r['acc']):>7} {std:>6} {_p(r['late']):>7} {_p(r.get('worst', NAN)):>7} {r['n_seeds']:>5}  {note}")
     if frozen:
@@ -240,16 +252,16 @@ def member_table(name: str, table: Mapping[float, dict], frozen: Mapping | None,
 
 
 def report(agg: Mapping, lrs_large: Sequence[float], lrs_small: Sequence[float], base: tuple[float, float] | None,
-           names: tuple[str, str] = ("large member", "small member")) -> tuple[list[str], dict]:
-    """The printout and the choices: ({lines}, {"large": lr, "small": lr, "pair": point, "individual_interior": {...}, "warnings": [...]})."""
+           names: tuple[str, str] = ("large member", "small member"), criterion: C.Criterion = C.MEAN) -> tuple[list[str], dict]:
+    """The printout and the choices: ({lines}, {"large": lr, "small": lr, "pair": point, "individual_interior": {...}, "warnings": [...]}), chosen under `criterion`."""
     fz = agg["frozen"]
     floors = {"large": fz["large"]["late"] if fz else None, "small": fz["small"]["late"] if fz else None, "duo": fz["duo"]["late"] if fz else None}
-    lines, warnings, choice = [], [], {}
+    lines, warnings, choice = ([f"criterion: {criterion.describe()}", ""] if criterion.robust else []), [], {}
     for side, name in (("large", f"{names[0]} (large member)"), ("small", f"{names[1]} (small member)")):
-        best, info = best_member(agg[side], floors[side])
+        best, info = best_member(agg[side], floors[side], criterion)
         choice[side] = best
         choice[f"{side}_info"] = info
-        lines.append(member_table(name, agg[side], fz[side] if fz else None, best, floors[side]))
+        lines.append(member_table(name, agg[side], fz[side] if fz else None, best, floors[side], criterion))
         if best is None:
             warnings.append(f"every {side} candidate diverged")
         elif not info["interior"]:
@@ -258,7 +270,7 @@ def report(agg: Mapping, lrs_large: Sequence[float], lrs_small: Sequence[float],
             warnings.append(f"every {side} candidate ends below the frozen model's late accuracy: the guard was dropped")
         lines.append("")
     points = agg["pairs"]
-    ranked = JL.rank(points, late_floor=floors["duo"])
+    ranked = JL.rank(points, late_floor=floors["duo"], criterion=criterion)
     if not ranked:
         return lines + ["every pair diverged"], {**choice, "pair": None, "warnings": warnings + ["every pair diverged"]}
     best = ranked[0]
@@ -271,6 +283,10 @@ def report(agg: Mapping, lrs_large: Sequence[float], lrs_small: Sequence[float],
         lines.append(f"\nfrozen duo: {_p(fz['duo']['acc']).strip()} (late {_p(fz['duo']['late']).strip()}); frozen large {_p(fz['large']['acc']).strip()}, "
                      f"small {_p(fz['small']['acc']).strip()}; {len(excluded)} of {len([p for p in points if not p['diverged']])} pairs end below the "
                      f"frozen duo's late accuracy and are ruled out")
+    if criterion.robust:
+        n_ok = len(C.feasible(ranked, criterion, lambda p: p["duo"]))
+        lines.append(f"\nworst_shift: {n_ok} of {len(ranked)} pairs are within {100 * criterion.tol:g} points of the best mean ({100 * max(p['duo'] for p in ranked):.2f}); "
+                     f"the one with the best worst stream wins")
     lines.append(f"best pair: large {best['lr_large']:g}, small {best['lr_small']:g}: duo {100 * best['duo']:.2f}"
                  + ("" if best.get("duo_std", NAN) != best.get("duo_std", NAN) else f" +- {100 * best['duo_std']:.2f} (std over {best['n_seeds']} seeds)")
                  + f", late {100 * best['late_duo']:.2f}, worst stream {100 * best['worst']:.2f} ({best['worst_stream']})")
@@ -298,19 +314,23 @@ def record_best(results_json: Path, root: Path | None = None, duos_dir: Path | N
     if r["warnings"]:
         raise ValueError(f"{results_json} has open warnings, fix them before recording: {r['warnings']}")
     duo, tta = r["duo"], r["tta"]
+    crit = C.Criterion.from_json(r.get("criterion"))               # chosen by this rule; its entries sit beside the mean ones, under <tta>@<criterion>
+    key = crit.key(tta)
     spec = duo_lrs._duo_spec(duo, duos_dir)
     out = []
     for regime, lrs, metric in (("single", {"large": r["individual"]["large"], "small": r["individual"]["small"]}, "individual"),
                                 ("indep", {"large": r["best"]["lr_large"], "small": r["best"]["lr_small"]}, "pair")):
         duo_lrs.init_single(duo, root) if regime == "single" else None
         doc = duo_lrs.load(duo, regime, root)
-        old = doc["methods"].get(tta)
+        old = doc["methods"].get(key)
         entry = {}
         for side in ("large", "small"):
             entry[side] = {"model": spec[side.upper()]["NAME"], "norm": spec[side.upper()]["NORM"], "batch_size": r["batch_size"],
                            "OPTIM": {**r["optim"][side], "LR": float(lrs[side])}, "source": "scripts/02c_tune_indep_pair.py",
                            "tuned_on": [x.replace("__", "/") for x in r["streams"]], "seeds": r["seeds"], "temperatures": r["temperatures"]["checkpoint"],
                            "note": ("each model tuned ALONE" if metric == "individual" else "tuned as a PAIR for this duo (static-duo accuracy)")}
+            if crit.robust:
+                entry[side]["criterion"] = crit.to_json()
             if metric == "individual":
                 entry[side].update({"macro_accuracy": round(float(r["individual_scores"][side]["acc"]), 5),
                                     "late_accuracy": round(float(r["individual_scores"][side]["late"]), 5),
@@ -318,12 +338,12 @@ def record_best(results_json: Path, root: Path | None = None, duos_dir: Path | N
             else:
                 entry[side].update({"duo_macro_accuracy": round(float(r["best"]["duo"]), 5), "late_duo_accuracy": round(float(r["best"]["late_duo"]), 5),
                                     "worst_stream_accuracy": round(float(r["best"]["worst"]), 5)})
-        doc["methods"][tta] = entry
+        doc["methods"][key] = entry
         path = duo_lrs._write(doc, root)
         new = (float(lrs["large"]), float(lrs["small"]))
         prev = (float(old["large"]["OPTIM"]["LR"]), float(old["small"]["OPTIM"]["LR"])) if old else None
         note = "" if prev is None else " (unchanged)" if prev == new else f" (replacing large {prev[0]:g}, small {prev[1]:g})"
-        out.append(f"recorded large {new[0]:g} and small {new[1]:g} as the {regime} learning rates of {duo} / {tta} in {path}{note}")
+        out.append(f"recorded large {new[0]:g} and small {new[1]:g} as the {regime} learning rates of {duo} / {key} in {path}{note}")
     return "\n".join(out)
 
 
@@ -466,4 +486,13 @@ if __name__ == "__main__":
             raise AssertionError("a capped run must not be recorded")
         except ValueError as e:
             assert "capped" in str(e)
+    # ---- the worst_shift criterion: a rate that wins on the mean by collapsing one stream loses to a slightly lower one that keeps every stream healthy ----
+    row = lambda acc, worst: {"diverged": False, "acc": acc, "late": 0.5, "worst": worst, "n_seeds": 1}          # noqa: E731
+    tab = {1e-4: row(0.50, 0.40), 2e-4: row(0.515, 0.05), 4e-4: row(0.51, 0.30), 8e-4: row(0.40, 0.10)}
+    assert best_member(tab, None)[0] == 2e-4, "mean: the highest accuracy"
+    b, info = best_member(tab, None, C.Criterion.parse("worst_shift", 1.0))
+    assert b == 4e-4 and info["interior"], (b, info)          # within 1 point of 51.5: 2e-4 and 4e-4; the better worst stream is 4e-4's
+    b, info = best_member(tab, None, C.Criterion.parse("worst_shift", 2.0))
+    assert b == 1e-4 and not info["interior"] and info["edge"] == "smallest", (b, info)    # within 2 points 1e-4 joins; it is the smallest tried: extend the grid
+    assert best_member(tab, None, C.Criterion.parse("worst_shift", 0.0))[0] == 2e-4, "tolerance 0 is the mean criterion"
     print("indep_pair_tuning self-test passed")

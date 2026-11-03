@@ -35,6 +35,7 @@ from typing import Callable, Sequence, TypeVar
 
 import torch
 
+from src.experiments.criteria import NAMES
 from src.experiments.runner import Context
 from src.utils.config import GlobalConfig, load_global
 
@@ -64,6 +65,12 @@ def add_common_args(p: argparse.ArgumentParser, *, tta: bool = True, seeds: bool
                    help="frozen models that use BatchNorm (e.g. ResNet) use the test batch's statistics; default: "
                         "eval() mode with the source statistics. Models that adapt always use batch statistics, "
                         "so this only changes frozen runs")
+    if duo:
+        p.add_argument("--criterion", default="mean", choices=list(NAMES),
+                       help="the tuning criterion. In an evaluation script: read the learning rates recorded under it in cfgs/duo_lrs (mean: the highest mean accuracy over "
+                            "the tuning shifts, the default; worst_shift: the highest worst-shift accuracy among the rates whose mean is within a tolerance of the best; "
+                            "NotTuned where it was not recorded). In a tuner (02b, 02c, 02d, 02e, 02f): the rule that ranks the candidates and picks the finalists, "
+                            "and the key `--record` writes under")
     p.add_argument("--report_only", action="store_true", help="never run a model; fail if the cache is incomplete")
     p.add_argument("--shard", default=None, metavar="i/N|auto", help="run only jobs i, i+N, i+2N, ...")
     p.add_argument("--only", nargs="+", default=None, metavar="TEXT", help="run only jobs whose label contains TEXT")
@@ -121,14 +128,16 @@ def setup_global(args: argparse.Namespace, script: str, default_seeds: Sequence[
     return g, seeds, out
 
 
-def setup(args: argparse.Namespace, script: str, default_seeds: Sequence[int] | None = None
+def setup(args: argparse.Namespace, script: str, default_seeds: Sequence[int] | None = None, criterion: str | None = None
           ) -> tuple[Context, list[int], Path]:
     """(context, seeds, output dir) for a script. Seeds: --seeds, else `default_seeds`, else protocol.seeds.
     The duo's optimizer settings are those of cfgs/duo_lrs/<duo>__<regime>.yaml for the selected --tta method (the tuned ones where
-    there are any, else the defaults); the regime is `args.regime` if a script defines it (--regime indep|joint), else indep."""
+    there are any, else the defaults); the regime is `args.regime` if a script defines it (--regime indep|joint), else indep. The recorded rates are those of the
+    criterion `criterion`, else `args.criterion` (--criterion, default mean). A TUNER passes criterion="mean": its --criterion says how to RANK candidates, while the
+    context it starts from (the grids' anchors, the current rates) is the plain mean one."""
     g, seeds, out = setup_global(args, script, default_seeds)
     return Context.create(args.duo, g, args.device, tta=getattr(args, "tta", "tent"), bn=args.bn,
-                          regime=getattr(args, "regime", "indep")), seeds, out
+                          regime=getattr(args, "regime", "indep"), criterion=criterion or getattr(args, "criterion", "mean")), seeds, out
 
 
 if __name__ == "__main__":

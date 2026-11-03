@@ -20,6 +20,11 @@ The run files have ONE definition here, used by the driver (is it done?) and by 
 The SIGNAL is the loss the members adapt on: "indep" (each member on its own entropy: Vanilla DD, the names above) or "joint" (both on the gated duo's entropy: the gate
 sits inside the loss). The joint signal has its own folders (`<duo>__tent_bn_joint`, `<duo>__joint` in file names), because a run's file name does not say which it is.
 The main duo's independent state files predate the per-duo folders and stay in <out>/results/reset_tune/ itself (`LEGACY_DUO`).
+
+The CRITERION (src/experiments/criteria.py) is how the search chooses among rates and settings: `mean` (the default) or `worst_shift` (the highest worst-visit accuracy among
+those whose mean is within a tolerance of the best). It changes only the DECISIONS, so only the study's own folder `tune_dir` (config.json, the states, the job specs) is
+tagged with it (`<duo>[__joint]__worst_shift`); every run, calibration stream and screen is shared with the mean study, whose files they are (their names say condition and rates), so a
+second study only needs the extra runs its own choices ask for. The main duo's mean study keeps its flat folder.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.experiments.criteria import NAMES as CRITERIA
 from src.reset import live_report as LV
 from src.utils.config import GlobalConfig
 
@@ -41,10 +47,13 @@ class Paths:
     g: GlobalConfig
     duo: str
     signal: str = "indep"
+    criterion: str = "mean"
 
     def __post_init__(self):
         if self.signal not in SIGNALS:
             raise ValueError(f"signal must be one of {SIGNALS}, got {self.signal!r}")
+        if self.criterion not in CRITERIA:
+            raise ValueError(f"criterion must be one of {CRITERIA}, got {self.criterion!r}")
 
     @property
     def root(self) -> Path:
@@ -54,6 +63,11 @@ class Paths:
     def name(self) -> str:
         """The duo as file names know it: the joint signal's files carry `__joint`."""
         return self.duo if self.signal == "indep" else f"{self.duo}__joint"
+
+    @property
+    def study(self) -> str:
+        """The name of the study (the tuning decisions): `name`, tagged with a criterion other than mean. Chain jobs and the study's folder are named by it."""
+        return self.name if self.criterion == "mean" else f"{self.name}__{self.criterion}"
 
     @property
     def tag(self) -> str:
@@ -84,7 +98,7 @@ class Paths:
     @property
     def tune_dir(self) -> Path:
         base = self.root / "reset_tune"
-        return base if (self.duo == LEGACY_DUO and self.signal == "indep") else base / self.name
+        return base if (self.duo == LEGACY_DUO and self.signal == "indep" and self.criterion == "mean") else base / self.study
 
     # ---- run files -------------------------------------------------------------------------------------------------------
     def continual_run(self, seed: int, lrs: tuple[float, float] | None) -> Path:
@@ -117,6 +131,16 @@ if __name__ == "__main__":
 
     g = load_global()
     a, b = Paths(g, LEGACY_DUO), Paths(g, "convnextb_deits")
+    w = Paths(g, LEGACY_DUO, criterion="worst_shift")                  # a study of another criterion: its own folder, everything else shared
+    assert w.tune_dir == w.root / "reset_tune" / f"{LEGACY_DUO}__worst_shift" and w.study == f"{LEGACY_DUO}__worst_shift" and a.study == LEGACY_DUO
+    assert w.live_dir() == a.live_dir() and w.continual_dir == a.continual_dir and w.shared_screen == a.shared_screen and w.gate_stress_dir == a.gate_stress_dir
+    wj = Paths(g, "convnextb_deits", "joint", "worst_shift")
+    assert wj.tune_dir == wj.root / "reset_tune" / "convnextb_deits__joint__worst_shift" and wj.name == "convnextb_deits__joint"
+    try:
+        Paths(g, "x", criterion="best")
+        raise AssertionError("an unknown criterion must be refused")
+    except ValueError:
+        pass
     assert a.tune_dir == a.root / "reset_tune" and b.tune_dir == b.root / "reset_tune" / "convnextb_deits"
     assert a.live_dir().name == "vitb16_rn50v1__tent_bn" and b.live_dir(gates=True).parent.name == "reset_gates"
     assert b.member_screen("small").name == "member_detector__convnextb_deits__small.json" and b.shared_screen.name == "shared_setting__convnextb_deits.json"

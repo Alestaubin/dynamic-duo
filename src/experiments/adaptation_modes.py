@@ -249,7 +249,7 @@ def mode_context(mode: Mode, ctx: Context, duo_ctx: Context | None = None, singl
 def single_context(ctx: Context, tta: str) -> Context:
     """A copy of `ctx` with the learning rates tuned for each model ALONE (cfgs/duo_lrs/<duo>__single.yaml; a duo without that file
     reads its indep entries, which before the 2026-10-22 retune were the member-by-member winners)."""
-    return replace(ctx, duo=load_duo(ctx.duo["NAME"], ctx.g, tta=tta, regime="single"))
+    return replace(ctx, duo=load_duo(ctx.duo["NAME"], ctx.g, tta=tta, regime="single", criterion=ctx.criterion))
 
 
 def joint_context(ctx: Context, tta: str, lr_large: float | None = None, lr_small: float | None = None) -> Context:
@@ -258,7 +258,7 @@ def joint_context(ctx: Context, tta: str, lr_large: float | None = None, lr_smal
     `lr_large` / `lr_small` replacing either member's rate. With both given the file is not read; otherwise a duo whose
     pair is not tuned yet raises `NotTuned` (load_duo), never falling back to the own-entropy rates."""
     if lr_large is None or lr_small is None:
-        ctx = replace(ctx, duo=load_duo(ctx.duo["NAME"], ctx.g, tta=tta, regime="joint"))
+        ctx = replace(ctx, duo=load_duo(ctx.duo["NAME"], ctx.g, tta=tta, regime="joint", criterion=ctx.criterion))
     return with_learning_rates(ctx, lr_large, lr_small)
 
 
@@ -270,7 +270,7 @@ def anchor_context(ctx: Context, tta: str, key: str, lr: float | None = None) ->
     side = ANCHOR_SIDE[key]
     if lr is not None:
         return with_learning_rates(ctx, lr if side == "large" else None, lr if side == "small" else None)
-    tuned = load_duo(ctx.duo["NAME"], ctx.g, tta=tta, regime=f"{side}_duo")
+    tuned = load_duo(ctx.duo["NAME"], ctx.g, tta=tta, regime=f"{side}_duo", criterion=ctx.criterion)
     duo = copy.deepcopy(ctx.duo)
     duo[side.upper()]["OPTIM"] = tuned[side.upper()]["OPTIM"]
     return replace(ctx, duo=duo)
@@ -475,13 +475,26 @@ def _max_std_points(df: pd.DataFrame, keys: Sequence[str]) -> float | None:
 
 def render_corruption_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Temps, *, label: str,
                             source: str, duo_ctx: Context | None = None, single_ctx: Context | None = None,
-                            anchor_ctx: dict[str, Context] | None = None, note: str = "") -> str:
+                            anchor_ctx: dict[str, Context] | None = None, note: str = "",
+                            extra_rows: Sequence[tuple[str, Row]] = (), relabel: dict[str, str] | None = None,
+                            gate_text: str = "") -> str:
     """Top-1 accuracy per corruption, one row per (mode, prediction) of ROWS (ImageNet-C paper layout), in sections:
     frozen, a single model adapting on its own entropy, the duo with members adapting on their own entropy, the duo
-    with members adapting on the duo's. The clean stream is its own column. Means over seeds, no std in the cells."""
+    with members adapting on the duo's. The clean stream is its own column. Means over seeds, no std in the cells.
+
+    Gated rows (scripts/03 --gate_betas, built by gated_duos.py): `extra_rows` are (key of the ROWS row they follow, Row) pairs,
+    in the section of the row they follow and listed only when their series is in `df`; `relabel` renames ROWS rows by key;
+    `gate_text` is the sentence that says what the gated rows are, and (given) the caption stops saying that the duo's prediction
+    is ALWAYS the static duo's. All three empty: the table of the fixed combination only."""
     modes = set(df["mode"])
     df = _with_mode_series(df)
     rows = [r for r in ROWS if r.key in set(df["series"])]
+    if relabel:
+        rows = [replace(r, label=relabel.get(r.key, r.label)) for r in rows]
+    if extra_rows:
+        present = set(df["series"])
+        extra = [(after, r) for after, r in extra_rows if r.key in present]
+        rows = [x for r in rows for x in [r, *(e for after, e in extra if after == r.key)]]
     method = _method_name(tta)
     groups = [(g.format(method=method), [(r.key, r.label) for r in rows if r.group == g])
               for g in dict.fromkeys(r.group for r in rows)]
@@ -493,11 +506,12 @@ def render_corruption_table(df: pd.DataFrame, ctx: Context, tta: str, temps: Tem
                + f" Each section header gives what is scored, a single model or the duo, and the entropy that the "
                  f"adapting models minimize: their \\emph{{own}} entropy, as in {method}, or the entropy of the "
                  f"\\emph{{duo}}'s combined prediction. Each row gives which models adapt. {_frozen_sentence(ctx)} "
-                 f"The duo's prediction is always $(z_L / T_L + z_S / T_S) / 2$ with $T_L = {temps.T_l:.2f}$, "
-                 f"$T_S = {temps.T_s:.2f}$, {temps.origin}."
+                 f"The duo's prediction is {'' if gate_text else 'always '}$(z_L / T_L + z_S / T_S) / 2$ with $T_L = {temps.T_l:.2f}$, "
+                 f"$T_S = {temps.T_s:.2f}$, {temps.origin}{', except in the rows with a gate' if gate_text else ''}."
                + (" With both models adapting, the own-entropy and duo-entropy rows are the Independent and Joint "
                   "modes of Section~\\ref{sec:duo_tent}." if {"indep_duo", "joint"} <= modes else "")
                + f" {_hyperparameters(ctx, duo_ctx, single_ctx, anchor_ctx)}"
+               + (f" {gate_text}" if gate_text else "")
                + (f" \\emph{{Clean}}: the ImageNet validation images the corruptions are rendered from, adapted to like "
                   f"any other stream. It is not part of Avg., the mean over the {n_corr} corruptions." if has_clean else "")
                + (f" Mean over {n_seeds} seeds." + (f" Standard deviations are at most {max_std:.1f} points."
@@ -588,9 +602,11 @@ def output_tag(args, default_duo: str, stamp: str | None = None) -> str:
     BatchNorm statistics change the numbers, so the two settings must not overwrite each other). With --lr_large /
     --lr_small it adds `_lrL<large>_S<small>` (the own-entropy rates given), with --joint_lr_large / --joint_lr_small
     `_jlrL<large>_S<small>` (the Joint ones), with --anchor_lr_large / --anchor_lr_small `_alrL<large>_S<small>` (Large /
-    Small adapt's), and `_<stamp>` after them, so that a run with other learning
+    Small adapt's), and `_<stamp>` after them; `__<criterion>` after `_bn` when --criterion is not mean (the rates recorded under it), so that a run with other learning
     rates never overwrites a table of the tuned ones, nor an earlier run of its own."""
     tag = args.tta + f"__{args.duo}" + bn_tag(args)                     # every file names its duo (author's rule, 2026-10-22)
+    if getattr(args, "criterion", "mean") != "mean":                    # the rates of another tuning criterion: other runs, other tables (never overwriting the mean ones)
+        tag += f"__{args.criterion}"
     overridden = False
     for prefix, large, small in (("_lr", "lr_large", "lr_small"), ("_jlr", "joint_lr_large", "joint_lr_small"),
                                  ("_alr", "anchor_lr_large", "anchor_lr_small")):

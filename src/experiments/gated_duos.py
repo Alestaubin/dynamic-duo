@@ -18,6 +18,7 @@ regime. Every row is a (method, prediction) pair of ROWS, in the series naming o
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Sequence
 
@@ -48,11 +49,17 @@ def vanilla_gate(g, temps: AM.Temps, *, proxy: str, beta: float, b_t: int) -> Ga
     return GateSpec.from_global(g, "duo", proxy=proxy, beta=beta, proxy_batch_size=b_t, fixed_ts=str(temps.folder))
 
 
-def vanilla_rows(spec: RunSpec, ctx: Context, gate: GateSpec, segments: list[Segment] | None = None) -> list[dict]:
+def gate_mode(kind: str, beta: float) -> str:
+    """The method name of one gated run when several betas share a table: "vanilla_dd@0.25", "joint_dd@0.5"."""
+    return f"{kind}@{beta:g}"
+
+
+def vanilla_rows(spec: RunSpec, ctx: Context, gate: GateSpec, segments: list[Segment] | None = None,
+                 mode: str = VANILLA) -> list[dict]:
     """Vanilla DD: `gate` replayed on the cached logits of the Independent both run `spec` (a GPU-free step). Rows of the
-    gated prediction only, as method "vanilla_dd"."""
+    gated prediction only, as method `mode` ("vanilla_dd"; `gate_mode` names one per beta)."""
     res = replay(spec, ctx, [gate], segments)
-    return [{**r, "mode": VANILLA} for r in res.rows if r["series"] == gate.name]
+    return [{**r, "mode": mode} for r in res.rows if r["series"] == gate.name]
 
 
 def joint_dd_path(directory: Path, duo: str, proxy: str, b_t: int, beta: float, seed: int) -> Path:
@@ -61,8 +68,9 @@ def joint_dd_path(directory: Path, duo: str, proxy: str, b_t: int, beta: float, 
 
 
 def joint_dd_rows(directory: Path, duo: str, tta: str, protocol_tag: str, proxy: str, b_t: int, beta: float,
-                  seeds: Sequence[int]) -> list[dict]:
-    """Joint DD: the rows of script 09's runs, one file per seed, as method "joint_dd" (series duo / large / small)."""
+                  seeds: Sequence[int], mode: str = JOINT_DD) -> list[dict]:
+    """Joint DD: the rows of script 09's runs, one file per seed, as method `mode` ("joint_dd"; `gate_mode` names one per beta;
+    series duo / large / small)."""
     files = {s: joint_dd_path(directory, duo, proxy, b_t, beta, s) for s in seeds}
     absent = [str(f) for f in files.values() if not f.is_file()]
     if absent:
@@ -71,8 +79,58 @@ def joint_dd_rows(directory: Path, duo: str, tta: str, protocol_tag: str, proxy:
     rows = []
     for seed, f in files.items():
         for r in pd.read_csv(f).to_dict("records"):
-            rows.append({"duo": duo, "tta": tta, "protocol_tag": protocol_tag, "seed": seed, **r, "mode": JOINT_DD})
+            rows.append({"duo": duo, "tta": tta, "protocol_tag": protocol_tag, "seed": seed, **r, "mode": mode})
     return rows
+
+
+def joint_dd_rates(directory: Path, duo: str, proxy: str, b_t: int, beta: float, seeds: Sequence[int]) -> tuple[float, float]:
+    """(ViT / large rate, small rate) the Joint DD runs of `beta` used, from the .meta.json script 09 writes beside each. The file name
+    holds no rate, so a table must read them from here: a run without a meta file (older than this check), or seeds that disagree, is an
+    error rather than a caption that guesses."""
+    pairs = {}
+    for s in seeds:
+        f = joint_dd_path(directory, duo, proxy, b_t, beta, s).with_suffix("").with_suffix(".meta.json")
+        if not f.is_file():
+            raise FileNotFoundError(f"{f} missing: rerun scripts/09_run_joint_dd.py (it records the learning rates) or use another folder")
+        m = json.loads(f.read_text())
+        pairs[s] = (float(m["lr_large"]), float(m["lr_small"]))
+    if len(set(pairs.values())) != 1:
+        raise ValueError(f"Joint DD runs of beta {beta:g} in {directory} used different learning rates: {pairs}")
+    return next(iter(pairs.values()))
+
+
+def gated_row_defs(betas: Sequence[float], *, indep: bool = True, joint: bool = True
+                   ) -> tuple[list[tuple[str, AM.Row]], dict[str, str]]:
+    """(extra rows, relabel) for `AM.render_corruption_table`: each beta of `betas` adds a Vanilla DD row after Independent both and a
+    Joint DD row after Joint (series "<gate_mode>/duo"), and those two ROWS rows are renamed to say they are the fixed combination."""
+    extra, relabel = [], {}
+    for run, base, section, kind, name in ((indep, "indep_duo", AM.OWN, VANILLA, "Independent"), (joint, "joint", AM.DUO, JOINT_DD, "Joint")):
+        if not run:
+            continue
+        relabel[f"{base}/duo"] = f"Both adapt ({name}), Fixed TS"
+        for beta in betas:
+            extra.append((f"{base}/duo", AM.Row(gate_mode(kind, beta), "duo", section,
+                                                f"Both adapt ({name}), {'Vanilla' if kind == VANILLA else 'Joint'} DD, beta {beta:g}")))
+    return extra, relabel
+
+
+def gate_caption(ctx: Context, proxy: str, b_t: int, betas: Sequence[float],
+                 rates: dict[float, tuple[float, float]]) -> str:
+    """The sentence(s) a table with gated rows adds to its caption: what the gate is, where it sits in each kind of run, and the Joint DD
+    learning rates (`rates[beta]`: those of its runs, tuned with the gate at that beta, so the optimizer is `duo_ctx`'s with the rate replaced)."""
+    large, small = AM._model_names(ctx)
+    text = (f"The rows with a gate weight the members with $w_L = \\sigma(\\beta (s_L - s_S))$, $s$ the logit of the {latex_escape(proxy)} proxy "
+            f"(identity calibration, no temporal filter) computed on proxy batches of {b_t} samples, and pool the logits as "
+            f"$w_L z_L / T_L + w_S z_S / T_S$ with $w_S = 1 - w_L$; Fixed TS is $\\beta = 0$, and $\\beta$ is "
+            f"{', '.join(f'{b:g}' for b in betas[:-1])}{' or ' if len(betas) > 1 else ''}{betas[-1]:g} in the rows. "
+            f"In Vanilla DD the gate sits outside the adaptation loop (the members adapt on their own entropy, as in Independent, and never see "
+            f"it); in Joint DD it sits inside, both members adapt on the entropy of the gated prediction, and the weight is a constant of each step.")
+    if rates:
+        text += (" Joint DD uses, at each $\\beta$, the learning rates tuned together with the gate at that $\\beta$ on the four held-out "
+                 "corruptions (same optimizer as Joint otherwise): "
+                 + "; ".join(f"$\\beta = {b:g}$: {large} {AM._tex_num(rates[b][0])}, {small} {AM._tex_num(rates[b][1])}" for b in betas if b in rates)
+                 + ".")
+    return text
 
 
 # ---------------------------------------------------------------------------------------------------- rendering
@@ -212,4 +270,71 @@ if __name__ == "__main__":
                             label="x", source="t")
         body = only.split("\\begin{tabular}")[1]               # (the caption names both gates whichever rows are listed)
         assert "Joint DD" not in body and "Vanilla DD" in body
+
+        # ---- several betas in script 03's table: Vanilla DD replays, Joint DD files with their own rates -----------------
+        betas = [0.25, 0.5]
+        jdir = tmp / "jdd_gated"
+        jdir.mkdir()
+        lrs = {0.25: (1.13e-3, 2.83e-3), 0.5: (8e-4, 2.83e-3)}
+        for beta in betas:
+            for seed in seeds:
+                pd.DataFrame([{"segment": s.label, "series": ser, "n": 150, "accuracy": 0.2 + 0.1 * beta + 0.01 * i, "ece": 0.1, "nll": 2.0,
+                               "entropy": 1.0} for i, s in enumerate(test) for ser in ("duo", "large", "small")]
+                             ).to_csv(joint_dd_path(jdir, "tiny", "nnn", 64, beta, seed), index=False)
+        try:
+            joint_dd_rates(jdir, "tiny", "nnn", 64, 0.25, seeds)
+            raise AssertionError("a run without a meta file must not get a guessed caption")
+        except FileNotFoundError as e:
+            assert "meta.json" in str(e)
+        for beta in betas:
+            for seed in seeds:
+                m = {"lr_large": lrs[beta][0], "lr_small": lrs[beta][1] * (1.5 if (beta, seed) == (0.5, 1) else 1)}
+                joint_dd_path(jdir, "tiny", "nnn", 64, beta, seed).with_suffix("").with_suffix(".meta.json").write_text(json.dumps(m))
+        assert joint_dd_rates(jdir, "tiny", "nnn", 64, 0.25, seeds) == lrs[0.25]
+        try:
+            joint_dd_rates(jdir, "tiny", "nnn", 64, 0.5, seeds)
+            raise AssertionError("seeds run at different rates must be refused")
+        except ValueError:
+            pass
+        joint_dd_path(jdir, "tiny", "nnn", 64, 0.5, 1).with_suffix("").with_suffix(".meta.json").write_text(
+            json.dumps({"lr_large": lrs[0.5][0], "lr_small": lrs[0.5][1]}))
+        rates = {b: joint_dd_rates(jdir, "tiny", "nnn", 64, b, seeds) for b in betas}
+        assert rates == lrs
+
+        grows = [r for r in rows if r["mode"] not in (VANILLA,)]
+        for beta in betas:
+            g_ = vanilla_gate(ctx.g, temps, proxy="nnn", beta=beta, b_t=64)
+            for seed in seeds:
+                grows += vanilla_rows(spec_of[("indep_duo", seed)], ctx, g_, test, mode=gate_mode(VANILLA, beta))
+            grows += joint_dd_rows(jdir, "tiny", "tent", tag, "nnn", 64, beta, seeds, mode=gate_mode(JOINT_DD, beta))
+        gdf = pd.DataFrame(grows)
+        assert {gate_mode(VANILLA, b) for b in betas} | {gate_mode(JOINT_DD, b) for b in betas} <= set(gdf["mode"])
+        assert gate_mode(VANILLA, 0.25) == "vanilla_dd@0.25" and gate_mode(JOINT_DD, 0.5) == "joint_dd@0.5"
+        extra, relabel = gated_row_defs(betas)
+        text = gate_caption(ctx, "nnn", 64, betas, rates)
+        assert text.count("$") % 2 == 0 and "$\\beta$ is 0.25 or 0.5 in the rows" in text and "proxy batches of 64 samples" in text
+        assert text.count("$\\beta = 0.25$:") == 1 and "$1.13 \\times 10^{-3}$" in text and "$8 \\times 10^{-4}$" in text
+        gt = AM.render_corruption_table(gdf, ctx, "tent", temps, label="x", source="t", duo_ctx=duo_ctx, extra_rows=extra, relabel=relabel,
+                                        gate_text=text)
+        shown, section = [], None
+        for l in (l.strip() for l in gt.splitlines()):
+            if l.startswith("\\multicolumn{") and "\\textit{" in l:
+                section = l.split("\\textit{")[1].split("}")[0]
+            elif l.startswith("\\quad "):
+                shown.append((section, l[len("\\quad "):].split("&")[0].strip()))
+        own = [n for s_, n in shown if s_ == "Duo, own entropy"]
+        duo_e = [n for s_, n in shown if s_ == "Duo, duo entropy"]
+        assert own[-3:] == ["Both adapt (Independent), Fixed TS", "Both adapt (Independent), Vanilla DD, beta 0.25",
+                            "Both adapt (Independent), Vanilla DD, beta 0.5"], own
+        assert duo_e[-3:] == ["Both adapt (Joint), Fixed TS", "Both adapt (Joint), Joint DD, beta 0.25", "Both adapt (Joint), Joint DD, beta 0.5"], duo_e
+        cap = gt.split("\\caption{")[1].split("\n")[0]
+        assert "except in the rows with a gate" in cap and "is always" not in cap and text in cap and cap.count("$") % 2 == 0
+        # without gated rows the table is the one of script 03, word for word
+        plain = AM.render_corruption_table(df[df["mode"].isin(["frozen", "indep_duo", "joint"])], ctx, "tent", temps, label="x", source="t", duo_ctx=duo_ctx)
+        same = AM.render_corruption_table(gdf[gdf["mode"].isin(["frozen", "indep_duo", "joint"])], ctx, "tent", temps, label="x", source="t",
+                                          duo_ctx=duo_ctx, extra_rows=extra, relabel={}, gate_text="")
+        assert plain == same and "Both adapt (Joint)" in plain and "is always" in plain
+        # a mode that was not run adds no row, and no row of the other kind is renamed
+        only_v, rl = gated_row_defs(betas, joint=False)
+        assert all(r.mode.startswith(VANILLA) for _, r in only_v) and list(rl) == ["indep_duo/duo"]
     print("gated_duos self-test passed")

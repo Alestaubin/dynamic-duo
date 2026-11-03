@@ -17,8 +17,10 @@ Fixed TS fitted on the frozen models, as everywhere), and each proxy is run at t
     python scripts/09_run_joint_dd.py --duo vitb16_rn50v1 --lr_large 5e-5 --lr_small 2.5e-4 --eval out/results/eval_duo_grid/<name> \
         --cells nnn:128 msp:64 --betas 0 0.1 0.25 0.5 1 2 4 --seeds 0 --shard auto
 
-Writes <out>/joint_dd__<duo>__<proxy>_bt<b_t>__beta<beta>__seed<S>.rows.csv (accuracy, ECE, NLL of the gated prediction and of each member, per stream)
-and .gate.json (the proxy values and weights of every proxy batch). Launch arrays only with the author's approval (plan.md, Phase 3).
+Writes <out>/joint_dd__<duo>__<proxy>_bt<b_t>__beta<beta>__seed<S>.rows.csv (accuracy, ECE, NLL of the gated prediction and of each member, per stream),
+.gate.json (the proxy values and weights of every proxy batch) and .meta.json (the learning rates and temperatures the run used). The file name holds
+no learning rate, so runs at different rates belong in different --out folders (a rerun that finds a file made at other rates stops instead of
+skipping it). Launch arrays only with the author's approval (plan.md, Phase 3).
 """
 
 from __future__ import annotations
@@ -51,7 +53,7 @@ def main() -> int:
     ap.add_argument("--betas", nargs="+", type=float, default=[0.1, 0.25, 0.5, 1.0, 2.0, 4.0])
     args = ap.parse_args()
 
-    ctx, seeds, out = cli.setup(args, "run_joint_dd")
+    ctx, seeds, out = cli.setup(args, "run_joint_dd" + ("" if args.criterion == "mean" else f"__{args.criterion}"))      # the rates of another criterion: another folder
     if (args.lr_large is None) != (args.lr_small is None):
         ap.error("give both --lr_large and --lr_small, or neither (then the duo's joint regime of cfgs/duo_lrs/ is used)")
     if args.lr_large is None:
@@ -75,13 +77,22 @@ def main() -> int:
     print(f"Joint DD on {args.duo}: ViT lr {args.lr_large:g}, ResNet lr {args.lr_small:g}, T_L={T_l:.4f} T_S={T_s:.4f}; {len(segments)} streams x {len(jobs)} runs")
     for seed, proxy, b_t, beta in jobs:
         name = f"joint_dd__{args.duo}__{proxy}_bt{b_t}__beta{beta:g}__seed{seed}"
+        meta = {"duo": args.duo, "tta": "tent", "proxy": proxy, "b_t": b_t, "beta": beta, "seed": seed, "lr_large": args.lr_large,
+                "lr_small": args.lr_small, "momentum": args.momentum, "T_l": T_l, "T_s": T_s, "bn": bool(args.bn),
+                "streams": [s.label for s in segments], "num_samples": args.num_samples}
         if (out / f"{name}.rows.csv").is_file() and not args.num_samples:
+            # the file name holds no learning rate: a file made at other rates must never be taken for this run's
+            old = json.loads((out / f"{name}.meta.json").read_text()) if (out / f"{name}.meta.json").is_file() else None
+            if old is not None and (old["lr_large"], old["lr_small"]) != (args.lr_large, args.lr_small):
+                raise SystemExit(f"{name}: done already at ViT lr {old['lr_large']:g}, ResNet lr {old['lr_small']:g}, not at "
+                                 f"{args.lr_large:g} / {args.lr_small:g}; use another --out")
             print(f"{name}: done already, skipped")
             continue
         res = run_joint_dd(ctx, segments, gate_kwargs=dict(proxy=proxy, beta=beta, b_t=b_t, T_l=T_l, T_s=T_s, stats_l=stats_l, stats_s=stats_s),
                            seed=seed, num_samples=args.num_samples)
         df = pd.DataFrame(res["rows"])
         df.to_csv(out / f"{name}.rows.csv", index=False)
+        (out / f"{name}.meta.json").write_text(json.dumps(meta, indent=1))
         (out / f"{name}.gate.json").write_text(json.dumps(res["gate_records"]))
         piv = df.pivot(index="segment", columns="series", values="accuracy")
         print(f"\n== {name}\n" + (100 * piv[["duo", "large", "small"]]).round(2).to_string()

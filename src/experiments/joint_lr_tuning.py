@@ -49,6 +49,7 @@ import numpy as np
 import pandas as pd
 
 from src.experiments import adaptation_modes as AM
+from src.experiments import criteria as C
 from src.experiments.cache import MemberCache
 from src.experiments.protocols import Segment, build_segments
 from src.experiments.runner import Context, ensure_members, evaluate, run_dir
@@ -332,15 +333,17 @@ def joint_points(summaries: dict[tuple, dict]) -> list[dict]:
     return [{"lr_large": p[1], "lr_small": p[2], **s} for p, s in summaries.items() if p[0] == "joint"]
 
 
-def rank(points: Sequence[dict], late_floor: float | None = None) -> list[dict]:
-    """Finite points, best duo accuracy first. A tie goes to the smaller pair of rates (the smaller product, then the
+def rank(points: Sequence[dict], late_floor: float | None = None, criterion: C.Criterion = C.MEAN) -> list[dict]:
+    """Finite points, best first under `criterion`: by duo accuracy (mean), or (worst_shift) among the points whose duo accuracy is within the tolerance of the best by
+    the accuracy of their worst stream. A tie goes to the smaller pair of rates (the smaller product, then the
     smaller large-member rate), the repo's convention of preferring the more conservative setting. With `late_floor` (the frozen
     duo's late accuracy) a point whose late duo accuracy is below it is ruled out (`guard_excluded` lists them); if that
     would leave nothing, the guard is dropped (the caller says so)."""
     finite = [p for p in points if not p["diverged"]]
     if late_floor is not None and (kept := [p for p in finite if not p.get("late_duo", NAN) < late_floor]):
         finite = kept
-    return sorted(finite, key=lambda p: (-round(p["duo"], 12), p["lr_large"] * p["lr_small"], p["lr_large"]))
+    return C.rank(finite, criterion, mean=lambda p: p["duo"], worst=lambda p: p.get("worst", NAN),
+                  tie=lambda p: (p["lr_large"] * p["lr_small"], p["lr_large"]))
 
 
 def guard_excluded(points: Sequence[dict], late_floor: float | None) -> list[dict]:
@@ -430,7 +433,7 @@ def result_rows(summaries: dict[tuple, dict], ranked: Sequence[dict]) -> list[di
 
 
 def evaluate_command(*, duo: str, tta: str, tta_kwargs: dict | None, bn: bool, temps_folder: Path,
-                     lr_large: float | None = None, lr_small: float | None = None) -> str:
+                     lr_large: float | None = None, lr_small: float | None = None, criterion: C.Criterion = C.MEAN) -> str:
     """The script-03 command that scores the chosen pair on the 15 test corruptions: the Joint mode only, with the SAME
     temperatures as the tuning (03 fits its own on the indep regime's members otherwise). Script 03 reads the pair from
     cfgs/duo_lrs/<duo>__joint.yaml, where `record_best` has put it; `lr_large` / `lr_small` add `--joint_lr_*` to give it by
@@ -438,7 +441,7 @@ def evaluate_command(*, duo: str, tta: str, tta_kwargs: dict | None, bn: bool, t
     parts = ["python", "scripts/03_tab_adaptation_modes.py", "--duo", duo, "--tta", tta]
     if tta_kwargs:
         parts += ["--tta_kwargs", json.dumps(tta_kwargs)]
-    parts += (["--bn"] if bn else []) + ["--modes", "joint"]
+    parts += (["--bn"] if bn else []) + ["--modes", "joint"] + (["--criterion", criterion.name] if criterion.robust else [])
     for flag, lr in (("--joint_lr_large", lr_large), ("--joint_lr_small", lr_small)):
         if lr is not None:
             parts += [flag, f"{lr:g}"]
@@ -453,9 +456,10 @@ def record_best(results_json: Path, root: Path | None = None, duos_dir: Path | N
 
     r = json.loads(Path(results_json).read_text())
     duo, tta = r["duo"], r["tta"]
+    crit = C.Criterion.from_json(r.get("criterion"))
     old = None
     try:
-        entry = duo_lrs.load(duo, "joint", root)["methods"].get(tta)
+        entry = duo_lrs.load(duo, "joint", root)["methods"].get(crit.key(tta))
         old = (float(entry["large"]["OPTIM"]["LR"]), float(entry["small"]["OPTIM"]["LR"])) if entry else None
     except FileNotFoundError:
         pass
@@ -463,7 +467,7 @@ def record_best(results_json: Path, root: Path | None = None, duos_dir: Path | N
     new = (float(r["best"]["lr_large"]), float(r["best"]["lr_small"]))
     note = ("" if old is None else " (unchanged)" if old == new else f" (replacing large {old[0]:g}, small {old[1]:g})")
     return (f"recorded the best pair, large {new[0]:g} and small {new[1]:g}, as the joint learning rates of "
-            f"{duo} / {tta} in {path}{note}")
+            f"{duo} / {crit.key(tta)} in {path}{note}")
 
 
 def optimizer_text(optim: dict) -> str:
@@ -762,4 +766,11 @@ if __name__ == "__main__":
         except ValueError:
             pass
         assert duo_lrs.load("tiny", "joint", lrs)["methods"]["tent"]["large"]["OPTIM"]["LR"] == 5e-5, "the capped run changed nothing"
+    # ---- the worst_shift criterion on pairs
+    pw = [{"lr_large": 1e-4, "lr_small": 1e-3, "diverged": False, "duo": 0.600, "worst": 0.20, "late_duo": 0.6},
+          {"lr_large": 5e-5, "lr_small": 1e-3, "diverged": False, "duo": 0.595, "worst": 0.35, "late_duo": 0.6},
+          {"lr_large": 2e-5, "lr_small": 1e-3, "diverged": False, "duo": 0.560, "worst": 0.45, "late_duo": 0.6}]
+    assert rank(pw)[0]["lr_large"] == 1e-4 and rank(pw, criterion=C.Criterion.parse("worst_shift", 1.0))[0]["lr_large"] == 5e-5
+    assert rank(pw, criterion=C.Criterion.parse("worst_shift", 5.0))[0]["lr_large"] == 2e-5
+    assert rank(pw, late_floor=0.7, criterion=C.Criterion.parse("worst_shift", 1.0))[0]["lr_large"] == 5e-5, "a guard that rules out everything is dropped"
     print("joint_lr_tuning self-test passed")

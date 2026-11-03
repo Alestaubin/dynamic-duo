@@ -29,6 +29,13 @@ its own sqrt-2 grid):
      ends (a rate or threshold that does not matter) is reported as such, not chased.
   6. Guard: a configuration in which the member is DEAD (four consecutive 5,120-image windows below 5%, CT.dead_onset) on the tuning rotation is excluded.
 
+THE CRITERION. Rule 4 above is the default (`mean`). With `criterion = worst_shift` (src/experiments/criteria.py; `--criterion worst_shift` of `tune_reset.py`) the choice
+is instead: among the tried configurations whose mean over the visits is within the tolerance of the best mean, the one with the highest WORST VISIT (the lowest
+per-visit accuracy: the shift on which it does worst); ties go to the higher mean, then the fewest resets, then the lowest rate. The candidates are every alive rung
+tried (not only the argmax and its neighbours), the chosen rung must have its own sqrt-2 neighbours tried (the analogue of rule 2 for the criterion's own optimum), and rules 5
+and 6 apply unchanged: a choice at the end of the range tried extends the range, a dead configuration is excluded. The runs are shared between criteria (their files are
+named by condition and rates), so a second criterion only needs the extra runs its own choices ask for.
+
 `plan_member` is the whole search of one member: a rate ladder for each candidate detector setting (the shared setting's first, the candidates' start
 rungs are then centred on its chosen rung), the best candidate, then its threshold and its rate alternately until neither moves (the rules above at
 every step). The comparison baselines (no reset, fixed schedules) have only the rate:
@@ -47,6 +54,8 @@ from pathlib import Path
 from typing import Callable, Hashable, Mapping, Sequence
 
 import numpy as np
+
+from src.experiments import criteria as C
 
 SIDES = ("large", "small")
 ANCHOR = {"large": 7e-5, "small": 5e-4}
@@ -215,9 +224,16 @@ def paired_se(a: np.ndarray, b: np.ndarray) -> float:
     return float(d.std(ddof=1) / math.sqrt(len(d))) if len(d) > 1 else float("inf")
 
 
-def choose(cands: Mapping[Hashable, tuple[np.ndarray, float]], tie_order: Callable[[Hashable], float]) -> tuple[Hashable, list[Hashable]]:
+def choose(cands: Mapping[Hashable, tuple[np.ndarray, float]], tie_order: Callable[[Hashable], float],
+           criterion: C.Criterion = C.MEAN) -> tuple[Hashable, list[Hashable]]:
     """Rule 4. `cands`: key -> (per-visit accuracies pooled over the tuning rotations, resets per 1,000 proxy batches). Returns the chosen key and
-    the keys within one paired standard error of the best."""
+    the keys within one paired standard error of the best. Under the criterion worst_shift: the key with the highest worst visit among those whose mean is within the
+    tolerance of the best mean (ties: higher mean, fewest resets, `tie_order`), and those keys (the feasible ones) in place of the SE-tied ones."""
+    if criterion.robust:
+        keys = list(cands)
+        mean = lambda k: float(cands[k][0].mean())                                                      # noqa: E731
+        ranked = C.rank(keys, criterion, mean=mean, worst=lambda k: float(np.min(cands[k][0])), tie=lambda k: (round(cands[k][1], 6), tie_order(k)))
+        return ranked[0], C.feasible(keys, criterion, mean)
     best = max(cands, key=lambda k: float(cands[k][0].mean()))
     top = float(cands[best][0].mean())
     tied = [k for k in cands if k == best or top - float(cands[k][0].mean()) <= paired_se(cands[best][0], cands[k][0])]
@@ -238,8 +254,9 @@ class Plan:
 
 def plan_1d(*, side: str, start: Sequence[int], neighbours: Callable[[int], tuple[int, int]], cell_of: Callable[[int, int], Cell | None],
             tie_order: Callable[[int], float] = float, rots: Sequence[int] = TUNING_ROTS, extend_cap: int = MAX_EXTEND,
-            series: str | None = None, guard: Sequence[str] | None = None) -> Plan:
-    """Rules 1 to 6 over one ordered ladder of integer rungs, scored by the accuracy of member `side` (`series`: another series, e.g. "gate" for the duo's
+            series: str | None = None, guard: Sequence[str] | None = None, criterion: C.Criterion = C.MEAN) -> Plan:
+    """Rules 1 to 6 over one ordered ladder of integer rungs (under `criterion` worst_shift, rule 4 chooses among EVERY alive rung tried by the worst visit within the
+    tolerance of the best mean, and the chosen rung's neighbours are run: see the module docstring), scored by the accuracy of member `side` (`series`: another series, e.g. "gate" for the duo's
     prediction; `guard`: the members whose dead flag excludes a cell, default `side`). `cell_of(k, rot)`: the stored run (None if not run yet); `neighbours(k)`:
     (k below, k above) on the finer grid; `tie_order(k)`: the last tie-break. `rots`: one rotation, or two whose visits are pooled (rule 3 then runs the argmax
     and its neighbours on the second)."""
@@ -276,14 +293,19 @@ def plan_1d(*, side: str, start: Sequence[int], neighbours: Callable[[int], tupl
             return plan
         if max(ok, key=lambda k: cell_of(k, first).mean(series)) == best:
             break
-    cand = [k for k in (lo, best, hi) if (c := cell_of(k, first)) is not None and alive(c)]
+    cand = list(ok) if criterion.robust else [k for k in (lo, best, hi) if (c := cell_of(k, first)) is not None and alive(c)]
     if second is not None:                                                       # rule 3
         if any([need(k, second) for k in cand]):
             plan.notes.append(f"the argmax {best} and its neighbours are run on rotation {second}")
             return plan
         cand = [k for k in cand if alive(cell_of(k, second))]
     pooled = {k: (np.concatenate([cell_of(k, r).acc[series] for r in rots]), float(np.mean([cell_of(k, r).resets[side] for r in rots]))) for k in cand}
-    chosen, tied = choose(pooled, tie_order)
+    chosen, tied = choose(pooled, tie_order, criterion)
+    if criterion.robust:                      # the criterion's own optimum needs its neighbours tried (rule 2 held only for the mean's argmax); the choice is then made again
+        around = [k for k in neighbours(chosen) if min(start) - 2 * extend_cap <= k <= max(start) + 2 * extend_cap]
+        if any([need(k, r) for k in around for r in rots]):
+            plan.notes.append(f"worst_shift choice is rung {chosen}: its neighbours {neighbours(chosen)} are run first")
+            return plan
     tried = sorted({k for k in _all_keys(cell_of, start, neighbours, first)})
     plan.table = [{"rung": k, "acc": float(pooled[k][0].mean()) if k in pooled else None, "acc_rot%d" % first: cell_of(k, first).mean(series),
                    "resets": pooled[k][1] if k in pooled else None, "tied": k in tied, "chosen": k == chosen} for k in tried if cell_of(k, first) is not None]
@@ -301,7 +323,7 @@ def plan_1d(*, side: str, start: Sequence[int], neighbours: Callable[[int], tupl
         plan.notes.append(f"chosen rung {chosen} is the {'lowest' if direction < 0 else 'highest'} tried: rung {beyond} is run")
         return plan
     plan.chosen = chosen
-    plan.notes.append(f"chosen rung {chosen}; within one paired SE of the best: {tied}")
+    plan.notes.append(f"chosen rung {chosen}; " + (f"within {100 * criterion.tol:g} points of the best mean: {tied}" if criterion.robust else f"within one paired SE of the best: {tied}"))
     return plan
 
 
@@ -334,7 +356,7 @@ def delta_setting(setting, j: int):
 
 
 def plan_member(side: str, cell_of: Callable[[object, int, int], Cell | None], shared, candidates: Sequence, *, candidate_start: Sequence[int] | None = None,
-                rots: Sequence[int] = TUNING_ROTS, max_rounds: int = 3) -> MemberPlan:
+                rots: Sequence[int] = TUNING_ROTS, max_rounds: int = 3, criterion: C.Criterion = C.MEAN) -> MemberPlan:
     """One member's search over (detector setting, learning rate), by the rules of `plan_1d` (scored by the member's own accuracy; `cell_of(setting, rung, rotation)`).
     A. a rate ladder for the shared setting (start `X2`) and for every candidate (start `candidate_start`; by default every second rung from 4 below to 2 above the
     shared setting's chosen rung, so the candidates are only requested once the shared ladder is complete); B. the candidate with the best pooled accuracy at its
@@ -347,7 +369,7 @@ def plan_member(side: str, cell_of: Callable[[object, int, int], Cell | None], s
         plan.requests += [(setting, k, r) for k, r in reqs if (setting, k, r) not in plan.requests]
 
     def ladder(c, start):
-        pl = plan_1d(side=side, start=start, neighbours=lambda k: (k - 1, k + 1), rots=rots, cell_of=lambda k, rot: cell_of(c, k, rot))
+        pl = plan_1d(side=side, start=start, neighbours=lambda k: (k - 1, k + 1), rots=rots, cell_of=lambda k, rot: cell_of(c, k, rot), criterion=criterion)
         add(pl.requests, c)
         return pl
 
@@ -370,13 +392,14 @@ def plan_member(side: str, cell_of: Callable[[object, int, int], Cell | None], s
         settings = [c for c in settings if c not in dead]
     pooled = {c: (np.concatenate([cell_of(c, ladders[c].chosen, r).acc[side] for r in rots]),
                   float(np.mean([cell_of(c, ladders[c].chosen, r).resets[side] for r in rots]))) for c in settings}
-    best, tied = choose(pooled, lambda c: settings.index(c))
+    best, tied = choose(pooled, lambda c: settings.index(c), criterion)
     plan.table = [{"setting": tuple(c), "rate_rung": ladders[c].chosen, "acc": float(pooled[c][0].mean()), "resets": pooled[c][1], "tied": c in tied, "chosen": c == best} for c in settings]
-    plan.notes.append(f"best candidate {tuple(best)} at rung {ladders[best].chosen}; within one paired SE of the best: {[tuple(c) for c in tied]}")
+    plan.notes.append(f"best candidate {tuple(best)} at rung {ladders[best].chosen}; "
+                      + (f"within {100 * criterion.tol:g} points of the best mean: " if criterion.robust else "within one paired SE of the best: ") + f"{[tuple(c) for c in tied]}")
     k = ladders[best].chosen
     for _ in range(max_rounds):
         pd = plan_1d(side=side, start=(-1, 0, 1), neighbours=lambda j: (j - 1, j + 1), rots=rots, tie_order=lambda j: -j,
-                     cell_of=lambda j, rot, k=k: cell_of(delta_setting(best, j), k, rot))
+                     cell_of=lambda j, rot, k=k: cell_of(delta_setting(best, j), k, rot), criterion=criterion)
         for j, r in pd.requests:
             if (delta_setting(best, j), k, r) not in plan.requests:
                 plan.requests.append((delta_setting(best, j), k, r))
@@ -384,7 +407,8 @@ def plan_member(side: str, cell_of: Callable[[object, int, int], Cell | None], s
             plan.notes.append("threshold ladder not complete")
             return plan
         chosen = delta_setting(best, pd.chosen)
-        pr = plan_1d(side=side, start=(k - 1, k, k + 1), neighbours=lambda q: (q - 1, q + 1), rots=rots, cell_of=lambda q, rot, c=chosen: cell_of(c, q, rot))
+        pr = plan_1d(side=side, start=(k - 1, k, k + 1), neighbours=lambda q: (q - 1, q + 1), rots=rots, cell_of=lambda q, rot, c=chosen: cell_of(c, q, rot),
+                     criterion=criterion)
         add(pr.requests, chosen)
         if plan.requests:
             plan.notes.append("rate recheck at the chosen threshold not complete")
@@ -406,7 +430,7 @@ def pair_neighbourhood(kv: int, ks: int) -> list[tuple[int, int]]:
 
 
 def plan_pair(*, cell_of: Callable[[tuple[int, int], int], Cell | None], series: str = "gate", rots: Sequence[int] = TUNING_ROTS,
-              start: Sequence[tuple[int, int]] | None = None) -> Plan:
+              start: Sequence[tuple[int, int]] | None = None, criterion: C.Criterion = C.MEAN) -> Plan:
     """The rules of `plan_1d` for two members that cannot be tuned separately (the joint signal: each trains on the duo's entropy, so a member's trajectory depends on its
     partner's rate): a pair of rungs (large k, small k') is one cell, scored by `series` (the duo's prediction). Start: the diagonal of the X2 ladders (or `start`); refine
     until the argmax has all of `pair_neighbourhood` tried; the argmax and its two best neighbours are the candidates (run on the second rotation too, if there are two);
@@ -448,20 +472,20 @@ def plan_pair(*, cell_of: Callable[[tuple[int, int], int], Cell | None], series:
         if max(ok, key=lambda c: cell_of(c, first).mean(series)) == best:
             break
     near = sorted((c for c in pair_neighbourhood(*best) if not any(cell_of(c, first).dead.values())), key=lambda c: -cell_of(c, first).mean(series))[:2]
-    cand = [best] + near
+    cand = list(ok) if criterion.robust else [best] + near            # worst_shift: every alive cell tried competes
     if second is not None:
         if any([need(c, second) for c in cand]):
             plan.notes.append(f"the argmax {best} and its two best neighbours are run on rotation {second}")
             return plan
         cand = [c for c in cand if not any(cell_of(c, second).dead.values())]
     pooled = {c: (np.concatenate([cell_of(c, r).acc[series] for r in rots]), float(np.mean([sum(cell_of(c, r).resets.values()) for r in rots]))) for c in cand}
-    chosen, tied = choose(pooled, lambda c: float(c[0] + c[1]))
+    chosen, tied = choose(pooled, lambda c: float(c[0] + c[1]), criterion)
     plan.table = [{"cell": c, "acc": float(pooled[c][0].mean()), "resets": pooled[c][1], "tied": c in tied, "chosen": c == chosen} for c in cand]
     if any([need(c, first) for c in pair_neighbourhood(*chosen)]):
         plan.notes.append(f"chosen cell {chosen}: its neighbourhood is run first")
         return plan
     plan.chosen = chosen
-    plan.notes.append(f"chosen cell {chosen}; within one paired SE of the best: {tied}")
+    plan.notes.append(f"chosen cell {chosen}; " + (f"within {100 * criterion.tol:g} points of the best mean: {tied}" if criterion.robust else f"within one paired SE of the best: {tied}"))
     return plan
 
 
@@ -480,7 +504,7 @@ class JointPlan:
 
 
 def plan_joint(cell_of: Callable[[tuple, int], Cell | None], shared, candidates: Mapping[str, Sequence], *, betas: Sequence[float] = BETAS,
-               rots: Sequence[int] = TUNING_ROTS, max_passes: int = 2) -> JointPlan:
+               rots: Sequence[int] = TUNING_ROTS, max_passes: int = 2, criterion: C.Criterion = C.MEAN) -> JointPlan:
     """The search of the JOINT signal: both members adapt on the gated duo's entropy, so nothing is measured per member. A cell is (rate rungs (large, small), gate beta,
     large setting, small setting); every cell is scored by the duo's accuracy (series "gate"), a cell with a dead member is excluded. The blocks, in order, each by the
     rules of `plan_1d` / `choose` with the other blocks held fixed, repeated as a pass until nothing moves (at most `max_passes`):
@@ -508,7 +532,7 @@ def plan_joint(cell_of: Callable[[tuple, int], Cell | None], shared, candidates:
     for p in range(max_passes):
         moved = False
         # ---- the rate pair
-        sub = plan_pair(cell_of=lambda pr, rot: cell_of(key(pr, beta, sets), rot), rots=rots, start=None if pair is None else [pair])
+        sub = plan_pair(cell_of=lambda pr, rot: cell_of(key(pr, beta, sets), rot), rots=rots, start=None if pair is None else [pair], criterion=criterion)
         if sub.requests:
             return stop([(key(pr, beta, sets), rot) for pr, rot in sub.requests], f"pass {p + 1}, rates: " + "; ".join(sub.notes))
         if sub.chosen is None:
@@ -528,7 +552,7 @@ def plan_joint(cell_of: Callable[[tuple, int], Cell | None], shared, candidates:
             if not alive:
                 return stop([], f"pass {p + 1}, beta: every gate value kills a member")
             pooled = {b: (np.concatenate([c.acc["gate"] for c in cs]), float(np.mean([sum(c.resets.values()) for c in cs]))) for b, cs in alive.items()}
-            new_beta, tied = choose(pooled, float)
+            new_beta, tied = choose(pooled, float, criterion)
             if new_beta == max(tried) and ext < MAX_EXTEND:                       # the best gate is the sharpest tried: try a sharper one
                 tried.append(BETA_EXTEND[ext])
                 continue
@@ -552,9 +576,9 @@ def plan_joint(cell_of: Callable[[tuple, int], Cell | None], shared, candidates:
             if not ok:
                 return stop([], f"pass {p + 1}, {side} detector: every candidate kills a member")
             pooled = {o: (np.concatenate([at(o, r).acc["gate"] for r in rots]), float(np.mean([at(o, r).resets[side] for r in rots]))) for o in ok}
-            best, tied = choose(pooled, options.index)
+            best, tied = choose(pooled, options.index, criterion)
             ladder = plan_1d(side=side, start=(-1, 0, 1), neighbours=lambda j: (j - 1, j + 1), rots=rots, tie_order=lambda j: -j, series="gate", guard=SIDES_,
-                             cell_of=lambda j, r, best=best: at(delta_setting(best, j), r))
+                             cell_of=lambda j, r, best=best: at(delta_setting(best, j), r), criterion=criterion)
             if ladder.requests:
                 return stop([(key(pair, beta, {**sets, side: delta_setting(best, j)}), r) for j, r in ladder.requests],
                             f"pass {p + 1}, {side} detector: best candidate {tuple(best)}; " + "; ".join(ladder.notes))
@@ -772,4 +796,92 @@ if __name__ == "__main__":
             made_d[(k, rot)] = Cell({"gate": acc, "large": acc, "small": acc}, {"large": 5.0, "small": 5.0},
                                     {"large": k == dead_cell, "small": False}, 800000)
     assert jp.final is not None and jp.final != dead_cell and all(not c.dead["large"] for (k, _), c in made_d.items() if k == jp.final), "a dead cell is never chosen"
+    # ---- the worst_shift criterion: choose(), a 1-D ladder, the pair search and the joint search
+    WS = C.Criterion.parse("worst_shift", 1.0)
+    dipped = np.full(16, 0.62)
+    dipped[0] = 0.30                                                          # mean 0.60, worst visit 0.30
+    steady = np.full(16, 0.595)                                               # mean 0.595, worst visit 0.595
+    assert choose({1: (dipped, 1.0), 2: (steady, 1.0)}, float)[0] == 1, "mean: the higher mean"
+    assert choose({1: (dipped, 1.0), 2: (steady, 1.0)}, float, WS)[0] == 2 and choose({1: (dipped, 1.0), 2: (steady, 1.0)}, float, WS)[1] == [1, 2]
+    assert choose({1: (dipped, 1.0), 2: (np.full(16, 0.50), 1.0)}, float, WS)[0] == 1, "a candidate more than the tolerance below the best mean does not compete"
+
+    class Collapse(Ladder):
+        """The mean peaks at rung 4, but the worst visit gets worse with the rate (one visit collapses, the others pay it back): mean-optimal 4, worst-shift-optimal 2."""
+        def run(self, k, rot):
+            m = 0.6 - 0.002 * (k - 4) ** 2
+            d = 0.03 * max(0, k + 2)
+            acc = m + np.random.default_rng(1000 * rot + k + 50).normal(0, 0.0005, 16)
+            acc[0] -= d
+            acc[1:] += d / 15
+            self.have[(k, rot)] = Cell({"large": acc, "gate": acc}, {"large": 5.0, "small": 1.0}, {"large": False, "small": False}, 800000)
+
+    for rots in ((0,), (0, 2)):
+        assert drive(Collapse(0), rots=rots).chosen == drive(Collapse(0), rots=rots, criterion=C.MEAN).chosen, "the mean criterion is the default: unchanged"
+        pw = drive(Collapse(0), rots=rots, criterion=WS)
+        assert pw.chosen == 2 and pw.done, (pw.chosen, pw.notes)
+        assert drive(Collapse(0), rots=rots, criterion=C.Criterion.parse("worst_shift", 0.2)).chosen == 3, "a tighter tolerance keeps the rate closer to the mean's optimum"
+    lad = Collapse(0)
+    drive(lad, criterion=WS)
+    assert {1, 3} <= {k for k, _ in lad.have}, "the chosen rung's neighbours are tried"
+    # a huge tolerance makes every rung feasible: the best worst visit is then an interior rung of this surface (-2), found with its neighbours tried
+    pw = drive(Collapse(0), criterion=C.Criterion.parse("worst_shift", 100.0))
+    assert pw.chosen == -2 and pw.done, (pw.chosen, pw.notes)
+
+    class Down(Ladder):
+        """The same mean at every rung, a worst visit that keeps improving as the rate falls: the choice runs to the end of the range and is reported as a plateau."""
+        def run(self, k, rot):
+            acc = np.full(16, 0.6)
+            acc[0] -= 0.02 * (k + 10)
+            acc[1:] += 0.02 * (k + 10) / 15
+            self.have[(k, rot)] = Cell({"large": acc, "gate": acc}, {"large": 5.0, "small": 1.0}, {"large": False, "small": False}, 800000)
+
+    lad = Down(0)
+    pw = drive(lad, criterion=WS)
+    assert pw.chosen == min(X2["large"]) - 2 * MAX_EXTEND and any("plateau" in n for n in pw.notes), (pw.chosen, pw.notes)
+    assert min(k for k, _ in lad.have) == min(X2["large"]) - 2 * MAX_EXTEND, "the extension stops at the cap"
+
+    # the pair search: its choice is the alive tried cell with the best worst visit among those within the tolerance, and it never has a higher total rate than the mean's
+    def collapse_cell(c, rot):
+        kv, ks = c
+        m = 0.6 - 0.002 * (kv - 1) ** 2 - 0.002 * (ks + 1) ** 2
+        d = 0.03 * max(0, kv + ks + 4)
+        acc = m + np.random.default_rng(7 * rot + 31 * kv + 101 * ks + 9999).normal(0, 0.0005, 16)
+        acc[0] -= d
+        acc[1:] += d / 15
+        return Cell({"gate": acc, "large": acc, "small": acc}, {"large": 2.0, "small": 2.0}, {"large": False, "small": False}, 800000)
+
+    for crit in (C.MEAN, WS):
+        have3: dict = {}
+        for _ in range(60):
+            p3 = plan_pair(cell_of=lambda c, r: have3.get((c, r)), criterion=crit)
+            if not p3.requests:
+                break
+            for c, r in p3.requests:
+                have3[(c, r)] = collapse_cell(c, r)
+        assert p3.chosen is not None and p3.done, (crit, p3.notes)
+        if crit.robust:
+            tried3 = [c for (c, r) in have3 if r == 0]
+            top = max(have3[(c, 0)].mean("gate") for c in tried3)
+            ok3 = [c for c in tried3 if have3[(c, 0)].mean("gate") >= top - WS.tol - 1e-9]
+            assert have3[(p3.chosen, 0)].acc["gate"].min() >= max(have3[(c, 0)].acc["gate"].min() for c in ok3) - 1e-9, "the chosen cell has the best worst visit among the feasible"
+        else:
+            assert p3.chosen == plan_pair(cell_of=lambda c, r: have3.get((c, r))).chosen, "the mean criterion is the default: unchanged"
+    # the joint search with the criterion: it converges, on a surface whose collapse grows with the rates
+    def drive_joint_ws(crit):
+        made_w = {}
+        for _ in range(120):
+            jw = plan_joint(lambda k, r: made_w.get((k, r)), S0, {"large": [C1, C2], "small": [C2, C1]}, criterion=crit)
+            if not jw.requests:
+                return jw
+            for k, rot in jw.requests:
+                (kv, ks), b, sl, ss = k
+                acc = surface(0.75, k) + np.random.default_rng(abs(hash((k, rot))) % 2**32).normal(0, 0.0005, 16)
+                d = 0.03 * max(0, kv + ks + 4)
+                acc[0] -= d
+                acc[1:] += d / 15
+                made_w[(k, rot)] = Cell({"gate": acc, "large": acc, "small": acc}, {"large": 5.0, "small": 5.0}, {"large": False, "small": False}, 800000)
+        raise AssertionError("plan_joint did not converge")
+    jm, jw = drive_joint_ws(C.MEAN), drive_joint_ws(WS)
+    assert jm.final is not None and jw.final is not None and jw.notes, (jm.final, jw.final)
+    assert sum(jw.final[0]) <= max(sum(c) for c in zip(X2["large"], X2["small"])) + 4, "the worst-shift pair stays in the range the search can reach"
     print("tuning self-test passed")

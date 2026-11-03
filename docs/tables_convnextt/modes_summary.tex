@@ -1,0 +1,18 @@
+\begin{tabular}{@{}l ccc c ccc@{}}
+\toprule
+ & \multicolumn{3}{c}{4 held-out shifts (tuning)} & & \multicolumn{3}{c}{15 test corruptions} \\
+\cmidrule(lr){2-4}\cmidrule(lr){6-8}
+Mode & duo & \vit{} & ConvNeXt-T & & duo & \vit{} & ConvNeXt-T \\
+\midrule
+Frozen & 50.9 & 48.8 & 43.6 & & 41.0 & 40.4 & 29.8 \\
+\midrule
+Independent large & 53.4$\pm$0.0 & 51.8 & 43.6 & & 44.2$\pm$0.0 & 42.9 & 29.8 \\
+Independent small & 50.7$\pm$0.1 & 48.8 & 49.3 & & 20.1$\pm$2.1 & 40.4 & 17.2 \\
+Independent both & 55.6$\pm$0.1 & 51.8 & 49.2 & & 42.2$\pm$0.2 & 42.9 & 26.5 \\
+\midrule
+Large adapt & 56.0$\pm$0.1 & 54.9 & 43.6 & & 41.2$\pm$0.1 & 40.9 & 29.8 \\
+Small adapt & 55.7$\pm$0.1 & 48.8 & 54.0 & & 33.6$\pm$0.0 & 40.4 & 30.9 \\
+\midrule
+Joint & 55.9$\pm$0.0 & 49.5 & 53.8 & & 38.0$\pm$0.2 & 41.4 & 34.8 \\
+\bottomrule
+\end{tabular}
