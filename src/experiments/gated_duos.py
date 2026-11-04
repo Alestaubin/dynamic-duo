@@ -99,25 +99,30 @@ def joint_dd_rates(directory: Path, duo: str, proxy: str, b_t: int, beta: float,
     return next(iter(pairs.values()))
 
 
-def gated_row_defs(betas: Sequence[float], *, indep: bool = True, joint: bool = True
+def gated_row_defs(betas: Sequence[float], *, indep: bool = True, joint: bool = True, joint_betas: Sequence[float] | None = None
                    ) -> tuple[list[tuple[str, AM.Row]], dict[str, str]]:
     """(extra rows, relabel) for `AM.render_corruption_table`: each beta of `betas` adds a Vanilla DD row after Independent both and a
-    Joint DD row after Joint (series "<gate_mode>/duo"), and those two ROWS rows are renamed to say they are the fixed combination."""
+    Joint DD row after Joint (series "<gate_mode>/duo"; only for the betas of `joint_betas` when given: a beta without Joint DD runs has no row),
+    and those two ROWS rows are renamed to say they are the fixed combination."""
     extra, relabel = [], {}
     for run, base, section, kind, name in ((indep, "indep_duo", AM.OWN, VANILLA, "Independent"), (joint, "joint", AM.DUO, JOINT_DD, "Joint")):
         if not run:
             continue
         relabel[f"{base}/duo"] = f"Both adapt ({name}), Fixed TS"
         for beta in betas:
+            if kind == JOINT_DD and joint_betas is not None and beta not in joint_betas:
+                continue
             extra.append((f"{base}/duo", AM.Row(gate_mode(kind, beta), "duo", section,
                                                 f"Both adapt ({name}), {'Vanilla' if kind == VANILLA else 'Joint'} DD, beta {beta:g}")))
     return extra, relabel
 
 
 def gate_caption(ctx: Context, proxy: str, b_t: int, betas: Sequence[float],
-                 rates: dict[float, tuple[float, float]]) -> str:
+                 rates: dict[float, tuple[float, float]], missing_joint: Sequence[float] = (),
+                 joint_rates: tuple[float, float] | None = None) -> str:
     """The sentence(s) a table with gated rows adds to its caption: what the gate is, where it sits in each kind of run, and the Joint DD
-    learning rates (`rates[beta]`: those of its runs, tuned with the gate at that beta, so the optimizer is `duo_ctx`'s with the rate replaced)."""
+    learning rates (`rates[beta]`: those of its runs, so the optimizer is `duo_ctx`'s with the rate replaced). A beta whose rates are the
+    Joint row's own (`joint_rates`, the pair tuned WITHOUT the gate) is said to be not retuned for the gate; the others were tuned with it."""
     large, small = AM._model_names(ctx)
     text = (f"The rows with a gate weight the members with $w_L = \\sigma(\\beta (s_L - s_S))$, $s$ the logit of the {latex_escape(proxy)} proxy "
             f"(identity calibration, no temporal filter) computed on proxy batches of {b_t} samples, and pool the logits as "
@@ -125,11 +130,22 @@ def gate_caption(ctx: Context, proxy: str, b_t: int, betas: Sequence[float],
             f"{', '.join(f'{b:g}' for b in betas[:-1])}{' or ' if len(betas) > 1 else ''}{betas[-1]:g} in the rows. "
             f"In Vanilla DD the gate sits outside the adaptation loop (the members adapt on their own entropy, as in Independent, and never see "
             f"it); in Joint DD it sits inside, both members adapt on the entropy of the gated prediction, and the weight is a constant of each step.")
-    if rates:
-        text += (" Joint DD uses, at each $\\beta$, the learning rates tuned together with the gate at that $\\beta$ on the four held-out "
-                 "corruptions (same optimizer as Joint otherwise): "
-                 + "; ".join(f"$\\beta = {b:g}$: {large} {AM._tex_num(rates[b][0])}, {small} {AM._tex_num(rates[b][1])}" for b in betas if b in rates)
+    same = [b for b in betas if b in rates and joint_rates is not None
+            and all(abs(r - j) <= 1e-9 * abs(j) for r, j in zip(rates[b], joint_rates))]       # the Joint row's own rates: the gate was not retuned
+    tuned = [b for b in betas if b in rates and b not in same]
+    beta_list = lambda bs: "$\\beta = " + ", ".join(f"{b:g}" for b in bs) + "$"                  # noqa: E731
+    at = beta_list(tuned) if same else "each $\\beta$"
+    if tuned:
+        text += (f" Joint DD uses, at {at}, the learning rates tuned together with the gate at that "
+                 "$\\beta$ on the four held-out corruptions (same optimizer as Joint otherwise): "
+                 + "; ".join(f"$\\beta = {b:g}$: {large} {AM._tex_num(rates[b][0])}, {small} {AM._tex_num(rates[b][1])}" for b in tuned)
                  + ".")
+    if same:
+        text += (f" Joint DD at {beta_list(same)} uses the learning rates of the Joint row ({large} {AM._tex_num(rates[same[0]][0])}, "
+                 f"{small} {AM._tex_num(rates[same[0]][1])}), which were tuned on the four held-out corruptions without the gate: they were not retuned for it.")
+    if missing_joint:
+        text += (f" There is no Joint DD row for $\\beta = {', '.join(f'{b:g}' for b in missing_joint)}$: it needs live runs of the gate inside the loss at "
+                 f"learning rates tuned together with the gate, and none exist for this duo yet.")
     return text
 
 
@@ -314,6 +330,13 @@ if __name__ == "__main__":
         text = gate_caption(ctx, "nnn", 64, betas, rates)
         assert text.count("$") % 2 == 0 and "$\\beta$ is 0.25 or 0.5 in the rows" in text and "proxy batches of 64 samples" in text
         assert text.count("$\\beta = 0.25$:") == 1 and "$1.13 \\times 10^{-3}$" in text and "$8 \\times 10^{-4}$" in text
+        assert "not retuned" not in text and "at each $\\beta$" in text
+        t_mix = gate_caption(ctx, "nnn", 64, betas, rates, joint_rates=rates[0.5])           # beta 0.5 runs at the Joint row's own rates
+        assert "at $\\beta = 0.25$, the learning rates tuned together" in t_mix and t_mix.count("not retuned") == 1 and t_mix.count("$") % 2 == 0
+        assert "$\\beta = 0.5$: " not in t_mix.split("not retuned")[0].split("tuned together")[1]
+        t_all = gate_caption(ctx, "nnn", 64, betas, {b: rates[0.5] for b in betas}, joint_rates=rates[0.5])
+        assert "tuned together with the gate" not in t_all and "$\\beta = 0.25, 0.5$ uses the learning rates of the Joint row" in t_all
+        assert gate_caption(ctx, "nnn", 64, betas, rates, joint_rates=(0.1, 0.1)) == text     # other rates: the former caption, word for word
         gt = AM.render_corruption_table(gdf, ctx, "tent", temps, label="x", source="t", duo_ctx=duo_ctx, extra_rows=extra, relabel=relabel,
                                         gate_text=text)
         shown, section = [], None

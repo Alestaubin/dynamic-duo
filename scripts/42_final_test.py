@@ -60,8 +60,8 @@ def order_of(tok: str) -> int | None:
     return None if tok == "std" else int(tok)
 
 
-def stem_of(cond: str, lrs, order: int | None, beta: float) -> str:
-    return LV.run_stem(cond, stream="test", rot=0, seed=0, lrs=lrs, proxy="nnn", b_t=256, beta=beta, order=order)
+def stem_of(cond: str, lrs, order: int | None, beta: float, stream: str = "test") -> str:
+    return LV.run_stem(cond, stream=stream, rot=0, seed=0, lrs=lrs, proxy="nnn", b_t=256, beta=beta, order=order)
 
 
 def control_cond(rule_cond: str, draw: int) -> str:
@@ -81,12 +81,16 @@ def all_methods(cfg: dict) -> list[dict]:
     return methods
 
 
-def sbatch_cmd(g, duo: str, m: dict, order: int | None, tok: str, beta: float, dep: str | None, write: bool) -> list[str]:
-    """The sbatch command of one live run on the test stream (src/reset/jobs.py); `write`: write the job's spec file (when it is going to be submitted)."""
+def sbatch_cmd(g, duo: str, m: dict, order: int | None, tok: str, beta: float, dep: str | None, write: bool, *, stream: str = "test", tta: str = "tent",
+               wall_minutes: float | None = None, time: str | None = None, dep_kind: str = "afterok") -> list[str]:
+    """The sbatch command of one live run on the test stream or a CCC stream (src/reset/jobs.py); `write`: write the job's spec file (when it is going to be
+    submitted). A CCC run carries `wall_minutes` (it checkpoints and stops; the next job of its chain resumes)."""
     signal = m.get("signal", "indep")
-    job = J.live_job(duo, m["cond"], stream="test", lrs=m["lrs"], order=order, seed=0, beta=m.get("beta", beta), label=f"o{tok}{m['name']}", signal=signal)
-    extra = ["--parsable"] + ([f"--dependency=afterok:{dep}"] if dep else [])
-    return J.live_command(Paths(g, duo, signal), job, extra, write=write)
+    job = J.live_job(duo, m["cond"], stream=stream, lrs=m["lrs"], order=order, seed=0, beta=m.get("beta", beta), label=f"o{tok}{m['name']}", signal=signal, tta=tta)
+    if wall_minutes is not None and m["cond"] != "frozen":
+        job.args["wall_minutes"] = float(wall_minutes)
+    extra = ["--parsable"] + ([f"--dependency={dep_kind}:{dep}"] if dep else [])
+    return J.live_command(Paths(g, duo, signal, tta=tta), job, extra, time=time, write=write)
 
 
 # ------------------------------------------------------------------------------------------------------------ loading
@@ -130,6 +134,12 @@ def main() -> int:
     ap.add_argument("--duo", default="vitb16_rn50v1")
     ap.add_argument("--configs", default=None, help="default: final_configs.json in the duo's reset_tune folder")
     ap.add_argument("--orders", nargs="+", default=["std", "0", "1", "2", "3"])
+    ap.add_argument("--stream", default="test", help="test (the 15 ImageNet-C corruptions, --orders) or a CCC stream ccc-<difficulty>-<speed>-<seed>-n<images>, "
+                    "e.g. ccc-medium-1000-43-n2000000 (one run per method, plus the frozen duo; each run a chain of --pieces resuming jobs)")
+    ap.add_argument("--tta", default="tent", help="the members' TTA method (default %(default)s; eta_native: ETA)")
+    ap.add_argument("--pieces", type=int, default=3, help="CCC: jobs per run, each resuming from the last one's checkpoint (default %(default)s)")
+    ap.add_argument("--piece_time", default="01:50:00", help="CCC: time limit of each piece (default %(default)s)")
+    ap.add_argument("--wall_minutes", type=float, default=95.0, help="CCC: a piece checkpoints and stops this long after it started (default %(default)s)")
     ap.add_argument("--beta", type=float, default=0.5)
     ap.add_argument("--baseline", default="no_reset_tuned", help="report: the method every paired difference of the main table is taken against")
     ap.add_argument("--pairs", nargs="*", default=None, metavar="A:B", help="report: paired differences A - B between method names (default: every rule/schedule against the baseline, the control and the boundary reset)")
@@ -141,8 +151,9 @@ def main() -> int:
     ap.add_argument("--out_dir", default=None, help="report: default <out>/results/reset_final (the main duo) or reset_final/<duo>")
     args = ap.parse_args()
     g = load_global()
-    folder = g.path("out") / "results" / "reset_live" / f"{args.duo}__tent_bn"
-    P = Paths(g, args.duo, criterion=args.criterion)
+    folder = Paths(g, args.duo, tta=args.tta).live_dir()
+    P = Paths(g, args.duo, criterion=args.criterion, tta=args.tta)
+    ccc = args.stream.startswith("ccc-")
     suffix = "" if args.criterion == "mean" else f"__{args.criterion}"
     main_duo = args.duo == LEGACY_DUO and not suffix          # the main duo's MEAN study keeps its hand-written configs and flat folders; its other studies are built like any duo's
     if args.what == "configs":
@@ -163,15 +174,17 @@ def main() -> int:
     cm = lambda side: provenance.model_name(load_duo(args.duo, g, tta="tent", regime="indep")[side.upper()]["NAME"]).split(" (")[0]
     L, Sm = cm("large"), cm("small")                                                 # the members' names, for the table headers
     methods = all_methods(cfg)
-    folder_of = lambda m: Paths(g, args.duo, "joint").live_dir() if m.get("signal") == "joint" else folder          # a joint method's runs have their own folder
-    orders = [(tok, order_of(tok)) for tok in args.orders]
+    folder_of = lambda m: Paths(g, args.duo, "joint", tta=args.tta).live_dir() if m.get("signal") == "joint" else folder   # a joint method's runs have their own folder
+    orders = [("ccc", None)] if ccc else [(tok, order_of(tok)) for tok in args.orders]
+    if ccc:                                                                         # no episodic table holds a frozen CCC row: the frozen duo is a run of its own
+        methods = [{"name": "frozen", "cond": "frozen", "lrs": [0.0, 0.0], "kind": "frozen", "label": "Frozen (no adaptation)"}] + methods
     csv = Path(args.csv) if args.csv else g.path("out") / "results" / "tab_gated_duos" / f"tent__{args.duo}_bn{suffix}_nnn_bt256_beta{args.beta:g}.csv"
     if not args.csv and not csv.is_file():
         csv = csv.with_name(csv.stem + "_vanillaonly.csv")                           # 03b --no_joint_dd
     root = Path(__file__).resolve().parents[1]
 
     if args.what in ("plan", "submit"):
-        have = lambda m, o: (folder_of(m) / f"{stem_of(m['cond'], m['lrs'], o, m.get('beta', args.beta))}.npz").exists()
+        have = lambda m, o: (folder_of(m) / f"{stem_of(m['cond'], m['lrs'], o, m.get('beta', args.beta), args.stream)}.npz").exists()
         job_of: dict[tuple[str, str], str] = {}
         n_missing = 0
         for kind_is_control in (False, True):                                       # the rules first: the controls depend on them
@@ -190,17 +203,27 @@ def main() -> int:
                             if dep is None:
                                 print(f"  {m['name']} order {tok}: its reference run ({ref['name']}) is not run and not submitted: submit the rules first")
                                 continue
-                    cmd = sbatch_cmd(g, args.duo, m, o, tok, args.beta, dep, write=args.what == "submit")
-                    print(("SUBMIT  " if args.what == "submit" else "to run  ") + " ".join(shlex.quote(c) for c in cmd))
-                    if args.what == "submit":
-                        res = subprocess.run(cmd, capture_output=True, text=True, cwd=root)
-                        jid = res.stdout.strip().split(";")[0]
-                        print("   ->", jid or res.stderr.strip())
-                        job_of[(m["name"], tok)] = jid
+                    pieces = args.pieces if ccc and m["cond"] != "frozen" else 1
+                    jid = None
+                    for k in range(pieces):                                 # a CCC run: piece k+1 resumes from piece k (afterany: a piece that stopped at its deadline exits 0)
+                        cmd = sbatch_cmd(g, args.duo, m, o, tok, args.beta, dep if k == 0 else jid, write=args.what == "submit", stream=args.stream, tta=args.tta,
+                                         wall_minutes=args.wall_minutes if ccc else None, time=args.piece_time if ccc else None,
+                                         dep_kind="afterok" if k == 0 else "afterany")
+                        print(("SUBMIT  " if args.what == "submit" else "to run  ") + (f"[piece {k + 1}/{pieces}] " if pieces > 1 else "") + " ".join(shlex.quote(c) for c in cmd))
+                        if args.what == "submit":
+                            res = subprocess.run(cmd, capture_output=True, text=True, cwd=root)
+                            jid = res.stdout.strip().split(";")[0]
+                            print("   ->", jid or res.stderr.strip())
+                        else:
+                            jid = f"<{m['name']}.{k + 1}>"
+                    job_of[(m["name"], tok)] = jid                          # a control waits for the LAST piece of its rule
         print(f"{n_missing} run(s) {'submitted' if args.what == 'submit' else 'missing'} of {len(methods) * len(orders)} ({len(methods)} methods x {len(orders)} orders)")
         return 0
 
     # ---- report
+    if ccc:
+        print("the report of a CCC stream is not written yet (DD_final_sprint.md, C6): its runs are in " + str(folder))
+        return 1
     recs: dict[str, dict[str, dict]] = {}                                           # method -> order token -> record
     for m in methods:
         recs[m["name"]] = {}

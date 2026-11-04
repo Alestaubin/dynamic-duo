@@ -79,7 +79,10 @@ def run_stem(cond: str, *, stream: str, rot: int, seed: int, lrs: Sequence[float
              order: int | None = None) -> str:
     """The file stem of a live run (src/reset/workers.py writes it, scripts/39_tab_reset.py reads it); the frozen run does not depend on the rates or the gate.
     `order`: a test stream in one of CoTTA's random orders (None = the standard order, which keeps its old names)."""
-    where = ("__heldout" if stream == "heldout" else "") + (f"__rot{rot}" if rot else "") + (f"__order{order}" if order is not None and stream == "test" else "")
+    if stream.startswith("ccc-"):                                    # a CCC stream: its name holds difficulty, speed, CCC seed and length
+        where = f"__{stream}"
+    else:
+        where = ("__heldout" if stream == "heldout" else "") + (f"__rot{rot}" if rot else "") + (f"__order{order}" if order is not None and stream == "test" else "")
     cut = f"__first{max_images}" if max_images else ""
     if cond == "frozen":
         return f"live-frozen{where}{cut}__seed{seed}"

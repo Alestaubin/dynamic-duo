@@ -84,16 +84,18 @@ class _Stream(Dataset):
 
 
 class _Batches(Dataset):
-    """Item b is stream samples [b*bs, (b+1)*bs): lets DataLoader workers prefetch in order."""
+    """Item b is stream samples [start + b*bs, start + (b+1)*bs): lets DataLoader workers prefetch in order. `start` (a resumed run) skips the first samples
+    without reading them."""
 
-    def __init__(self, stream: _Stream, batch_size: int, limit: int):
-        self.stream, self.bs, self.limit = stream, batch_size, limit
+    def __init__(self, stream: _Stream, batch_size: int, limit: int, start: int = 0):
+        self.stream, self.bs, self.limit, self.start = stream, batch_size, limit, start
 
     def __len__(self) -> int:
-        return -(-self.limit // self.bs)
+        return max(0, -(-(self.limit - self.start) // self.bs))
 
     def __getitem__(self, b: int):
-        items = [self.stream[i] for i in range(b * self.bs, min((b + 1) * self.bs, self.limit))]
+        lo = self.start + b * self.bs
+        items = [self.stream[i] for i in range(lo, min(lo + self.bs, self.limit))]
         images, labels = zip(*items)
         return list(images), torch.tensor(labels)
 
@@ -102,6 +104,7 @@ class CCC(ShiftDataset):
     name = "ccc"
     config_key = "ccc"
     already_224 = True
+    supports_start = True          # loader(start=...): a resumed live run skips what it has seen without reading it (src/reset/live_runs.py)
 
     def __init__(self, root, difficulty: str, speed: int, seed: int,
                  images_per_stream: int = 7_500_000, cache_dir: str | Path | None = None):
@@ -171,12 +174,14 @@ class CCC(ShiftDataset):
         return {"images": None, "classes": 1000, "shards": len(shards), "note": done}
 
     def loader(self, batch_size: int, num_samples: int | None = None, seed: int | None = None,
-               workers: int = 4, pin_memory: bool = False, shuffle: bool = False, collate_fn=None) -> DataLoader:
+               workers: int = 4, pin_memory: bool = False, shuffle: bool = False, collate_fn=None, start: int = 0) -> DataLoader:
         if shuffle:
             raise ValueError("CCC streams are ordered; shuffle=True would destroy the benchmark")
         stream, limit = self._limited(num_samples)
         # Items are already whole batches (list of PIL, labels); a custom collate_fn receives that pair.
-        return DataLoader(_Batches(stream, batch_size, limit), batch_size=None, shuffle=False,
+        if not 0 <= start <= limit:
+            raise ValueError(f"start {start} is outside the stream [0, {limit}]")
+        return DataLoader(_Batches(stream, batch_size, limit, start), batch_size=None, shuffle=False,
                           num_workers=workers, pin_memory=pin_memory, collate_fn=collate_fn or _identity,
                           worker_init_fn=worker_init if workers > 0 else None)
 
@@ -211,6 +216,11 @@ if __name__ == "__main__":
             assert labels == list(range(n_total)), (workers, labels)
         batches = list(ds.loader(4, num_samples=21, workers=0))
         assert [len(b[0]) for b in batches] == [4] * 5 + [1] and batches[-1][1].tolist() == [20]
+        # a resumed run: start=8 is the stream from sample 8 on, the same batches as the uninterrupted loader's from its third on (and nothing at the end)
+        for workers in (0, 2):
+            rest = [ys.tolist() for _, ys in ds.loader(4, num_samples=21, workers=workers, start=8)]
+            assert rest == [b[1].tolist() for b in batches[2:]], (workers, rest)
+        assert list(ds.loader(4, num_samples=21, workers=0, start=21)) == [] and CCC.supports_start
         img, y = ds.torch_dataset()[12]
         assert y == 12 and img.size == (224, 224) and abs(img.getpixel((5, 5))[0] - 12 * 9 % 256) < 8
         for bad, msg in ((lambda: ds.loader(4, num_samples=27, workers=0), "partly generated"),

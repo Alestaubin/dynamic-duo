@@ -45,12 +45,28 @@ from src.utils.config import GlobalConfig, load_global
 SIDES = ("large", "small")
 
 
-def _context(g: GlobalConfig, duo: str, device: str | None, joint: bool = False) -> Context:
-    return Context.create(duo, g, device, tta=TTA, bn=True, regime="joint" if joint else "indep")
+def _context(g: GlobalConfig, duo: str, device: str | None, joint: bool = False, tta: str = TTA) -> Context:
+    return Context.create(duo, g, device, tta=tta, bn=True, regime="joint" if joint else "indep")
 
 
 def _temps(ctx: Context, duo: str, *, compute: bool = False):
     return AM.resolve_temperatures(ctx, AM.temperature_spec(duo, TTA, None, None), None, report_only=not compute)
+
+
+CCC_STREAM = re.compile(r"ccc-(easy|medium|hard)-(\d+)-(\d+)-n(\d+)")
+
+
+def ccc_parts(g: GlobalConfig, stream: str, seed: int):
+    """A CCC stream named `ccc-<difficulty>-<speed>-<ccc seed>-n<images>` (the first <images> images of it): one part, and its length."""
+    from src.experiments.continual import Part
+    from src.experiments.protocols import Segment
+    from src.utils.datasets import CCC
+
+    m = CCC_STREAM.fullmatch(stream)
+    if not m:
+        raise ValueError(f"{stream!r} is not a CCC stream name (ccc-<easy|medium|hard>-<speed>-<seed>-n<images>)")
+    diff, speed, ccc_seed, n = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4))
+    return [Part(Segment(f"ccc/{diff}/{speed}/{ccc_seed}", CCC.from_config(g, diff, speed, ccc_seed), True), 0, seed)], n
 
 
 def rate_str(lr: float) -> str:
@@ -71,26 +87,27 @@ def temperatures(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
 
 def continual(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
     joint = a.get("signal") == "joint"
-    P = Paths(g, duo, "joint" if joint else "indep")
+    tta = a.get("tta", TTA)                                             # the TTA method (a Tent spec has no entry: its name and key are as before)
+    P = Paths(g, duo, "joint" if joint else "indep", tta=tta)
     lrs = None if a["lrs"] is None else (float(a["lrs"][0]), float(a["lrs"][1]))
     path = P.continual_run(a["seed"], lrs)
     if path.is_file():
         print(f"done already ({path.name})")
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
-    ctx = _context(g, duo, device, joint)
+    ctx = _context(g, duo, device, joint, tta)
     temps = _temps(ctx, duo)
     rctx = ctx if lrs is None else with_optim(ctx, large=sgd_optim(lrs[0], a["momentum"]), small=sgd_optim(lrs[1], a["momentum"]))
     gate, inside = None, False
     if joint and lrs is not None:                                       # the joint signal needs the gate inside the loss (the frozen reference has none)
         gate = PureProxyGate("nnn", beta=a["beta"], b_t=256, T_l=temps.T_l, T_s=temps.T_s, num_classes=1000)
-    runner, inside = RC.make_runner(rctx, RC.RUNS["frozen" if lrs is None else ("joint_dd" if joint else "indep")], gate, TTA)
+    runner, inside = RC.make_runner(rctx, RC.RUNS["frozen" if lrs is None else ("joint_dd" if joint else "indep")], gate, tta)
     parts = CT.tuning_parts(rctx, rounds=a["rounds"], seed=a["seed"])
     stop = None if lrs is None else CT.DeadStop(SIDES, "all", 0)
     print(f"== {duo} {'joint ' if joint else ''}seed {a['seed']}, " + ("frozen" if lrs is None else f"L{lrs[0]:g}_S{lrs[1]:g}" + (f", gate beta {a['beta']:g}" if joint else "")))
     t0 = time.time()
     res = CT.run_until(runner, parts, images=a["images"], batch_size=rctx.batch_size, workers=rctx.g.workers, T_l=temps.T_l, T_s=temps.T_s, stop=stop, gate=gate, inside=inside)
-    meta = {"run": "frozen" if lrs is None else ("joint_dd" if joint else "indep"), "signal": "joint" if joint else "indep", "beta": a.get("beta"), "duo": duo, "tta": TTA, "bn": True, "seed": a["seed"], "rounds": a["rounds"], "images": a["images"],
+    meta = {"run": "frozen" if lrs is None else ("joint_dd" if joint else "indep"), "signal": "joint" if joint else "indep", "beta": a.get("beta"), "duo": duo, "tta": tta, "bn": True, "seed": a["seed"], "rounds": a["rounds"], "images": a["images"],
             "stream": "heldout, round r rotated by r", "lrs": lrs, "momentum": a["momentum"], "optim": {s.lower(): rctx.duo[s]["OPTIM"] for s in ("LARGE", "SMALL")},
             "T_l": temps.T_l, "T_s": temps.T_s, "batch_size": rctx.batch_size, "stopped": res["stopped"], "dead_at": res["dead_at"], "seen": res["seen"],
             "seconds": time.time() - t0, "models": {s.lower(): rctx.duo[s]["NAME"] for s in ("LARGE", "SMALL")}}
@@ -102,7 +119,8 @@ def continual(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
 
 def calibration(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
     joint = a.get("signal") == "joint"
-    P = Paths(g, duo, "joint" if joint else "indep")
+    tta = a.get("tta", TTA)
+    P = Paths(g, duo, "joint" if joint else "indep", tta=tta)
     lrs = (float(a["lrs"][0]), float(a["lrs"][1]))
     key = dict(lrs=lrs, seed=a["seed"], rotation=a["rotation"], beta=a["beta"], b_t=a["b_t"], proxy=a["proxy"])
     path, frozen_path = P.calibration_run(a["name"], **key), P.calibration_run(a["name"], **key, frozen=True)
@@ -110,7 +128,7 @@ def calibration(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
         print(f"done already ({path.name})")
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
-    ctx = _context(g, duo, device, joint)
+    ctx = _context(g, duo, device, joint, tta)
     temps = _temps(ctx, duo)
     names = {s: provenance.model_name(ctx.duo[s.upper()]["NAME"]).split(" (")[0] for s in SIDES}
     title = f"({a['name']}{', joint' if joint else ''}) " + ", ".join(f"{names[s]} at {GS.rate_str(lr)}" for s, lr in zip(SIDES, lrs))
@@ -118,7 +136,7 @@ def calibration(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
           f"{'every' if a['stop_mode'] == 'all' else 'the first'} member has collapsed completely")
     t0 = time.time()
     res, frozen, parts, meta = GS.run_experiment(ctx, lrs=lrs, watch=SIDES, after=a["after"], seed=a["seed"], order=None, images=a["images"], proxy=a["proxy"],
-                                                 beta=a["beta"], b_t=a["b_t"], T_l=temps.T_l, T_s=temps.T_s, momentum=a["momentum"], tta=TTA, stream="heldout",
+                                                 beta=a["beta"], b_t=a["b_t"], T_l=temps.T_l, T_s=temps.T_s, momentum=a["momentum"], tta=tta, stream="heldout",
                                                  rounds=a["rounds"], rotation=a["rotation"], stop_mode=a["stop_mode"], joint=joint)
     meta.update(name=a["name"], title=title, tuning=None, seconds=time.time() - t0)
     RC.save_run(frozen_path, frozen, parts, {**meta, "run": "frozen"})
@@ -131,6 +149,7 @@ def calibration(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
 def live(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
     cond, stream, rot, seed, order = a["cond"], a["stream"], a["rotation"], a["seed"], a["order"]
     joint = a.get("signal") == "joint"
+    tta = a.get("tta", TTA)
     lrs = (float(a["lrs"][0]), float(a["lrs"][1]))
     extra_gates = list(dict.fromkeys(n for x in a["extra_gates"] for n in (GV.DEFAULT_SET if x == "default" else (x,))))
     for n in extra_gates:
@@ -141,8 +160,8 @@ def live(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
         raise ValueError("the joint signal has its gate inside the loss: extra gates are not scored")
     if cond.startswith("random~") and not re.fullmatch(r"random~[^~]+~d\d+", cond):
         raise ValueError(f"{cond!r}: write random~<reference condition>~d<draw>")
-    P = Paths(g, duo, "joint" if joint else "indep")
-    ctx = _context(g, duo, device, joint)
+    P = Paths(g, duo, "joint" if joint else "indep", tta=tta)
+    ctx = _context(g, duo, device, joint, tta)
     proxy = a["proxy"] or ctx.g.gate["proxy"]
     proxy = {"nuclear_norm": "nnn", "ac_mc": "msp"}.get(proxy, proxy)
     b_t, beta = a["b_t"], a["beta"]
@@ -170,28 +189,34 @@ def live(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
         LR.make_trigger(cond, rules)                                            # fail on a bad name now, not after hours in the queue
 
     rctx = with_optim(ctx, large=sgd_optim(lrs[0], a["momentum"]), small=sgd_optim(lrs[1], a["momentum"]))
-    parts = CT.tuning_parts(rctx, rounds=a["rounds"], seed=seed, rotation=rot) if stream == "heldout" else RC.stream_parts(rctx, rounds=1, seed=seed, order=order, stream="test")
+    images = a["images"]
+    if stream.startswith("ccc-"):
+        parts, images = ccc_parts(g, stream, seed)                      # one part: the first n images of the CCC stream
+    elif stream == "heldout":
+        parts = CT.tuning_parts(rctx, rounds=a["rounds"], seed=seed, rotation=rot)
+    else:
+        parts = RC.stream_parts(rctx, rounds=1, seed=seed, order=order, stream="test")
     names = {s: provenance.model_name(ctx.duo[s.upper()]["NAME"]).split(" (")[0] for s in SIDES}
-    print(provenance.footer(ctx.duo, TTA, True))
+    print(provenance.footer(ctx.duo, tta, True))
     print(f"static duo: T_L = {temps.T_l}, T_S = {temps.T_s}; gate {proxy}, b_t {b_t}, beta {beta:g}{' (inside the loss: the joint signal)' if joint else ''}; members at "
           f"{names['large']} {rate_str(lrs[0])}, {names['small']} {rate_str(lrs[1])}; stream {stream}; condition {cond}")
     print(f"== {cond}, seed {seed}" + (f", rotation {rot}" if stream == "heldout" else "") + f" -> {path.name}", flush=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    common = dict(images=a["images"], batch_size=rctx.batch_size, workers=rctx.g.workers, T_l=temps.T_l, T_s=temps.T_s)
-    meta = {"duo": ctx.duo["NAME"], "signal": "joint" if joint else "indep", "tta": TTA, "bn": True, "seed": seed, "stream": stream, "rounds": a["rounds"] if stream == "heldout" else 1,
+    common = dict(images=images, batch_size=rctx.batch_size, workers=rctx.g.workers, T_l=temps.T_l, T_s=temps.T_s)
+    meta = {"duo": ctx.duo["NAME"], "signal": "joint" if joint else "indep", "tta": tta, "bn": True, "seed": seed, "stream": stream, "rounds": a["rounds"] if stream == "heldout" else 1,
             "rotation": rot if stream == "heldout" else None, "order": order, "images": a["images"], "max_images": a["max_images"], "condition": cond, "lrs": list(lrs),
             "momentum": a["momentum"], "proxy": proxy, "beta": beta, "b_t": b_t, "T_l": temps.T_l, "T_s": temps.T_s, "batch_size": rctx.batch_size, "budget": a["budget"],
             "extra_gates": extra_gates, "screen_json": str(P.shared_screen) if rules else None,
             "optim": {s.lower(): rctx.duo[s]["OPTIM"] for s in ("LARGE", "SMALL")}, "models": {s.lower(): rctx.duo[s]["NAME"] for s in ("LARGE", "SMALL")}}
     if cond == "frozen":
-        runner, _ = RC.make_runner(ctx, RC.RUNS["frozen"], None, TTA)
+        runner, _ = RC.make_runner(ctx, RC.RUNS["frozen"], None, tta)
         res = CT.run_until(runner, parts, max_images=a["max_images"], **common)
         res["resets"] = []
     else:
         gate = PureProxyGate(proxy, beta=beta, b_t=b_t, T_l=temps.T_l, T_s=temps.T_s, num_classes=1000)
         extra = {n: GV.make_gate(n, gate, T_l=temps.T_l, T_s=temps.T_s, b_t=b_t) for n in extra_gates}
-        runner, inside = RC.make_runner(rctx, RC.RUNS["joint_dd" if joint else "indep"], gate, TTA)
+        runner, inside = RC.make_runner(rctx, RC.RUNS["joint_dd" if joint else "indep"], gate, tta)
         if cond.startswith("random~"):
             _, ref, draw = cond.split("~")
             ref_path = path_of(ref)
@@ -201,11 +226,20 @@ def live(g: GlobalConfig, duo: str, a: dict, device: str | None) -> int:
             trigger = LR.RandomTrigger(ref_meta["n_resets"], ref_meta["seen"] // rctx.batch_size, draw=int(draw[1:]), name=cond)
         else:
             trigger = LR.make_trigger(cond, rules)
-        res = LR.run_live(runner, parts, trigger=trigger, gate=gate, max_images=a["max_images"], extra_gates=extra, inside=inside, **common)
+        # a CCC stream (millions of images) runs as a chain of jobs: checkpoint next to the run, stop `wall_minutes` after this job started
+        ckpt = path.with_name(path.stem + ".ckpt.pt") if stream.startswith("ccc-") else None
+        deadline = t0 + 60 * float(a["wall_minutes"]) if ckpt is not None and a.get("wall_minutes") else None
+        res = LR.run_live(runner, parts, trigger=trigger, gate=gate, max_images=a["max_images"], extra_gates=extra, inside=inside, checkpoint=ckpt,
+                          checkpoint_every=int(a.get("checkpoint_every", 1000)), deadline=deadline, **common)
+        if res["stopped"] == "deadline":
+            print(f"stopped at {res['seen']} images after {(time.time() - t0) / 60:.0f} min: checkpoint {ckpt.name}; the next job of the chain resumes", flush=True)
+            return 0
         meta["trigger"] = res["trigger"]
     meta.update(seconds=time.time() - t0, seen=res["seen"], stopped=res["stopped"], resets=res["resets"], n_resets={s: sum(r["member"] == s for r in res["resets"]) for s in SIDES})
     visited = parts[:len(res["part_n"])]
     RC.save_run(path, res, visited, {**meta, "run": "frozen" if cond == "frozen" else ("joint_dd" if joint else "indep")})
+    if stream.startswith("ccc-") and cond != "frozen":
+        path.with_name(path.stem + ".ckpt.pt").unlink(missing_ok=True)
     acc = {s: float(v.mean() * 100) for s, v in res["correct"].items()}
     print(f"wrote {path.name}: {res['seen']} images, {meta['seconds'] / 60:.0f} min; accuracy " + ", ".join(f"{s} {x:.1f}" for s, x in acc.items()) + f"; resets {meta['n_resets']}", flush=True)
     return 0

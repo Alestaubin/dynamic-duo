@@ -504,7 +504,7 @@ class JointPlan:
 
 
 def plan_joint(cell_of: Callable[[tuple, int], Cell | None], shared, candidates: Mapping[str, Sequence], *, betas: Sequence[float] = BETAS,
-               rots: Sequence[int] = TUNING_ROTS, max_passes: int = 2, criterion: C.Criterion = C.MEAN) -> JointPlan:
+               rots: Sequence[int] = TUNING_ROTS, max_passes: int = 2, criterion: C.Criterion = C.MEAN, fixed_beta: float | None = None) -> JointPlan:
     """The search of the JOINT signal: both members adapt on the gated duo's entropy, so nothing is measured per member. A cell is (rate rungs (large, small), gate beta,
     large setting, small setting); every cell is scored by the duo's accuracy (series "gate"), a cell with a dead member is excluded. The blocks, in order, each by the
     rules of `plan_1d` / `choose` with the other blocks held fixed, repeated as a pass until nothing moves (at most `max_passes`):
@@ -516,10 +516,12 @@ def plan_joint(cell_of: Callable[[tuple, int], Cell | None], shared, candidates:
       detector   per member, one at a time (large first): its candidate settings (the shared one and the screen's), the best, then its threshold on the sqrt-2 grid
                  (the same rules; ties: fewest resets, then the shared setting first)
 
+    `fixed_beta`: the gate's beta is not searched: every cell is at it (rates and detectors are tuned with that gate inside the loss) and the beta block is skipped.
+
     `cell_of(key, rot)`: the stored run of a cell (None if not run yet). Returns a JointPlan: the runs still needed (the plan stops at the first block that needs any),
     or the final cell. Stateless, like `plan_member`: every call replays the decisions from the stored runs."""
     plan = JointPlan()
-    pair, beta, sets = None, START_BETA, {"large": shared, "small": shared}
+    pair, beta, sets = None, (START_BETA if fixed_beta is None else float(fixed_beta)), {"large": shared, "small": shared}
     SIDES_ = ("large", "small")
 
     def key(pr, b, st):
@@ -541,9 +543,9 @@ def plan_joint(cell_of: Callable[[tuple, int], Cell | None], shared, candidates:
         pair = sub.chosen
         plan.table = [{"block": "rates", **r} for r in sub.table]
         plan.notes.append(f"pass {p + 1}: rates {pair}")
-        # ---- the gate's beta
+        # ---- the gate's beta (skipped when it is fixed)
         tried = list(betas)
-        for ext in range(MAX_EXTEND + 1):
+        for ext in ([] if fixed_beta is not None else range(MAX_EXTEND + 1)):
             cells = {b: [cell_of(key(pair, b, sets), r) for r in rots] for b in tried}
             missing = [(key(pair, b, sets), r) for b in tried for r, c in zip(rots, cells[b]) if c is None]
             if missing:
@@ -557,11 +559,14 @@ def plan_joint(cell_of: Callable[[tuple, int], Cell | None], shared, candidates:
                 tried.append(BETA_EXTEND[ext])
                 continue
             break
-        moved |= new_beta != beta
-        beta = new_beta
-        plan.table += [{"block": "beta", "beta": b, "acc": float(pooled[b][0].mean()), "resets": pooled[b][1], "tied": b in tied, "chosen": b == beta} for b in pooled]
-        plan.notes.append(f"pass {p + 1}: gate beta {beta:g}" + (" (the gate does not help: beta 0 is the fixed-TS duo)" if beta == 0 else "") +
-                          (f" (the sharpest gate tried, {max(tried):g}: a plateau, reported as such)" if beta == max(tried) and beta > max(betas) else ""))
+        if fixed_beta is None:
+            moved |= new_beta != beta
+            beta = new_beta
+            plan.table += [{"block": "beta", "beta": b, "acc": float(pooled[b][0].mean()), "resets": pooled[b][1], "tied": b in tied, "chosen": b == beta} for b in pooled]
+            plan.notes.append(f"pass {p + 1}: gate beta {beta:g}" + (" (the gate does not help: beta 0 is the fixed-TS duo)" if beta == 0 else "") +
+                              (f" (the sharpest gate tried, {max(tried):g}: a plateau, reported as such)" if beta == max(tried) and beta > max(betas) else ""))
+        elif p == 0:
+            plan.notes.append(f"gate beta fixed at {beta:g} (not searched)")
         # ---- each member's detector, one at a time
         for side in SIDES_:
             options = [shared, *candidates[side]]
@@ -779,6 +784,13 @@ if __name__ == "__main__":
     assert jp.final[1] == 2.0 and jp.converged, (jp.final, jp.notes)
     jp, _, _ = drive_joint(0.0)
     assert jp.final[1] == 0.0 and any("does not help" in n for n in jp.notes), jp.notes
+    # a FIXED beta: every requested cell is at it (even where another beta is better), no beta block, the rest of the search unchanged
+    first_f = plan_joint(lambda k, r: None, S0, {"large": [C1, C2], "small": [C2, C1]}, fixed_beta=0.25)
+    assert [k for k, _ in first_f.requests] == [(c, 0.25, S0, S0) for c in zip(X2["large"], X2["small"])], "the first wave at the fixed beta"
+    jf, made_f, _ = drive_joint(0.75, fixed_beta=0.25)
+    assert all(k[1] == 0.25 for k, _ in made_f), "no cell at another beta"
+    assert jf.final == (TRUE["pair"], 0.25, TRUE["large"], TRUE["small"]) and jf.converged, (jf.final, jf.notes)
+    assert not any(r["block"] == "beta" for r in jf.table) and any("fixed at 0.25" in n for n in jf.notes)
     assert BETAS == (0.0, 0.25, 0.5, 0.75, 1.0)
     # a member that dies at a cell excludes the cell
     made_d, dead_cell = {}, ((1, -1), START_BETA, S0, S0)

@@ -46,8 +46,12 @@ ALGO_DEFAULTS: dict[str, dict] = {
     "eta": {"e_margin_frac": 0.4, "d_margin": 0.05},
     "eata": {"e_margin_frac": 0.4, "d_margin": 0.05, "fisher_alpha": 2000.0, "fisher_samples": 2000, "fisher_slice_seed": 0},
     "sar": {"recovery": False, "rho": 0.05, "margin_frac": 0.4, "reset_constant_em": 0.2, "ema_decay": 0.9},
+    # ETA through the engine's own TTAMethod (src/tta/methods/eata.py): MemberRunner like Tent, so it also runs the joint modes (the duo's loss) and the
+    # per-member reset; e_margin 0.4 ln C, d_margin 0.05, average decay 0.9 = ETA's and RDumb's values
+    "eta_native": {"e_margin_frac": 0.4, "d_margin": 0.05, "ma_decay": 0.9},
 }
 PORTED = ("eta", "eata", "sar")
+NATIVE = ("tent", "eta_native")             # the engine's own TTAMethods (MemberRunner); PORTED ones run in a PairRunner
 ALGORITHMS = tuple(ALGO_DEFAULTS)
 
 
@@ -198,12 +202,12 @@ class _TensorsOnly:
 
 
 def make_runner(spec: RunSpec, ctx, fisher_source: Callable | None = None):
-    """The runner that adapts the pair of `spec`: MemberRunner for tent, PairRunner of ported members for eta / eata / sar.
+    """The runner that adapts the pair of `spec`: MemberRunner for the native methods (tent, eta_native), PairRunner of ported members for eta / eata / sar.
     `fisher_source(unit_preprocess, kwargs)` -> batches, EATA's Fisher data (default: the held-out clean training slice)."""
     from src.experiments.runner import _runner
 
     spec = resolve_spec(spec)
-    if spec.mode == "no_adapt" or spec.tta == "tent":
+    if spec.mode == "no_adapt" or spec.tta in NATIVE:
         return _runner(spec, ctx)
     if spec.mode in ("both_duo", "large_duo", "small_duo"):
         raise ValueError(f"mode {spec.mode!r}: the ported algorithms run the members independently")
@@ -376,4 +380,10 @@ if __name__ == "__main__":
             raise AssertionError("joint modes are not supported for ported algorithms")
         except ValueError:
             pass
+        # the native ETA runs in a MemberRunner, joint modes included, with ETA's defaults written into the spec (so into every cache key)
+        rs = resolve_spec(RunSpec("tiny", tta="eta_native", mode="both_indep"))
+        assert rs.tta_kwargs == {"e_margin_frac": 0.4, "d_margin": 0.05, "ma_decay": 0.9}
+        for mode in ("both_indep", "both_duo"):
+            r = make_runner(RunSpec("tiny", tta="eta_native", mode=mode, **({"loop_ts": (1.0, 1.0)} if mode == "both_duo" else {})), ctx)
+            assert isinstance(r, MemberRunner) and r.tta.name == "eta_native" and r.tta.d_margin == 0.05, mode
     print("algorithms self-test passed")

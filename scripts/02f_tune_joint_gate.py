@@ -232,7 +232,7 @@ def finish(args, ctx, temps, store: JG.Store, cfg, pl, conf, out: Path, floor, r
                "streams": sorted(store.read(conf[0])["streams"]), "temperatures": {"T_l": temps.T_l, "T_s": temps.T_s, "checkpoint": str(temps.folder)},
                "optim": {"large": joint.duo["LARGE"]["OPTIM"], "small": joint.duo["SMALL"]["OPTIM"]}, "current_lrs": {"large": cfg["anchor"][0], "small": cfg["anchor"][1]},
                "lrs_large": seen_l, "lrs_small": seen_s, "best": best, "gate": {"proxy": args.proxy, "b_t": args.b_t, "beta": beta, "tuned_with_the_gate": True},
-               "late_floor": floor, "search": {"table": pl.table, "notes": pl.notes}, "criterion": crit.to_json()}
+               "late_floor": floor, "search": {"table": pl.table, "notes": pl.notes}, "criterion": C.Criterion.from_args(args).to_json()}
     (out / "results.json").write_text(json.dumps(results, indent=1, default=str))
     print(f"\nwrote {out / 'results.json'} and {out / 'report.txt'}")
     if args.num_samples:

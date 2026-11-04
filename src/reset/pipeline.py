@@ -37,6 +37,7 @@ criterion-independent and are not repeated. Pass `--rotations` as the mean study
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -86,19 +87,22 @@ class Setup:
     duo_cfg: dict = field(repr=False, default_factory=dict)
     signal: str = "indep"
     criterion: C.Criterion = C.MEAN
+    tta: str = TTA
 
     @classmethod
     def load(cls, duo: str, g: GlobalConfig | None = None, overrides: dict | None = None, log=print, signal: str = "indep",
-             criterion: C.Criterion = C.MEAN, tol_explicit: bool = False) -> "Setup":
+             criterion: C.Criterion = C.MEAN, tol_explicit: bool = False, fixed_beta: float | None = None, tta: str = TTA) -> "Setup":
         g = g or load_global()
-        P = Paths(g, duo, signal, criterion.name)
+        P = Paths(g, duo, signal, criterion.name, fixed_beta, tta)
+        if fixed_beta is not None:                                      # pinned in the study's own config.json, for the record
+            overrides = {**(overrides or {}), "fixed_beta": float(fixed_beta)}
         try:
-            duo_cfg = load_duo(duo, g, tta=TTA, regime=signal)
+            duo_cfg = load_duo(duo, g, tta=tta, regime=signal)
         except FileNotFoundError:
             raise SystemExit(f"cfgs/duos/{duo}.yaml does not exist: the duo must be defined there (its two models and their norm layers)")
         except duo_lrs.NotTuned as e:
             raise SystemExit(f"{duo}: no tuned {signal} learning rates: {e} (scripts/{'02b_tune_joint_lr' if signal == 'joint' else '02c_tune_indep_pair'}.py --record)")
-        tuned = duo_lrs.load(duo, signal)["methods"].get(TTA, {})
+        tuned = duo_lrs.load(duo, signal)["methods"].get(tta, {})
         if any(side not in tuned for side in SIDES):                    # the rate grid is anchored at the episodic rates: a placeholder default is no anchor
             raise SystemExit(f"{duo}: no tuned episodic learning rate for the {[x for x in SIDES if x not in tuned]} member in cfgs/duo_lrs/{duo}__{signal}.yaml "
                              f"(a placeholder default is not an anchor): run scripts/{'02b_tune_joint_lr' if signal == 'joint' else '02c_tune_indep_pair'}.py --record first")
@@ -115,7 +119,7 @@ class Setup:
             log(f"config {P.config_path}: set " + ", ".join(f"{k} = {v}" for k, v in changed.items()))
         episodic = {s: float(duo_cfg[s.upper()]["OPTIM"]["LR"]) for s in SIDES}
         names = {s: provenance.model_name(duo_cfg[s.upper()]["NAME"]).split(" (")[0] for s in SIDES}
-        return cls(g, duo, P, cfg, names, episodic, TU.Grid(episodic), duo_cfg, signal, criterion)
+        return cls(g, duo, P, cfg, names, episodic, TU.Grid(episodic), duo_cfg, signal, criterion, tta)
 
     @property
     def joint(self) -> bool:
@@ -144,9 +148,14 @@ class Setup:
     def betas(self) -> tuple[float, ...]:
         return tuple(float(b) for b in (self.cfg.get("betas") or TU.BETAS))
 
+    @property
+    def fixed_beta(self) -> float | None:
+        """A joint study at a fixed gate beta (`--fixed_beta`): every cell, the comparison methods included, is run with that gate inside the loss."""
+        return self.P.fixed_beta
+
     def live_job(self, cond: str, rotation: int, lrs, *, beta: float = BETA) -> J.Job:
         """A live run of this duo and signal on the held-out stream."""
-        return J.live_job(self.duo, cond, stream="heldout", lrs=tuple(lrs), rotation=rotation, seed=SEED, beta=beta, b_t=B_T, proxy=PROXY, signal=self.signal)
+        return J.live_job(self.duo, cond, stream="heldout", lrs=tuple(lrs), rotation=rotation, seed=SEED, beta=beta, b_t=B_T, proxy=PROXY, signal=self.signal, tta=self.tta)
 
     @property
     def shared(self) -> MR.Setting:
@@ -195,8 +204,8 @@ def stage_prerequisites(S: Setup) -> Step:
 def continual_jobs(S: Setup) -> list[J.Job]:
     axes = S.ladders()
     rungs = list(zip(axes["large"], axes["small"]))
-    return ([J.continual_job(S.duo, seed=SEED, lrs=None, signal=S.signal)] +
-            [J.continual_job(S.duo, seed=SEED, lrs=r, signal=S.signal, beta=S.beta_cal()) for r in rungs])
+    return ([J.continual_job(S.duo, seed=SEED, lrs=None, signal=S.signal, tta=S.tta)] +
+            [J.continual_job(S.duo, seed=SEED, lrs=r, signal=S.signal, beta=S.beta_cal(), tta=S.tta) for r in rungs])
 
 
 def _continual_path(S: Setup, j: J.Job) -> Path:
@@ -235,7 +244,7 @@ def continual_report(S: Setup, log=print) -> dict:
         log("WARNING " + w)
     ctx = Context(S.g, S.duo_cfg, "cpu", bn=True)
     temps = AM.resolve_temperatures(ctx, AM.temperature_spec(S.duo, TTA, None, None), None, report_only=True)
-    save = {"duo": S.duo, "signal": S.signal, "tta": TTA, "bn": True, "seeds": [SEED], "episodic": S.episodic, "ladders": axes,
+    save = {"duo": S.duo, "signal": S.signal, "tta": S.tta, "bn": True, "seeds": [SEED], "episodic": S.episodic, "ladders": axes,
             "stream": {"held_out": S.g.tuning_corruptions, "rounds": 4, "images": 50000, "severity": S.g.severity, "rotation": "round r starts at the r-th shift"},
             "criteria": {"delta": delta, "margin": margin, "late_frac": CT.LATE_FRAC, "dead": {"window": CT.DEAD_WINDOW, "acc": CT.DEAD_ACC, "windows": CT.DEAD_WINDOWS}},
             "temperatures": {"T_l": temps.T_l, "T_s": temps.T_s, "checkpoint": str(temps.folder)}, "momentum": 0.9,
@@ -300,7 +309,7 @@ def calibration_jobs(S: Setup) -> list[J.Job]:
     for name, lrs in (("S", stress), ("H", healthy)):
         c = CALIBRATION[name]
         out += [J.calibration_job(S.duo, name=name, lrs=lrs, seed=seed, rotation=rot, stop_mode=c["stop_mode"], after=c["after"], beta=S.beta_cal(), b_t=B_T, proxy=PROXY,
-                                  signal=S.signal) for rot in c["rotations"] for seed in c["seeds"]]
+                                  signal=S.signal, tta=S.tta) for rot in c["rotations"] for seed in c["seeds"]]
     return out
 
 
@@ -351,7 +360,7 @@ def _pair_jobs(S: Setup, reqs: dict[str, list[tuple]], filler: dict[str, tuple])
             a = lst["large"][i] if i < len(lst["large"]) else filler["large"]
             b = lst["small"][i] if i < len(lst["small"]) else filler["small"]
             runs.setdefault(rot, []).append((MR.condition(a[0], b[0]), S.grid.rate("large", a[1]), S.grid.rate("small", b[1])))
-    return [J.live_job(S.duo, cond, stream="heldout", lrs=(rl, rs), rotation=rot, seed=SEED, beta=BETA, b_t=B_T, proxy=PROXY)
+    return [J.live_job(S.duo, cond, stream="heldout", lrs=(rl, rs), rotation=rot, seed=SEED, beta=BETA, b_t=B_T, proxy=PROXY, tta=S.tta)
             for rot, lst in sorted(runs.items()) for cond, rl, rs in dict.fromkeys(lst)]
 
 
@@ -425,7 +434,7 @@ def stage_tune_joint(S: Setup) -> Step:
         cond, (rl, rs), beta = run_args(k)
         return store.cell(cond, rot, large=rl, small=rs, beta=beta)
 
-    jp = TU.plan_joint(cell_of, shared, cands, betas=S.betas, rots=S.rots, max_passes=int(S.cfg.get("max_passes", 2)), criterion=S.criterion)
+    jp = TU.plan_joint(cell_of, shared, cands, betas=S.betas, rots=S.rots, max_passes=int(S.cfg.get("max_passes", 2)), criterion=S.criterion, fixed_beta=S.fixed_beta)
     notes = ([f"criterion: {S.criterion.describe()}"] if S.criterion.robust else []) + [f"shared detector setting {tuple(shared)}; candidates: " + "; ".join(f"{s}: " + ", ".join(str(tuple(c)) for c in cands[s]) for s in SIDES)]
     notes += [f"   {n}" for n in jp.notes] + _joint_lines(S, jp)
     if jp.requests:
@@ -507,10 +516,62 @@ def _show_ladder(S: Setup, plan: TU.Plan, side: str, rate_of) -> list[str]:
     return lines
 
 
+def _baseline_state_path(S: Setup, cond: str) -> Path:
+    return S.P.tune_dir / ("none__baseline2.json" if cond == "none" else f"{cond}__rates.json")
+
+
+def _joint_baseline_start(S: Setup, cond: str) -> list[tuple[int, int]] | None:
+    """Where the pair search of a JOINT comparison method starts. `none` (no resets): the joint continual ladder's conservative rungs and the two rungs above them (the
+    stable range of an adapting duo that never resets; the ladder ran at the calibration beta, so it only places the start, its runs are not cells). Schedules: the
+    diagonal of the X2 ladders, as the rule's search."""
+    if cond != "none":
+        return None
+    res = continual_results(S)
+    if res is None or any(res["sides"][s].get("conservative") is None for s in SIDES):
+        raise SystemExit("the joint continual ladder names no conservative rate: run its stage first (it is part of `--baseline none`)")
+    # the nearest rung of the sqrt-2 grid (the ladder's multiples are within ~0.5% of it, not exactly on it)
+    k = {s: round(2 * np.log2(float(res["sides"][s]["conservative"]) / S.grid.anchor[s])) for s in SIDES}
+    return [(k["large"] + j, k["small"] + j) for j in (0, 1, 2)]
+
+
+def stage_baseline_rates_joint(S: Setup, cond: str) -> Step:
+    """The rate PAIR of a comparison method under the joint signal: the members are coupled, so a cell is a pair of rungs, scored on the duo's accuracy (`plan_pair`),
+    every cell at the study's fixed gate beta."""
+    beta = S.fixed_beta
+    store = S.jstore
+    state_path = _baseline_state_path(S, cond)
+    cell_of = lambda pr, rot: store.cell(cond, rot, large=S.grid.rate("large", pr[0]), small=S.grid.rate("small", pr[1]), beta=beta)
+    plan = TU.plan_pair(cell_of=cell_of, rots=S.rots, start=_joint_baseline_start(S, cond), criterion=S.criterion)
+    notes = [f"{cond}, joint signal, gate beta {beta:g}: " + "; ".join(plan.notes)]
+    for r in plan.table:
+        kv, ks = r["cell"]
+        notes.append(f"     rates  {S.names['large']} {S.grid.rate('large', kv):.3g} (rung {kv}), {S.names['small']} {S.grid.rate('small', ks):.3g} (rung {ks})"
+                     f"   duo acc {100 * r['acc']:6.2f}  resets/1000 {r['resets']:6.2f}" + ("  tied" if r["tied"] else "") + ("  <- chosen" if r["chosen"] else ""))
+    if plan.requests:
+        jobs = [S.live_job(cond, rot, (S.grid.rate("large", kv), S.grid.rate("small", ks)), beta=beta) for (kv, ks), rot in dict.fromkeys(plan.requests)]
+        return Step("rates", "jobs", notes + [f"{len(jobs)} run(s) requested"], jobs)
+    if plan.chosen is None:
+        return Step("rates", "blocked", notes + ["no cell is alive: see the notes above"])
+    chosen = [S.grid.rate(s, k) for s, k in zip(SIDES, plan.chosen)]
+    state = {"cond": cond, "chosen": chosen, "rungs": list(plan.chosen), "beta": beta, "signal": "joint", "table": plan.table}
+    if S.criterion.robust:
+        state["criterion"] = S.criterion.to_json()
+    notes.append(f"chosen: {S.names['large']} {chosen[0]:g}, {S.names['small']} {chosen[1]:g} (the pair, on the duo's accuracy, gate beta {beta:g})")
+    if state_path.is_file():                                          # the frozen record of the comparison method: never overwritten
+        old = json.loads(state_path.read_text())["chosen"]
+        notes.append(f"{state_path.name} exists and is kept" + ("" if np.allclose(old, chosen, rtol=1e-6) else f" (it holds {old[0]:g} / {old[1]:g}: delete it to record the new choice)"))
+    else:
+        S.P.tune_dir.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state, default=float, indent=1))
+    return Step("rates", "done", notes)
+
+
 def stage_baseline_rates(S: Setup, cond: str) -> Step:
     """The rate of a comparison method (one ladder per member, scored on the member's own accuracy). `none` uses the continual ladder as rotation 0 (the former baseline2)."""
+    if S.joint:
+        return stage_baseline_rates_joint(S, cond)
     store = TU.Store(S.P.live_dir(), GATE)
-    state_path = S.P.tune_dir / ("none__baseline2.json" if cond == "none" else f"{cond}__rates.json")
+    state_path = _baseline_state_path(S, cond)
     if cond == "none":
         lad = continual_results(S)["ladders"]
         n = len(lad["large"])
@@ -536,7 +597,7 @@ def stage_baseline_rates(S: Setup, cond: str) -> Step:
     needs = {s: plans[s].requests for s in SIDES}
     by_rot = _runs_for(needs, rate_of)
     if by_rot:
-        jobs = [J.live_job(S.duo, cond, stream="heldout", lrs=lrs, rotation=rot, seed=SEED, beta=BETA, b_t=B_T, proxy=PROXY) for rot, pairs in by_rot.items() for lrs in pairs]
+        jobs = [J.live_job(S.duo, cond, stream="heldout", lrs=lrs, rotation=rot, seed=SEED, beta=BETA, b_t=B_T, proxy=PROXY, tta=S.tta) for rot, pairs in by_rot.items() for lrs in pairs]
         return Step("rates", "jobs", notes, jobs)
     if any(plans[s].chosen is None for s in SIDES):
         return Step("rates", "blocked", notes + ["no rung is alive: see the notes above"])
@@ -558,16 +619,21 @@ def stage_baseline_rates(S: Setup, cond: str) -> Step:
 
 
 def stage_baseline_confirm(S: Setup, cond: str) -> Step:
-    store = TU.Store(S.P.live_dir(), GATE)
-    state = json.loads((S.P.tune_dir / ("none__baseline2.json" if cond == "none" else f"{cond}__rates.json")).read_text())
+    state = json.loads(_baseline_state_path(S, cond).read_text())
     pair = [state["chosen"][s] for s in SIDES] if isinstance(state["chosen"], dict) else state["chosen"]
-    missing = [r for r in S.confirm_rots if store.cell(cond, r, large=pair[0], small=pair[1]) is None]
+    if S.joint:
+        cell_at = lambda r: S.jstore.cell(cond, r, large=pair[0], small=pair[1], beta=S.fixed_beta)
+        job_at = lambda r: S.live_job(cond, r, tuple(pair), beta=S.fixed_beta)
+    else:
+        store = TU.Store(S.P.live_dir(), GATE)
+        cell_at = lambda r: store.cell(cond, r, large=pair[0], small=pair[1])
+        job_at = lambda r: J.live_job(S.duo, cond, stream="heldout", lrs=tuple(pair), rotation=r, seed=SEED, beta=BETA, b_t=B_T, proxy=PROXY, tta=S.tta)
+    missing = [r for r in S.confirm_rots if cell_at(r) is None]
     if missing:
-        return Step("confirm", "jobs", [f"the chosen pair on the rotations still missing: {missing}"],
-                    [J.live_job(S.duo, cond, stream="heldout", lrs=tuple(pair), rotation=r, seed=SEED, beta=BETA, b_t=B_T, proxy=PROXY) for r in missing])
+        return Step("confirm", "jobs", [f"the chosen pair on the rotations still missing: {missing}"], [job_at(r) for r in missing])
     rows = {}
     for r in S.confirm_rots:
-        c = store.cell(cond, r, large=pair[0], small=pair[1])
+        c = cell_at(r)
         rows[r] = {s: c.mean(s) * 100 for s in ("gate", "ts", "large", "small")} | {"resets_per_1000": c.resets, "dead": c.dead}
     out = S.P.tune_dir / f"{cond}__confirm.json"
     if not out.is_file():                                             # written once, like the rates it confirms
@@ -586,13 +652,19 @@ def legacy_wave_in_queue() -> bool:
 
 
 def drive(duo: str, *, submit: bool = False, force: bool = False, baseline: str | None = None, overrides: dict | None = None, log=print, signal: str = "indep",
-          chain: bool = False, criterion: C.Criterion = C.MEAN, tol_explicit: bool = False) -> int:
+          chain: bool = False, criterion: C.Criterion = C.MEAN, tol_explicit: bool = False, fixed_beta: float | None = None, tta: str = TTA) -> int:
     """Find the first stage of `duo` (for the `signal`'s runs) that is not done and print / do its work. Returns 0, or 1 where a decision is needed.
     With `chain`, a wave of jobs is followed by one CPU job that calls this again when the wave has finished (jobs.chain)."""
-    if baseline and signal == "joint":
-        log("the comparison methods (none, fixed schedules) are tuned for the independent signal only: the joint signal's members are coupled, which needs a pair search per method")
+    if fixed_beta is not None and signal != "joint":
+        log("--fixed_beta is for the joint signal (the independent members do not depend on the gate: score any beta from the same runs)")
         return 1
-    S = Setup.load(duo, overrides=overrides, log=log, signal=signal, criterion=criterion, tol_explicit=tol_explicit)
+    if baseline and signal == "joint" and fixed_beta is None:
+        log("a joint comparison method needs --fixed_beta: its pair is searched at one gate beta (the joint signal's members are coupled, and the gate is inside the loss)")
+        return 1
+    if baseline and signal == "joint" and baseline not in ("none",) and not re.fullmatch(r"fixed\d+", baseline):
+        log(f"joint comparison methods: none and fixed<N> (got {baseline!r}); the joint rule is the main search (no --baseline)")
+        return 1
+    S = Setup.load(duo, overrides=overrides, log=log, signal=signal, criterion=criterion, tol_explicit=tol_explicit, fixed_beta=fixed_beta, tta=tta)
     log(f"duo {duo}: {S.names['large']} + {S.names['small']}; {'JOINT signal (both members on the gated duo entropy, the gate inside the loss)' if S.joint else 'independent signal (each member on its own entropy)'}"
         f"; tuning rotation(s) {list(S.rots)}" + (f"; comparison method {baseline}" if baseline else ""))
     if baseline:
@@ -627,6 +699,7 @@ def drive(duo: str, *, submit: bool = False, force: bool = False, baseline: str 
                 log(f"  {len(step.jobs)} job(s)" + (f", {n} submitted" if submit else ": add --submit to launch them"))
                 if chain:
                     again = ["--duo", duo, *(["--signal", "joint"] if S.joint else []), *(["--baseline", baseline] if baseline else []),
+                             *(["--fixed_beta", f"{S.fixed_beta:g}"] if S.fixed_beta is not None else []), *(["--tta", S.tta] if S.tta != TTA else []),
                              *(["--criterion", S.criterion.name, "--worst_tol", f"{100 * S.criterion.tol:g}"] if S.criterion.robust else []), "--submit", "--chain"]
                     if not J.chain(S.P, step.jobs, again, go=submit, tag=baseline or "", cwd=Path(__file__).resolve().parents[2]) and submit:
                         log("  no chain job: call this again by hand when the wave has finished")
@@ -642,7 +715,7 @@ if __name__ == "__main__":
     S0 = MR.Setting(0.05, 0.005, 20, 0.7)
     C1 = MR.Setting(0.1, 0.01, 50, 1.4)
     grid = TU.Grid({"large": 7e-5, "small": 5e-4})
-    fake = type("S", (), {"duo": "toy", "grid": grid})()
+    fake = type("S", (), {"duo": "toy", "grid": grid, "tta": TTA})()
     reqs = {"large": [(S0, 4, 0), (C1, 6, 0), (C1, 8, 0)], "small": [(S0, -5, 0)]}
     jobs = _pair_jobs(fake, reqs, {"large": (S0, 6), "small": (S0, -5)})
     assert len(jobs) == 3 and all(j.args["rotation"] == 0 for j in jobs)

@@ -48,6 +48,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--duo", default="vitb16_rn50v1", help="cfgs/duos/<name>.yaml (default: the main duo)")
     ap.add_argument("--signal", choices=("independent", "joint"), default="independent", help="the loss the members adapt on (default %(default)s)")
+    ap.add_argument("--tta", default="tent", help="the TTA method of the members (default %(default)s; eta_native = ETA through the engine's own TTAMethod, joint signal included)")
     ap.add_argument("--submit", action="store_true", help="do the next step (submit the jobs / run the CPU step); without it only print it")
     ap.add_argument("--chain", action="store_true", help="with --submit: after a wave, queue a CPU job that calls this script again when the wave has finished")
     ap.add_argument("--force", action="store_true", help="submit jobs even if one of the same name is already queued")
@@ -57,6 +58,9 @@ def main() -> int:
     ap.add_argument("--healthy", type=float, nargs=2, default=None, metavar=("LR_L", "LR_S"))
     ap.add_argument("--mults", type=float, nargs="+", default=None, metavar="X")
     ap.add_argument("--betas", type=float, nargs="+", default=None, metavar="B", help="joint signal: the gate's beta grid")
+    ap.add_argument("--fixed_beta", type=float, default=None, metavar="B",
+                    help="joint signal: a study at ONE gate beta (every cell, the comparison methods included, has that gate inside the loss; no beta block). Its own folder "
+                         "reset_tune/<duo>__joint__beta<B>[__<criterion>]; the runs, calibration streams and screens are shared with the joint study")
     ap.add_argument("--rotations", type=int, nargs="+", default=None, metavar="K", help="the held-out rotation(s) of the search (default: 0)")
     ap.add_argument("--criterion", choices=("mean", "worst_shift"), default="mean", help="how the search chooses (default %(default)s)")
     C.add_tol_arg(ap)
@@ -72,7 +76,7 @@ def main() -> int:
     overrides = {"stress": args.stress, "stress_up": args.stress_up, "healthy": args.healthy, "mults": args.mults, "betas": args.betas,
                  "tuning_rotations": args.rotations}
     return drive(args.duo, submit=args.submit, force=args.force, baseline=args.baseline, overrides=overrides, signal="joint" if args.signal == "joint" else "indep",
-                 chain=args.chain, criterion=crit, tol_explicit=args.worst_tol is not None)
+                 chain=args.chain, criterion=crit, tol_explicit=args.worst_tol is not None, fixed_beta=args.fixed_beta, tta=args.tta)
 
 
 if __name__ == "__main__":

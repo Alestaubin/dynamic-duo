@@ -48,12 +48,16 @@ class Paths:
     duo: str
     signal: str = "indep"
     criterion: str = "mean"
+    fixed_beta: float | None = None     # joint signal: a study whose gate beta is FIXED (every cell at it, no beta block); its own folder, everything else shared
+    tta: str = TTA                      # the TTA method: Tent keeps every name it had; another method has its own folders, screens and study (`__<tta>`)
 
     def __post_init__(self):
         if self.signal not in SIGNALS:
             raise ValueError(f"signal must be one of {SIGNALS}, got {self.signal!r}")
         if self.criterion not in CRITERIA:
             raise ValueError(f"criterion must be one of {CRITERIA}, got {self.criterion!r}")
+        if self.fixed_beta is not None and self.signal != "joint":
+            raise ValueError("fixed_beta is a joint-signal study (the independent members do not depend on the gate)")
 
     @property
     def root(self) -> Path:
@@ -61,17 +65,20 @@ class Paths:
 
     @property
     def name(self) -> str:
-        """The duo as file names know it: the joint signal's files carry `__joint`."""
-        return self.duo if self.signal == "indep" else f"{self.duo}__joint"
+        """The duo as file names know it: a TTA method other than Tent carries `__<tta>`, the joint signal's files `__joint`."""
+        base = self.duo if self.tta == TTA else f"{self.duo}__{self.tta}"
+        return base if self.signal == "indep" else f"{base}__joint"
 
     @property
     def study(self) -> str:
-        """The name of the study (the tuning decisions): `name`, tagged with a criterion other than mean. Chain jobs and the study's folder are named by it."""
-        return self.name if self.criterion == "mean" else f"{self.name}__{self.criterion}"
+        """The name of the study (the tuning decisions): `name`, tagged with a fixed beta and with a criterion other than mean. Chain jobs and the study's folder are
+        named by it."""
+        beta = "" if self.fixed_beta is None else f"__beta{self.fixed_beta:g}"
+        return self.name + beta + ("" if self.criterion == "mean" else f"__{self.criterion}")
 
     @property
     def tag(self) -> str:
-        return f"{self.duo}__{TTA}_bn" + ("" if self.signal == "indep" else "_joint")
+        return f"{self.duo}__{self.tta}_bn" + ("" if self.signal == "indep" else "_joint")
 
     @property
     def continual_dir(self) -> Path:
@@ -98,7 +105,7 @@ class Paths:
     @property
     def tune_dir(self) -> Path:
         base = self.root / "reset_tune"
-        return base if (self.duo == LEGACY_DUO and self.signal == "indep" and self.criterion == "mean") else base / self.study
+        return base if (self.duo == LEGACY_DUO and self.tta == TTA and self.signal == "indep" and self.criterion == "mean") else base / self.study
 
     # ---- run files -------------------------------------------------------------------------------------------------------
     def continual_run(self, seed: int, lrs: tuple[float, float] | None) -> Path:
@@ -134,6 +141,20 @@ if __name__ == "__main__":
     w = Paths(g, LEGACY_DUO, criterion="worst_shift")                  # a study of another criterion: its own folder, everything else shared
     assert w.tune_dir == w.root / "reset_tune" / f"{LEGACY_DUO}__worst_shift" and w.study == f"{LEGACY_DUO}__worst_shift" and a.study == LEGACY_DUO
     assert w.live_dir() == a.live_dir() and w.continual_dir == a.continual_dir and w.shared_screen == a.shared_screen and w.gate_stress_dir == a.gate_stress_dir
+    fb = Paths(g, LEGACY_DUO, "joint", fixed_beta=0.25)                  # a fixed-beta joint study: its own folder, the joint runs and screens shared
+    j0 = Paths(g, LEGACY_DUO, "joint")
+    assert fb.tune_dir == fb.root / "reset_tune" / f"{LEGACY_DUO}__joint__beta0.25" and fb.live_dir() == j0.live_dir() and fb.shared_screen == j0.shared_screen
+    assert fb.continual_dir == j0.continual_dir and fb.gate_stress_dir == j0.gate_stress_dir
+    assert Paths(g, "x", "joint", "worst_shift", 0.25).study == "x__joint__beta0.25__worst_shift"
+    try:
+        Paths(g, "x", fixed_beta=0.25)
+        raise AssertionError("an independent study with a fixed beta must be refused")
+    except ValueError:
+        pass
+    e, ej = Paths(g, LEGACY_DUO, tta="eta_native"), Paths(g, LEGACY_DUO, "joint", tta="eta_native", fixed_beta=0.25)   # another TTA method: its own everything
+    assert e.tune_dir == e.root / "reset_tune" / f"{LEGACY_DUO}__eta_native" and e.live_dir() == e.root / "reset_live" / f"{LEGACY_DUO}__eta_native_bn"
+    assert ej.study == f"{LEGACY_DUO}__eta_native__joint__beta0.25" and ej.live_dir().name == f"{LEGACY_DUO}__eta_native_bn_joint" and e.shared_screen != a.shared_screen
+    assert a.tag == f"{LEGACY_DUO}__tent_bn" and a.name == LEGACY_DUO and j0.name == f"{LEGACY_DUO}__joint", "Tent keeps its names"
     wj = Paths(g, "convnextb_deits", "joint", "worst_shift")
     assert wj.tune_dir == wj.root / "reset_tune" / "convnextb_deits__joint__worst_shift" and wj.name == "convnextb_deits__joint"
     try:

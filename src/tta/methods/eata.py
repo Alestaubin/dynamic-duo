@@ -89,11 +89,26 @@ class EataMethod(TentMethod):
         self._ma_probs.clear()
         self.last_stats.clear()
 
+    def _reset_side(self, side: str) -> None:
+        """One member back to its source weights and empty optimizer (TentMethod) AND to an empty running average, as if it had just been set up (RDumb's reset:
+        model, optimizer and ETA's state). The duo signal's average (Joint DD) mixes both members' predictions, so a reset of either member clears it too."""
+        super()._reset_side(side)
+        for signal in (side, "duo"):
+            self._ma_probs.pop(signal, None)
+            self.last_stats.pop(signal, None)
+
     def describe(self) -> dict:
         d = super().describe()
         d.update({"tta/e_margin_frac": self.e_margin_frac, "tta/d_margin": self.d_margin,
                   "tta/ma_decay": self.ma_decay})
         return d
+
+
+@register
+class EtaNativeMethod(EataMethod):
+    """ETA (EATA without the Fisher regularizer) as the `src/experiments` engine runs it: the same code as `eata`, under its own name so that its runs, caches and
+    recorded rates (cfgs/duo_lrs `eta_native`) can never be confused with the PORTED `eta` / `eata` of src/tta/ported (which also cannot run the joint loss)."""
+    name = "eta_native"
 
 
 if __name__ == "__main__":
@@ -173,9 +188,30 @@ if __name__ == "__main__":
     d = m.describe()
     assert d["tta/method"] == "eata" and d["tta/d_margin"] == 0.05 and d["large/lr"] == 1e-2
 
-    # 7. the method is registered under its name and takes its hyperparameters.
+    # 6b. a reset of ONE member: its weights and its running average go back to the start; the other member's state and the method's other signals stay.
+    large, small = _tiny(), _tiny()
+    with torch.no_grad():
+        large[2].weight.mul_(50.0)
+        small[2].weight.mul_(50.0)
+    wl0, ws0 = large[1].weight.detach().clone(), small[1].weight.detach().clone()
+    m = EataMethod()
+    m.setup(large, small, cfg, adapt_large=True, adapt_small=True)
+    m.update(m.loss(large(x), "large"), ["large"])
+    m.update(m.loss(small(x), "small"), ["small"])
+    assert {"large", "small"} <= set(m._ma_probs)
+    ws1 = small[1].weight.detach().clone()
+    m._reset_side("large")
+    assert torch.equal(large[1].weight.detach(), wl0) and "large" not in m._ma_probs
+    assert torch.equal(small[1].weight.detach(), ws1) and "small" in m._ma_probs and not torch.equal(ws1, ws0), "the other member is untouched"
+    m._ma_probs["duo"] = torch.ones(C) / C
+    m._reset_side("small")
+    assert "duo" not in m._ma_probs and torch.equal(small[1].weight.detach(), ws0)
+
+    # 7. the method is registered under its name and takes its hyperparameters; eta_native is the same method under its own name.
     from src.tta.methods import build_tta_method, registered_names
-    assert "eata" in registered_names()
+    assert "eata" in registered_names() and "eta_native" in registered_names()
     assert build_tta_method("eata", d_margin=0.1).d_margin == 0.1
+    en = build_tta_method("eta_native")
+    assert isinstance(en, EataMethod) and en.name == "eta_native" and (en.e_margin_frac, en.d_margin, en.ma_decay) == (0.4, 0.05, 0.9)
 
     print("EataMethod self-test passed")

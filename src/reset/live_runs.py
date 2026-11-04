@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -159,23 +160,37 @@ def make_trigger(name: str, rules: Mapping[str, RuleSpec]) -> Trigger:
 
 # ------------------------------------------------------------------------------------------------------------------ the loop
 
-def _batches(runner, dataset, *, batch_size: int, workers: int, seed: int, num_samples: int | None):
-    """What MemberRunner.iter_batches loads, without stepping: (x_large, x_small, labels)."""
-    return dataset.loader(batch_size=batch_size, num_samples=num_samples, seed=seed, workers=workers, pin_memory=runner.device.type == "cuda",
-                          collate_fn=PairCollate(dataset.input_transform(runner.large_preprocess), dataset.input_transform(runner.small_preprocess)))
+def _batches(runner, dataset, *, batch_size: int, workers: int, seed: int, num_samples: int | None, start: int = 0):
+    """What MemberRunner.iter_batches loads, without stepping: (x_large, x_small, labels). `start` (a resumed run): the first `start` samples are skipped, by
+    the dataset's own offset where it has one (CCC: no image is read), else by drawing and dropping the batches (any other dataset: the same order)."""
+    if start % batch_size:
+        raise ValueError(f"a resumed stream starts on a batch boundary: {start} is not a multiple of {batch_size}")
+    kw = dict(batch_size=batch_size, num_samples=num_samples, seed=seed, workers=workers, pin_memory=runner.device.type == "cuda",
+              collate_fn=PairCollate(dataset.input_transform(runner.large_preprocess), dataset.input_transform(runner.small_preprocess)))
+    if start and getattr(dataset, "supports_start", False):
+        return dataset.loader(**kw, start=start)
+    it = iter(dataset.loader(**kw))
+    for _ in range(start // batch_size):
+        next(it)
+    return it
 
 
 def run_live(runner, parts, *, trigger: Trigger, images: int, batch_size: int, workers: int, T_l: float, T_s: float, gate,
-             max_images: int | None = None, log_every: int = 1000, log=print, extra_gates: Mapping[str, object] | None = None, inside: bool = False) -> dict:
+             max_images: int | None = None, log_every: int = 1000, log=print, extra_gates: Mapping[str, object] | None = None, inside: bool = False,
+             checkpoint=None, checkpoint_every: int = 1000, deadline: float | None = None) -> dict:
     """Adapt over `parts` (continual.Part: segment, round, seed) with `trigger` deciding the resets. `inside`: the JOINT signal: the gate is the runner's loop
     calibrator (both members adapt on the gated duo's entropy), so the duo's prediction is the one the step used (pre-update) and the gate is not called again;
     extra gates cannot be scored then.
     `extra_gates`: more gates to score on the same logits (module text); their series are `gate__<name>`; they must be called after `gate` (followers read its cache).
+    `checkpoint` (a path; one-part streams such as CCC, no extra gates): resume from it if it exists, save to it every `checkpoint_every` steps, and stop at
+    `deadline` (time.time()) after saving, with `stopped` = "deadline" (the caller then writes no result; the next job resumes). src/reset/checkpoint.py.
     Returns {"correct": {series: uint8 array}, "part_n", "gate_records", "seen", "stopped", "resets", "trigger"}."""
     if not hasattr(gate, "records"):
         raise ValueError("a live run needs a gate that records its proxy batches (PureProxyGate)")
     if inside and (runner.loop_calibrator is None or extra_gates):
         raise ValueError("the joint signal needs a runner with the gate as its loop calibrator, and scores no extra gates")
+    if checkpoint is not None and (len(parts) != 1 or extra_gates):
+        raise ValueError("a checkpointed run is one part (a CCC stream) with no extra gates (a follower gate holds a reference to the main one)")
     extra = dict(extra_gates or {})
     names = ["ts", "large", "small", "gate"] + [f"gate__{k}" for k in extra]
     correct = {s: [] for s in names}
@@ -199,7 +214,20 @@ def run_live(runner, parts, *, trigger: Trigger, images: int, batch_size: int, w
                 if hasattr(g, "notify_reset"):
                     g.notify_reset(side, seen)
 
-    t0 = time.time()
+    start = 0
+    if checkpoint is not None and Path(checkpoint).is_file():
+        from src.reset import checkpoint as CK
+        loop = CK.load(checkpoint, runner=runner, gate=gate, trigger=trigger)
+        step, seen, seen_rec, resets, start = loop["step"], loop["seen"], loop["seen_rec"], list(loop["resets"]), loop["seen"]
+        correct = {s: [torch.from_numpy(loop["correct"][s])] for s in names}
+        log(f"  resumed from {Path(checkpoint).name}: step {step}, {seen} images, {len(resets)} resets", flush=True)
+
+    def save_checkpoint() -> None:
+        from src.reset import checkpoint as CK
+        CK.save(checkpoint, runner=runner, gate=gate, trigger=trigger,
+                loop={"step": step, "seen": seen, "seen_rec": seen_rec, "resets": resets, "correct": {s: torch.cat(v).numpy() for s, v in correct.items()}})
+
+    t0, seen0 = time.time(), seen
     for i, part in enumerate(parts):
         ds = part.segment.dataset
         if i:
@@ -209,8 +237,8 @@ def run_live(runner, parts, *, trigger: Trigger, images: int, batch_size: int, w
                 else:
                     g.mark_segment(part.label)                   # between parts only the label: the buffer stays
             apply(trigger.start_part(i))
-        n = 0
-        for x_l, x_s, y in _batches(runner, ds, batch_size=batch_size, workers=workers, seed=part.seed, num_samples=images):
+        n = start                                                # a resumed one-part stream: what it had already seen
+        for x_l, x_s, y in _batches(runner, ds, batch_size=batch_size, workers=workers, seed=part.seed, num_samples=images, start=start):
             z_l, z_s = runner.step_tensors(x_l, x_s, ds)         # adapts; the logits are the PRE-update ones
             y = y.to(z_l.device)
             with torch.no_grad():
@@ -226,9 +254,16 @@ def run_live(runner, parts, *, trigger: Trigger, images: int, batch_size: int, w
             new, seen_rec = gate.records[seen_rec:], len(gate.records)
             apply(trigger.after_batch(step=step, position=seen, records=new, correct={s: c.numpy() for s, c in batch.items()}))
             if log_every and step % log_every == 0:
-                log(f"  step {step}: {seen} images ({part.label}, visit {i + 1}/{len(parts)}), {seen / (time.time() - t0):.0f} img/s, {len(resets)} resets", flush=True)
+                log(f"  step {step}: {seen} images ({part.label}, visit {i + 1}/{len(parts)}), {(seen - seen0) / (time.time() - t0):.0f} img/s, {len(resets)} resets", flush=True)
             if max_images is not None and seen >= max_images:
                 stopped = f"max_images {max_images}"
+                break
+            if checkpoint is not None and step % checkpoint_every == 0:
+                save_checkpoint()
+            if deadline is not None and time.time() >= deadline:
+                save_checkpoint()
+                stopped = "deadline"
+                log(f"  deadline reached at step {step} ({seen} images): checkpoint saved, the next job resumes", flush=True)
                 break
         part_n.append(n)
         if stopped:
@@ -419,6 +454,39 @@ if __name__ == "__main__":
     except ValueError:
         pass
     print(f"  joint signal: {len(ja['resets'])} resets at run_stream's steps, the same predictions and proxy batches as its joint path")
+
+    # ---- a checkpointed run (CCC: one long part) stopped after EVERY step and resumed from its checkpoint = the uninterrupted run, bit for bit:
+    #      predictions, proxy batches and resets; independent and joint signal, Tent and ETA (its running average is part of the state), rule and schedule ----
+    import tempfile as _tf
+    one = [Part(Segment("ccc/fake", FakeStream(6 * BS, seed=5), True), 0, SEED)]
+
+    def make_any(tta, joint):
+        g = PureProxyGate("nnn", beta=2.0, b_t=B_T, T_l=T_L, T_s=T_S, num_classes=1000)
+        r = MemberRunner(DUO, tta, {}, "both_duo" if joint else "both_indep", "cpu", models=copy.deepcopy(base),
+                         loop_calibrator=RecordingCalibrator(g) if joint else None, bn=False)
+        return r, g
+
+    for tta, joint, trig in (("tent", False, lambda: RuleTrigger(ALWAYS)), ("eta_native", False, lambda: RuleTrigger(ALWAYS)),
+                             ("tent", True, lambda: ScheduleTrigger(2)), ("eta_native", True, lambda: RuleTrigger(ALWAYS))):
+        kw = dict(images=6 * BS, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, log_every=0, inside=joint)
+        r, g = make_any(tta, joint)
+        full = run_live(r, one, trigger=trig(), gate=g, **kw)
+        with _tf.TemporaryDirectory() as td:
+            ck, calls, res = Path(td) / "run.ckpt.pt", 0, None
+            while res is None or res["stopped"] == "deadline":
+                r, g = make_any(tta, joint)                      # a fresh job: new runner, gate and trigger, everything else from the checkpoint
+                res = run_live(r, one, trigger=trig(), gate=g, checkpoint=ck, checkpoint_every=1, deadline=0.0, log=lambda *a, **k: None, **kw)
+                calls += 1
+        assert calls >= 6 and res["seen"] == full["seen"] == 6 * BS and res["part_n"] == full["part_n"], (tta, joint, calls, res["part_n"])
+        assert all(np.array_equal(res["correct"][s], full["correct"][s]) for s in full["correct"]), (tta, joint, "predictions")
+        assert proxies(res["gate_records"]) == proxies(full["gate_records"]) and res["resets"] == full["resets"] and full["resets"], (tta, joint, "gate / resets")
+    try:
+        r, g = make()
+        run_live(r, parts, trigger=NoTrigger(), images=N, batch_size=BS, workers=0, T_l=T_L, T_s=T_S, gate=g, log_every=0, checkpoint=Path("/nonexistent/x"))
+        raise AssertionError("a checkpointed run has one part")
+    except ValueError:
+        pass
+    print("  checkpoint: stopped after every step and resumed = the uninterrupted run (indep and joint, Tent and ETA, rule and schedule)")
 
     # ---- conditions -> triggers ----------------------------------------------------------------------------------------------------------
     from src.reset import member_rules as MR

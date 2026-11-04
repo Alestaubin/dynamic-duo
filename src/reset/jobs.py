@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
-from src.reset.layout import Paths
+from src.reset.layout import TTA, Paths
 
 SCRIPT = "scripts/tune_reset.py"
 TIME = {"temperatures": "01:00:00", "continual": "01:35:00", "calibration": "02:15:00", "live": "01:50:00"}
@@ -80,29 +80,34 @@ def _signal_args(signal: str, beta: float | None) -> dict:
     return {"signal": "joint", **({} if beta is None else {"beta": float(beta)})}
 
 
+def _tta_args(tta: str) -> dict:
+    """The TTA method of a run: none for Tent (its specs, and so its job names and keys, are unchanged), `{"tta": name}` for another method."""
+    return {} if tta == TTA else {"tta": tta}
+
+
 def continual_job(duo: str, *, seed: int, lrs: Sequence[float] | None, rounds: int = 4, images: int = 50000, momentum: float = 0.9, signal: str = "indep",
-                  beta: float = 0.5) -> Job:
+                  beta: float = 0.5, tta: str = TTA) -> Job:
     """One rung of the continual-rate ladder (`lrs` = (lr_large, lr_small)), or the frozen reference (None). Joint: the gate (`beta`) sits inside the loss."""
     args = {"seed": seed, "lrs": None if lrs is None else [float(lrs[0]), float(lrs[1])], "rounds": rounds, "images": images, "momentum": momentum,
-            **_signal_args(signal, beta if lrs is not None else None)}
+            **_signal_args(signal, beta if lrs is not None else None), **_tta_args(tta)}
     return Job("continual", duo, args, ("j" if signal == "joint" else "") + ("frozen" if lrs is None else f"c{lrs[0]:.2g}"))
 
 
 def calibration_job(duo: str, *, name: str, lrs: Sequence[float], seed: int, rotation: int, stop_mode: str, after: int, beta: float, b_t: int = 256,
-                    proxy: str = "nnn", rounds: int = 4, images: int = 50000, momentum: float = 0.9, signal: str = "indep") -> Job:
+                    proxy: str = "nnn", rounds: int = 4, images: int = 50000, momentum: float = 0.9, signal: str = "indep", tta: str = TTA) -> Job:
     """One calibration stream on the held-out stream: both members at `lrs`, stopped `after` images once a member is dead (`stop_mode` any / all)."""
     args = {"name": name, "lrs": [float(lrs[0]), float(lrs[1])], "seed": seed, "rotation": rotation, "stop_mode": stop_mode, "after": after,
-            "beta": beta, "b_t": b_t, "proxy": proxy, "rounds": rounds, "images": images, "momentum": momentum, **_signal_args(signal, None)}
+            "beta": beta, "b_t": b_t, "proxy": proxy, "rounds": rounds, "images": images, "momentum": momentum, **_signal_args(signal, None), **_tta_args(tta)}
     return Job("calibration", duo, args, ("j" if signal == "joint" else "") + f"{name}r{rotation}s{seed}")
 
 
 def live_job(duo: str, cond: str, *, stream: str, lrs: Sequence[float], rotation: int = 0, order: int | None = None, seed: int = 0, beta: float = 0.5,
              b_t: int = 256, proxy: str | None = None, images: int = 50000, max_images: int | None = None, extra_gates: Sequence[str] = (),
-             budget: float = 1.0, rounds: int = 4, momentum: float = 0.9, label: str | None = None, signal: str = "indep") -> Job:
+             budget: float = 1.0, rounds: int = 4, momentum: float = 0.9, label: str | None = None, signal: str = "indep", tta: str = TTA) -> Job:
     """One live reset run of condition `cond` (scripts' conditions: src/reset/workers.py, `make_trigger`): stream "heldout" (`rotation`) or "test" (`order`)."""
     args = {"cond": cond, "stream": stream, "lrs": [float(lrs[0]), float(lrs[1])], "rotation": rotation, "order": order, "seed": seed, "beta": beta, "b_t": b_t,
             "proxy": proxy, "images": images, "max_images": max_images, "extra_gates": list(extra_gates), "budget": budget, "rounds": rounds, "momentum": momentum,
-            **_signal_args(signal, None)}
+            **_signal_args(signal, None), **_tta_args(tta)}
     default = f"r{rotation}" if stream == "heldout" else f"o{'std' if order is None else order}"
     return Job("live", duo, args, ("j" if signal == "joint" else "") + (label if label is not None else default))
 
@@ -205,6 +210,12 @@ if __name__ == "__main__":
 
     a = live_job("convnextb_deits", "own_fast_vs_slow@pmL0.05-0.005-20-0.7_S0.05-0.005-20-0.7", stream="heldout", lrs=(1.25e-5, 8e-4), rotation=2)
     b = live_job("convnextb_deits", "own_fast_vs_slow@pmL0.05-0.005-20-0.7_S0.05-0.005-20-0.7", stream="heldout", lrs=(1.25e-5, 8e-4), rotation=2)
+    # the TTA method: Tent leaves the spec (and so the job's name) as it was; another method is in the spec
+    t = live_job("convnextb_deits", "none", stream="test", lrs=(1e-5, 1e-4), order=0, tta="tent")
+    assert t.key == live_job("convnextb_deits", "none", stream="test", lrs=(1e-5, 1e-4), order=0).key and "tta" not in t.args
+    e = live_job("convnextb_deits", "none", stream="test", lrs=(1e-5, 1e-4), order=0, tta="eta_native")
+    assert e.args["tta"] == "eta_native" and e.key != t.key
+    assert continual_job("x", seed=0, lrs=(1e-5, 1e-4), tta="eta_native").args["tta"] == "eta_native" and "tta" not in continual_job("x", seed=0, lrs=None).args
     c = live_job("convnextb_deits", "own_fast_vs_slow@pmL0.05-0.005-20-0.7_S0.05-0.005-20-0.7", stream="heldout", lrs=(1.25e-5, 8e-4), rotation=0)
     assert a.name == b.name and a.name != c.name and a.name.startswith("rt_live_r2_") and len(a.name) < 40, a.name
     assert continual_job("x", seed=0, lrs=None).label == "frozen" and temperatures_job("x").kind == "temperatures"
