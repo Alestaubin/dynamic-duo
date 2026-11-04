@@ -25,7 +25,7 @@
 \title{How the learning rates of a Dynamic Duo are tuned, and why every mode needs its own:\\
   \vit{} + \rn{}, \vit{} + \cnx{}, and the \cnx{} case}
 \author{Dynamic Duos, Tent, static duo, Vanilla DD and Joint DD}
-\date{2 November 2026}
+\date{2 November 2026 (Section~\ref{sec:whypair} added 4 November)}
 
 \begin{document}
 \maketitle
@@ -105,7 +105,7 @@ One protocol is used for every item, so that the rows of a table differ only in 
   \item \textbf{Tuning shifts only.} Nothing is chosen on a test corruption or on any stream built from one. The test stream is run once, with the frozen choices.
   \item \textbf{Temperatures first and fixed.} \(T_L, T_S\) are fitted once on the \emph{frozen} members' logits (not refitted per mode or per rate), so a rate is never tuned against a temperature that moves with it.
   \item \textbf{Rate only.} SGD with momentum 0.9, batch 64, one step; only the learning rate is searched, on a grid of ratio \(\sqrt2\) (a coarser \(\times2\) ladder first), extended until the optimum is interior, anchored on the member's single-model rate for the duo modes (``individual rates first, duos from them'').
-  \item \textbf{Criterion.} The whole-stream accuracy of the thing the mode outputs (the member's own for a single model, the static or gated duo's otherwise), the mean over the four tuning shifts. The worst stream is reported but does not decide.
+  \item \textbf{Criterion.} The whole-stream accuracy of the thing the mode outputs (the member's own for a single model, the static or gated duo's otherwise), the mean over the four tuning shifts. The worst stream is reported but does not decide. (Since 3 November the \vit{} + \cnx{} duo uses the \rl{worst\_shift} criterion instead, in every tuning and test: among the candidates within 1 point of the best mean, the best worst shift; Section~\ref{sec:open}. The main duo keeps the mean. Parts~II and III report the mean-criterion rates unless stated.)
   \item \textbf{Late-stream guard.} A candidate whose accuracy on the last 20\% of each stream (mean over the shifts) is below the frozen reference's (the frozen member, or the frozen duo for a pair or duo-entropy mode) is ruled out as drifting.
   \item \textbf{Interior optimum.} A winner on the edge of its grid is not recorded; the grid is extended.
   \item \textbf{Seeds.} The search runs on one stream-order seed; the finalists (the leading few) run on seeds 0, 1, 2 and the final choice is made on the three.
@@ -121,7 +121,7 @@ Fitted per duo on the frozen members' logits over the pooled tuning shifts (\rl{
 Each member alone, Tent on its own entropy, its own accuracy on the four shifts; the rate must be interior and is then kept. These rates anchor every later grid, and are the rows ``Independent large / small''. They are \emph{not} what a member needs inside a duo (below).
 
 \subsection{Independent pair (Independent both, Vanilla DD's members), 02c}
-Both members adapt on their own entropy, scored by the \emph{duo}: a member's best rate alone is not necessarily best in the combination, because the duo's accuracy depends on both members' errors. For \vit{} + \cnx{} the two differ by a factor of eleven for the \cnx{} (single \lr{3.5}{-5}, pair \lr{3.1}{-6}): at the single rates the duo gets 52.3\%, at the pair 55.6\%. For the main duo they coincide (\lr{7}{-5}, \lr{5}{-4}). Because the members do not see each other's loss, their logits can be computed independently and every pair is scored from stored logits (a \(n\times n\) grid from \(n\) runs), which is why this is the cheap case.
+Both members adapt on their own entropy, scored by the \emph{duo}: a member's best rate alone is not necessarily best in the combination, because the duo's accuracy depends on both members' errors. For \vit{} + \cnx{} the two differ by a factor of eleven for the \cnx{} (single \lr{3.5}{-5}, pair \lr{3.1}{-6}): at the single rates the duo gets 52.3\%, at the pair 55.6\% (why: Section~\ref{sec:whypair}). For the main duo they coincide (\lr{7}{-5}, \lr{5}{-4}). Because the members do not see each other's loss, their logits can be computed independently and every pair is scored from stored logits (a \(n\times n\) grid from \(n\) runs), which is why this is the cheap case.
 
 \subsection{Large adapt and Small adapt, 02d and 02e}
 One member adapts on the static duo's entropy while the other is frozen, so the member's loss is the entropy of a combination with a constant partner: a different loss, a different best rate. A one-dimensional grid from 0.5 to 64 times the single rate (extended downward when the optimum is at the edge: to 0.125 for the \cnx{}), finalists on three seeds. The numbers: on the main duo the rates are \lr{1.12}{-3} (\vit{}) and \lr{1.4}{-3} (\rn{}), against \lr{3.2}{-3} and \lr{4}{-3} in Joint; Large adapt had been run with the Joint pair's rate and was retuned on its own, which moved its test-stream average from 50.2\% to 56.2\% and Small adapt from 46.7\% to 50.5\% (plan.md, 2026-10-24).
@@ -338,6 +338,53 @@ This is the clearest view of what the tuning criterion sees. Table~\ref{tab:own_
 
 At \(3.1{\cdot}10^{-6}\) the member gains on nine corruptions (up to \(+29\) on pixelate, \(+18\) on shot noise and on contrast) and loses 19--39 points on snow, frost, fog, elastic transform and zoom blur, so its average falls below the frozen member's (26.5 against 29.8). At \(3.5{\cdot}10^{-5}\) it is under 4\% on nine corruptions and averages 17.2. None of the corruptions that break it is among the four tuning shifts.
 
+\section{Why the duo picks a smaller \cnx{} rate than \cnx{} alone}\label{sec:whypair}
+In the independent pair each member adapts on its own entropy, so at a given rate the \cnx{} is \emph{the same model} as when it runs alone: 02c scores both regimes from the same stored member logits. Only the score differs: the member's own accuracy (single) or the static duo's (independent pair). One might expect a rate that is best for the member to be best for the duo too. That holds only if the duo's accuracy rises with each member's own accuracy, and here it does not (Table~\ref{tab:whypair}).
+
+\begin{table}[H]
+  \centering\small
+  \caption{The \cnx{} rate scored two ways, \vit{} at its rate \lr{7}{-5} (mean over 3 seeds, \%; \rl{out/results/tune\_indep\_pair/vitb16\_convnextt\_\_tent\_bn/ranking.csv}). Left: \cnx{} alone on its own entropy (Table~\ref{tab:own_held}). Right: the static duo with the same \cnx{} beside the adapted \vit{}. $\dagger$ independent pair (\rl{mean}); $\ddagger$ single model (\rl{mean}); $\S$ single model under \rl{worst\_shift}. Frozen: \cnx{} 43.6 (blur 20.4), duo 50.9 (blur 28.9); \vit{} alone at \lr{7}{-5}: blur 33.3.}
+  \label{tab:whypair}
+  \begin{tabular}{@{}l cc cc@{}}
+    \toprule
+    & \multicolumn{2}{c}{\cnx{} alone} & \multicolumn{2}{c}{duo} \\
+    \cmidrule(lr){2-3}\cmidrule(l){4-5}
+    \cnx{} rate & Avg & Gaussian blur & Avg & Gaussian blur \\
+    \midrule
+    \lr{2.2}{-6} $\S$ & 48.6 & 20.0 & 55.1 & 32.3 \\
+    \lr{3.1}{-6} $\dagger$ & 49.2 & 17.8 & \textbf{55.6} & 32.3 \\
+    \lr{4.4}{-6} & 48.9 & 13.0 & 55.5 & 30.3 \\
+    \lr{6.2}{-6} & 48.7 & 9.5 & 55.2 & 27.7 \\
+    \lr{8.8}{-6} & 48.9 & 7.2 & 55.0 & 25.2 \\
+    \lr{2.5}{-5} & 49.2 & 2.7 & 52.7 & 13.3 \\
+    \lr{3.5}{-5} $\ddagger$ & \textbf{49.3} & 2.0 & 52.3 & 10.8 \\
+    \lr{5}{-5} & 41.1 & 1.6 & 46.3 & 7.7 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Gains are attenuated and losses amplified in the duo.} Going from the pair's rate (\lr{3.1}{-6}) to the single rate (\lr{3.5}{-5}), the member alone gains 7.2 points on speckle, 6.6 on spatter and 2.7 on saturate, and loses 15.8 on Gaussian blur: \(+0.1\) on average. The duo gains only 2.7, 4.2 and 1.4 on the first three (the \vit{} already gets many of the images the \cnx{} learns to classify), and loses 21.5 on blur, \emph{more} than the member itself: \(-3.3\) on average. The criterion is the same in both regimes; the duo's objective is simply not monotone in the member's accuracy.
+
+\paragraph{Why the duo loses more than the member: the collapsed member is confident.} Table~\ref{tab:mech} looks inside the blur stream (seed 0, stored logits). At \lr{3.5}{-5} Tent has driven the \cnx{} to a near-constant prediction: one class takes 90\% of its predictions, with a mean confidence of 0.94 \emph{on the images it gets wrong}. The static duo averages tempered logits with the temperature fitted on the \emph{frozen} member (\(T_S = 0.94\)), so a member whose logits sharpen during adaptation gains weight in the average. The duo then follows the \cnx{} on 82\% of the images and overrides a correct \vit{} on 22.6\% of them, which brings the duo (11.4) far below the \vit{} alone (33.4). A wrong but uncertain member would barely move the average; a confidently wrong one takes it over. The member's own accuracy cannot register the difference, the duo's can.
+
+\begin{table}[H]
+  \centering\small
+  \caption{Gaussian blur, seed 0, \vit{} at \lr{7}{-5} (alone 33.4\%). ``conf.\ wrong'': mean max-softmax (at \(T_S\)) of the \cnx{} on the images it misclassifies; ``top class'': share of all its predictions that go to its most frequent class; ``duo = \cnx{}'': the duo predicts the \cnx{}'s class; ``\vit{} overridden'': the \vit{} is right, the \cnx{} and the duo are wrong.}
+  \label{tab:mech}
+  \begin{tabular}{@{}l c c c c c c@{}}
+    \toprule
+    \cnx{} & acc & conf.\ wrong & top class & duo acc & duo = \cnx{} & \vit{} overridden \\
+    \midrule
+    frozen & 20.4 & 0.17 & 3\% & 32.5 & 44\% & 3.1\% \\
+    \lr{2.2}{-6} & 20.0 & 0.31 & 3\% & 32.3 & 45\% & 4.0\% \\
+    \lr{3.1}{-6} & 17.0 & 0.43 & 18\% & 32.2 & 42\% & 4.1\% \\
+    \lr{3.5}{-5} & 2.1 & 0.94 & 90\% & 11.4 & 82\% & 22.6\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{What this means.} (i) A member's best rate inside a duo is a different quantity from its best rate alone, even when the members never see each other's loss: the duo rewards a member for being right where its partner is wrong and penalizes it heavily for being confidently wrong, and a member's own accuracy measures neither. (ii) The duo's score is in effect a risk-averse criterion for each member: a rate that wins on average by trading one shift for three others loses in the duo. (iii) The two regimes disagree less than the \(\times 11\) suggests. The single-model optimum sits on a flat average (48.6--49.3 over \(2.2{\cdot}10^{-6}\)--\(3.5{\cdot}10^{-5}\)) and wins by \(0.1\) point because the mean accepts the blur collapse; under the \rl{worst\_shift} criterion the single-model tuner picks \lr{2.2}{-6}, one grid step from the pair's \lr{3.1}{-6}. (iv) On the main duo the two regimes coincide (\lr{7}{-5}, \lr{5}{-4}): \rn{}'s best rate alone does not buy its average with a collapse on one shift (worst shift 22.3\% at \lr{5}{-4}, 22.4\% one step below), so there is no trade for the duo to refuse.
+
 \section{Neighbouring rates}\label{sec:nb}
 Tables~\ref{tab:nb_vit}--\ref{tab:nb_joint} give the chosen rate of each regime (bold) with the neighbouring rates that ran on all three seeds.
 
@@ -427,7 +474,7 @@ The right half of Table~\ref{tab:modes} and Table~\ref{tab:test_corr} score the 
 \section{Open decisions}\label{sec:open}
 \begin{enumerate}
   \item \textbf{Report the rows as they are,} as the case where tuning on a few shifts selects a rate beside a collapse. This needs no new runs.
-  \item \textbf{Adopt a selection rule that sees single-shift collapses,} for example the highest worst-shift accuracy among rates whose average is within a tolerance of the best, or a rate one grid step below the winner. On the tuning shifts this would choose \(2.2{\cdot}10^{-6}\) or \(3.1{\cdot}10^{-6}\) for \cnx{} on its own entropy (about frozen quality) and \(5{\cdot}10^{-5}\) for Small adapt. It would have to be applied to every duo, including the main one, and the tuning rerun. Whether it would have avoided the test collapses is not known: they are on corruptions the tuning shifts do not contain.
+  \item \textbf{Adopt a selection rule that sees single-shift collapses,} for example the highest worst-shift accuracy among rates whose average is within a tolerance of the best, or a rate one grid step below the winner. On the tuning shifts this would choose \(2.2{\cdot}10^{-6}\) or \(3.1{\cdot}10^{-6}\) for \cnx{} on its own entropy (about frozen quality) and \(5{\cdot}10^{-5}\) for Small adapt. It would have to be applied to every duo, including the main one, and the tuning rerun. Whether it would have avoided the test collapses is not known: they are on corruptions the tuning shifts do not contain. \emph{Decided 3 November} (\rl{DD\_final\_sprint.md}, D7): \rl{worst\_shift} with a 1-point tolerance for this duo, in every tuning and test; the main duo keeps the mean, where the rule would change only the independent pair's \vit{} rate (\lr{7}{-5} to \lr{10}{-4}: mean \(-0.03\), worst shift \(+1.1\)).
   \item \textbf{Widen the tuning shifts} (add a weather and a digital shift), which changes the protocol for every duo.
 \end{enumerate}
 

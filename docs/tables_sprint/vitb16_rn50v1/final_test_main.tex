@@ -1,0 +1,22 @@
+\begin{table}[t]
+  \centering\small
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Method & Vanilla DD & Fixed-TS duo & ViT-B/16 & ResNet-50 & Resets/1,000 \\
+    \midrule
+    Frozen (no adaptation) & 46.1 & 46.1 & 40.4 & 31.7 & -- \\
+    Reset at every shift (episodic) & 52.5 & 52.2 & 42.9 & 43.9 & -- \\
+    \midrule
+    No reset, accuracy-tuned rates & 50.4$\pm$0.2 & 50.4$\pm$0.2 & 45.1$\pm$0.3 & 38.4$\pm$0.3 & 0.0 / 0.0 \\
+    \midrule
+    Every 500 steps & 52.0$\pm$0.1 & 51.9$\pm$0.1 & 43.8$\pm$0.2 & 42.5$\pm$0.1 & 7.9 / 7.9 \\
+    Every 1,000 steps & 51.7$\pm$0.1 & 51.5$\pm$0.1 & 43.8$\pm$0.4 & 42.0$\pm$0.2 & 3.8 / 3.8 \\
+    \midrule
+    Own fast/slow, per-member settings & 54.1$\pm$0.0 & 54.1$\pm$0.0 & 50.8$\pm$0.4 & 37.1$\pm$0.3 & 3.6 / 0.5 \\
+    \midrule
+    Random resets, matched to Own fast/slow, per-member settings & 50.4$\pm$1.5 & 46.8$\pm$2.2 & 42.5$\pm$2.2 & 38.8$\pm$0.7 & 3.6 / 0.5 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Final test: accuracy (\%, mean over the 15 corruptions) on the ImageNet-C test stream, every configuration as tuned on the held-out stream, the gate at $\beta=0.25$. Mean$\pm$SE over 5 orderings of the corruptions (standard order and CoTTA's random orders); resets per 1,000 proxy batches for ViT-B/16 / ResNet-50. Frozen and the episodic reset are order-independent (scripts/03b rows). Produced by \rl{scripts/42\_final\_test.py}.}
+  \label{tab:final_test}
+\end{table}

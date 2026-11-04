@@ -150,17 +150,37 @@ class CCC(ShiftDataset):
         np.save(cache, ix)
         return ix
 
-    def torch_dataset(self) -> _Stream:
-        shards = self.shards()
-        return _Stream(shards, [self._index(s) for s in shards])
+    def __len__(self) -> int:
+        """The stream's nominal length (cfgs/protocols.yaml), without reading any shard: callers size their runs with min(images, len); the loader checks that
+        the prefix it is asked for exists (indexing every shard here would read shards that are missing or still being written)."""
+        return self.images_per_stream
+
+    def torch_dataset(self, limit: int | None = None) -> _Stream:
+        """The whole stream, or (`limit`) only the shards that hold its first `limit` images, indexed in order: a prefix can be read while later shards are
+        missing or still being written (a shard being written is not a valid tar yet)."""
+        if limit is None:
+            shards = self.shards()
+            return _Stream(shards, [self._index(s) for s in shards])
+        used, indexes, n, k = [], [], 0, 0
+        while n < limit:
+            shard = self.folder / f"serial_{k:05d}.tar"
+            if not shard.is_file():
+                break
+            used.append(shard)
+            indexes.append(self._index(shard))
+            n += len(indexes[-1])
+            k += 1
+        if not used:
+            raise DatasetLayoutError(f"no serial_00000.tar in {self.folder} (generate the stream first)")
+        return _Stream(used, indexes)
 
     def _limited(self, num_samples: int | None) -> tuple[_Stream, int]:
-        stream = self.torch_dataset()
         limit = self.images_per_stream if num_samples is None else num_samples
+        stream = self.torch_dataset(limit)
         if len(stream) < limit:
             raise DatasetLayoutError(
-                f"{self.folder} holds {len(stream):,} images but {limit:,} were requested; "
-                f"the stream is only partly generated."
+                f"{self.folder} holds {len(stream):,} images in its first {len(stream.shards)} contiguous shards but {limit:,} were requested; "
+                f"the stream is only partly generated (next missing: serial_{len(stream.shards):05d}.tar)."
             )
         return stream, limit
 
@@ -221,6 +241,17 @@ if __name__ == "__main__":
             rest = [ys.tolist() for _, ys in ds.loader(4, num_samples=21, workers=workers, start=8)]
             assert rest == [b[1].tolist() for b in batches[2:]], (workers, rest)
         assert list(ds.loader(4, num_samples=21, workers=0, start=21)) == [] and CCC.supports_start
+        # a prefix reads only the shards it needs: with the last shard missing (or still being written) the first 17 images still load, 18 do not
+        last = ds.folder / "serial_00002.tar"
+        last.rename(last.with_suffix(".tmp"))
+        assert [int(y) for _, ys in ds.loader(4, num_samples=17, workers=0) for y in ys] == list(range(17))
+        try:
+            ds.loader(4, num_samples=18, workers=0)
+            raise AssertionError("a prefix longer than the contiguous shards must be refused")
+        except DatasetLayoutError:
+            pass
+        last.with_suffix(".tmp").rename(last)
+        assert len(ds) == n_total, "len is the nominal length, read from no shard"
         img, y = ds.torch_dataset()[12]
         assert y == 12 and img.size == (224, 224) and abs(img.getpixel((5, 5))[0] - 12 * 9 % 256) < 8
         for bad, msg in ((lambda: ds.loader(4, num_samples=27, workers=0), "partly generated"),
