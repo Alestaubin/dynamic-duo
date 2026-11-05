@@ -1,0 +1,21 @@
+\begin{table}[t]
+    \centering
+    \small
+    \caption{Independent DD at several gate sharpnesses $\beta$: top-1 accuracy (\%) averaged over the corruptions at severity 5, episodic, Tent, mean over 3 seeds. The gate $w_L = \sigma(\beta(s_L - s_S))$ (nnn, proxy batches of 256) is applied outside the adaptation loop, so every $\beta$ is replayed on the same member logits. $\beta = 0$ is the Fixed TS duo. \emph{Held-out}: the 4 tuning corruptions; \emph{Test}: the 15 test corruptions. Best per column in bold.}
+    \label{tab:indep_dd_beta_sweep}
+    \begin{tabular}{lcccc}
+        \toprule
+        & \multicolumn{2}{c}{ViT-B/16 + ResNet-50} & \multicolumn{2}{c}{ViT-B/16 + ConvNeXt-T} \\
+        \cmidrule(lr){2-3}\cmidrule(lr){4-5}
+        $\beta$ & Held-out & Test & Held-out & Test \\
+        \midrule
+        0 (Fixed TS) & \textbf{56.6} & 52.2 & 55.3 & 43.2 \\
+        0.125 & \textbf{56.6} & 52.4 & 55.6 & 45.3 \\
+        0.25 & \textbf{56.6} & \textbf{52.5} & 55.9 & 45.8 \\
+        0.5 & \textbf{56.6} & \textbf{52.5} & \textbf{56.1} & \textbf{46.0} \\
+        1 & 56.5 & \textbf{52.5} & \textbf{56.1} & 45.9 \\
+        2 & 56.4 & \textbf{52.5} & 55.6 & 45.5 \\
+        4 & 56.1 & 52.2 & 54.8 & 45.0 \\
+        \bottomrule
+    \end{tabular}
+\end{table}

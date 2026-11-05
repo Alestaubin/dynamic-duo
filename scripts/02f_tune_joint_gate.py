@@ -53,7 +53,7 @@ CONFIG_KEYS = ("anchor", "betas", "start_rungs", "search_seeds", "confirm_seeds"
 
 
 def parse() -> argparse.Namespace:
-    ap = cli.add_common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter), tta=False, seeds=False)
+    ap = cli.add_common_args(argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter), seeds=False)
     ap.add_argument("--proxy", default="nnn", help="the gate's proxy (a stateless key of src/reliability/proxies/pure.PROXIES; default nnn)")
     ap.add_argument("--b_t", type=int, default=256, help="the gate's proxy batch size (default 256, as scripts 03b / 09 and the reset tuning)")
     ap.add_argument("--betas", type=float, nargs="+", default=None, help=f"the gate grid (default {' '.join(f'{b:g}' for b in JG.BETAS)}, then 2 and 4 while the best is the sharpest)")
@@ -84,7 +84,11 @@ def load_config(out: Path, args: argparse.Namespace, ctx) -> dict:
             new[k] = list(v)
         new.setdefault(k, defaults[k])
     if "anchor" not in new:
-        joint = AM.joint_context(ctx, "tent")
+        try:
+            joint = AM.joint_context(ctx, args.tta)
+        except duo_lrs.NotTuned:            # a method with no joint pair yet (e.g. eta_native): its tuned Independent pair is rung 0
+            joint = ctx
+            print(f"anchor: no joint pair recorded for {args.tta}: the Independent pair (cfgs/duo_lrs/{args.duo}__indep.yaml) is rung 0")
         new["anchor"] = [float(joint.duo[side]["OPTIM"]["LR"]) for side in ("LARGE", "SMALL")]
     if len(new["search_seeds"]) > 2:
         raise SystemExit("--search_seeds: one or two seeds (plan_pair pools at most two)")
@@ -111,13 +115,13 @@ def frozen_floor(ctx, temps, num_samples, out: Path):
     return late
 
 
-def reference_check(ctx, temps, store: JG.Store, run: JG.Run, num_samples) -> str | None:
+def reference_check(ctx, temps, store: JG.Store, run: JG.Run, num_samples, args_tta: str = "tent") -> str | None:
     """beta = 0 is 02b's fixed-TS joint duo: compare the live run with 02b's cached one at the same pair and seed (None if that one is not cached)."""
     from src.experiments import joint_lr_tuning as JL
 
     if num_samples or not store.has(run) or run.beta != 0:
         return None
-    tuner = JL.Tuner(AM.with_learning_rates(ctx, run.lr_large, run.lr_small), "tent", None, None, temps)
+    tuner = JL.Tuner(AM.with_learning_rates(ctx, run.lr_large, run.lr_small), args_tta, None, None, temps)
     job = JL.Job("joint", run.seed, run.lr_large, run.lr_small)
     if tuner.missing([job]):
         return None
@@ -132,14 +136,14 @@ def main() -> int:
     if args.proxy not in pure.PROXIES or pure.PROXIES[args.proxy].stateful:
         raise SystemExit(f"--proxy must be a stateless key of {sorted(k for k, v in pure.PROXIES.items() if not v.stateful)} (a stateful proxy needs script 09's --eval)")
     crit = C.Criterion.from_args(args)              # how the pair and beta are chosen (mean unless --criterion worst_shift); the runs are shared between criteria
-    tag_mean = f"{args.duo}__tent{cli.bn_tag(args)}__{args.proxy}_bt{args.b_t}" + (f"__n{args.num_samples}" if args.num_samples else "")
+    tag_mean = f"{args.duo}__{args.tta}{cli.bn_tag(args)}__{args.proxy}_bt{args.b_t}" + (f"__n{args.num_samples}" if args.num_samples else "")
     ctx, _, out = cli.setup(args, f"tune_joint_gate/{tag_mean}{C.folder_tag(crit)}", criterion="mean")
     shared = out if (not crit.robust or args.out) else out.parent / tag_mean         # the stored runs (one live run per cell) are the mean study's folder: a cell is a cell whatever chose it
     if crit.robust and shared != out and (shared / "config.json").is_file() and not (out / "config.json").is_file():
         (out / "config.json").write_text((shared / "config.json").read_text())       # the same anchor and start: the same rungs, so the same cells
         print(f"criterion {crit.describe()}: config.json copied from {shared}")
     if crit.robust:
-        print(f"criterion: {crit.describe()}; the chosen pair is recorded under {crit.key('tent')}; stored runs are shared with {shared}")
+        print(f"criterion: {crit.describe()}; the chosen pair is recorded under {crit.key(args.tta)}; stored runs are shared with {shared}")
     temps = AM.resolve_temperatures(ctx, AM.temperature_spec(args.duo, "tent", None, None), None, report_only=True)       # the full frozen fit, also under a --num_samples cap
     print(f"{args.duo}: frozen Fixed TS T_L = {temps.T_l}, T_S = {temps.T_s}  ({temps.folder.name}); gate {args.proxy}, proxy batch {args.b_t}; folder {out}")
 
@@ -149,7 +153,7 @@ def main() -> int:
         segments = stream_segments(["heldout"], ctx.g)
         store = JG.Store(shared)
         for text in args.run:
-            JG.execute(ctx, segments, temps, JG.Run.parse(text), store=store, proxy=args.proxy, b_t=args.b_t, num_samples=args.num_samples)
+            JG.execute(ctx, segments, temps, JG.Run.parse(text), store=store, proxy=args.proxy, b_t=args.b_t, num_samples=args.num_samples, tta=args.tta)
         return 0
 
     cfg = load_config(out, args, ctx)
@@ -191,7 +195,7 @@ def main() -> int:
     print(f"\n{stage}: {len(wave)} run(s) to do")
     common = (["--bn"] if args.bn else []) + ["--proxy", args.proxy, "--b_t", str(args.b_t)] + (["--num_samples", str(args.num_samples)] if args.num_samples else []) \
         + (["--global", args.global_path] if args.global_path else []) + (["--out", str(args.out)] if args.out else [])
-    names = JG.submit(args.duo, wave, common, args.time, go=args.submit, cwd=Path.cwd())
+    names = JG.submit(args.duo, wave, common, args.time, go=args.submit, cwd=Path.cwd(), tta=args.tta)
     if args.submit and args.chain:
         JG.chain(out, args.duo, names, sys.argv[1:], go=True, cwd=Path.cwd())
     elif args.chain:
@@ -214,7 +218,7 @@ def finish(args, ctx, temps, store: JG.Store, cfg, pl, conf, out: Path, floor, r
                                                                                 mark=[JG.Run(*new_pair, beta, s) for s in cfg["search_seeds"]])]
     text += ["", f"confirmation, duo accuracy (%) macro over the 4 held-out streams, seeds {seeds} (first row: the recorded pair, no gate = script 03's Joint row):",
              JG.confirm_table(store, conf, seeds)]
-    check = reference_check(ctx, temps, store, JG.Run(*rates((0, 0)), 0.0, 0), args.num_samples)
+    check = reference_check(ctx, temps, store, JG.Run(*rates((0, 0)), 0.0, 0), args.num_samples, args.tta)
     if check:
         text += ["", check]
     chosen = [JG.summarize(store.read(JG.Run(*new_pair, beta, s))) for s in seeds]
@@ -225,10 +229,13 @@ def finish(args, ctx, temps, store: JG.Store, cfg, pl, conf, out: Path, floor, r
     (out / "report.txt").write_text(report + "\n")
     best = {"lr_large": new_pair[0], "lr_small": new_pair[1], "beta": beta, "duo": float(np.mean([c["duo"] for c in chosen])), "worst": float(np.mean([c["worst"] for c in chosen])),
             "late_duo": float(np.mean([c["late_duo"] for c in chosen]))}
-    joint = AM.joint_context(ctx, "tent")                                           # the OPTIM blocks (momentum, ...) the joint file already has
+    try:
+        joint = AM.joint_context(ctx, args.tta)                                     # the OPTIM blocks (momentum, ...) the joint file already has
+    except duo_lrs.NotTuned:
+        joint = ctx                                                                 # no joint file entry yet (a new method): the Independent file's blocks (momentum, ...) the joint file already has
     seen_l = sorted({r.lr_large for r in store.runs()})
     seen_s = sorted({r.lr_small for r in store.runs()})
-    results = {"duo": args.duo, "tta": "tent", "tta_kwargs": None, "bn": args.bn, "seeds": seeds, "num_samples": args.num_samples, "batch_size": ctx.batch_size,
+    results = {"duo": args.duo, "tta": args.tta, "tta_kwargs": None, "bn": args.bn, "seeds": seeds, "num_samples": args.num_samples, "batch_size": ctx.batch_size,
                "streams": sorted(store.read(conf[0])["streams"]), "temperatures": {"T_l": temps.T_l, "T_s": temps.T_s, "checkpoint": str(temps.folder)},
                "optim": {"large": joint.duo["LARGE"]["OPTIM"], "small": joint.duo["SMALL"]["OPTIM"]}, "current_lrs": {"large": cfg["anchor"][0], "small": cfg["anchor"][1]},
                "lrs_large": seen_l, "lrs_small": seen_s, "best": best, "gate": {"proxy": args.proxy, "b_t": args.b_t, "beta": beta, "tuned_with_the_gate": True},

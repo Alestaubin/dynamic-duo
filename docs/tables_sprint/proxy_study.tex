@@ -1,0 +1,37 @@
+\begin{table}[t]
+\centering
+\small
+\caption{Which proxy should the reset detector watch? The \texttt{own\_fast\_vs\_slow} detector's grid is re-selected for every proxy (and for both orientations: $+$ alarms on a drop, $-$ on a rise; the better is reported) on the held-out calibration streams at 1 false alarm per 1{,}000 proxy batches. Delay in proxy batches of 256 images from the onset of a member's degradation (a miss is charged its whole stretch). $\rho$: Spearman correlation, over proxy batches, of the proxy with the member's accuracy minus the frozen member's. Response: the proxy's change at a collapse onset, in pre-onset standard deviations (negative: it falls).}
+\label{tab:proxy_study}
+\begin{tabular}{llrrrrr}
+\toprule
+Proxy & Orient. & Delay $\downarrow$ & Miss $\downarrow$ & FA & $\rho$ $\uparrow$ & Response \\
+\midrule
+\multicolumn{7}{l}{\textit{ViT-B/16 + ResNet-50}} \\
+Dispersity & $+$ & 43.2 & 0.38 & 0.95 & 0.35 & -1.8 \\
+Marginal entropy & $+$ & 54.2 & 0.38 & 0.50 & 0.53 & -2.7 \\
+\textbf{Nuclear norm} & $+$ & 87.3 & 0.44 & 0.86 & 0.25 & -0.8 \\
+Mutual information & $+$ & 89.2 & 0.44 & 0.77 & 0.29 & -1.4 \\
+AC-MC & $-$ & 94.7 & 0.38 & 0.32 & -0.55 & 1.5 \\
+Neg. entropy & $-$ & 96.1 & 0.31 & 0.45 & -0.53 & 1.7 \\
+ATC (max-conf.) & $-$ & 119.7 & 0.38 & 0.23 & -0.57 & 1.3 \\
+Energy & $-$ & 134.8 & 0.38 & 0.86 & -0.47 & 1.5 \\
+ATC (neg. entropy) & $-$ & 140.3 & 0.44 & 0.36 & -0.56 & 1.6 \\
+ASR concentration & $+$ & 151.4 & 0.56 & 0.14 & 0.36 & -9.1 \\
+Duo agreement & $+$ & 191.9 & 0.75 & 0.63 & -0.07 & -0.5 \\
+\midrule
+\multicolumn{7}{l}{\textit{ViT-B/16 + ConvNeXt-T}} \\
+\textbf{Nuclear norm} & $+$ & 37.7 & 0.58 & 0.75 & 0.28 & -1.5 \\
+Dispersity & $+$ & 37.9 & 0.60 & 0.89 & 0.32 & -4.0 \\
+Mutual information & $+$ & 38.6 & 0.58 & 0.64 & 0.34 & -3.3 \\
+ATC (max-conf.) & $-$ & 40.3 & 0.64 & 0.64 & -0.42 & 1.6 \\
+AC-MC & $-$ & 51.6 & 0.67 & 0.78 & -0.38 & 2.0 \\
+ATC (neg. entropy) & $-$ & 53.0 & 0.67 & 0.58 & -0.40 & 1.2 \\
+Energy & $-$ & 53.8 & 0.71 & 0.46 & -0.24 & 0.5 \\
+Marginal entropy & $+$ & 54.6 & 0.64 & 0.89 & 0.50 & -6.4 \\
+Neg. entropy & $-$ & 55.4 & 0.69 & 0.55 & -0.34 & 1.8 \\
+Duo agreement & $-$ & 62.4 & 0.42 & 0.92 & -0.01 & 0.8 \\
+ASR concentration & $+$ & 74.0 & 0.78 & 0.14 & 0.37 & -219.1 \\
+\bottomrule
+\end{tabular}
+\end{table}

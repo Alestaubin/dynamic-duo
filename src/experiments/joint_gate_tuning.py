@@ -176,7 +176,7 @@ class Store:
         return out
 
 
-def execute(ctx, segments, temps, run: Run, *, store: Store, proxy: str, b_t: int, num_samples: int | None = None) -> Path | None:
+def execute(ctx, segments, temps, run: Run, *, store: Store, proxy: str, b_t: int, num_samples: int | None = None, tta: str = "tent") -> Path | None:
     """Run one cell (a GPU job) and store it; a run already stored is not repeated (returns None)."""
     from src.experiments import adaptation_modes as AM
     from src.experiments.joint_dd import run_joint_dd
@@ -186,12 +186,12 @@ def execute(ctx, segments, temps, run: Run, *, store: Store, proxy: str, b_t: in
         return None
     t0 = time.time()
     res = run_joint_dd(AM.with_learning_rates(ctx, run.lr_large, run.lr_small), segments,
-                       gate_kwargs=dict(proxy=proxy, beta=run.beta, b_t=b_t, T_l=temps.T_l, T_s=temps.T_s), seed=run.seed, num_samples=num_samples)
+                       gate_kwargs=dict(proxy=proxy, beta=run.beta, b_t=b_t, T_l=temps.T_l, T_s=temps.T_s), seed=run.seed, num_samples=num_samples, tta=tta)
     streams: dict = {}
     for r in res["rows"]:
         streams.setdefault(r["segment"], {})[r["series"]] = {k: r[k] for k in ("n", "accuracy", "ece", "nll", "entropy")}
     payload = {"run": {"lr_large": run.lr_large, "lr_small": run.lr_small, "beta": run.beta, "seed": run.seed},
-               "gate": {"proxy": proxy, "b_t": b_t}, "num_samples": num_samples, "batch_size": ctx.batch_size,
+               "gate": {"proxy": proxy, "b_t": b_t}, "tta": tta, "num_samples": num_samples, "batch_size": ctx.batch_size,
                "temperatures": {"T_l": temps.T_l, "T_s": temps.T_s}, "seconds": round(time.time() - t0, 1),
                "streams": streams, "curves": res["curves"],
                "gate_w": {lab: [rec["w_l"] for rec in recs] for lab, recs in res["gate_records"].items()}}
@@ -234,7 +234,7 @@ def plan(cell_of: Callable[[tuple, int], TU.Cell | None], *, start: Sequence[tup
             return out
         pooled = {b: (np.concatenate([cell_of((pair, b), r).acc["gate"] for r in rots]), 0.0) for b, pair in alive.items()}
         beta, tied = TU.choose(pooled, float, criterion)
-        if beta == max(tried) and ext < TU.MAX_EXTEND:                         # the sharpest gate tried is the best: try a sharper one
+        if len(betas) > 1 and beta == max(tried) and ext < TU.MAX_EXTEND:      # the sharpest gate tried is the best: try a sharper one (a one-value grid is a FIXED beta: never extended)
             tried.append(TU.BETA_EXTEND[ext])
             continue
         break
@@ -291,17 +291,19 @@ def confirm_table(store: Store, runs: Sequence[Run], seeds: Sequence[int]) -> st
 # ------------------------------------------------------------------------------------------------------------ submission
 
 JOB_PREFIX, CHAIN_PREFIX = "jg_", "jg_next_"
-EXCLUDE = "kn117,kn101,kn104,kn029"                                # nodes with an uncorrectable GPU ECC error (plan.md)
+EXCLUDE = "kn117,kn101,kn104,kn029,kn001,kn159"                                # nodes with an uncorrectable GPU ECC error (plan.md)
 SCRIPT = "scripts/02f_tune_joint_gate.py"
 
 
-def job_name(duo: str, run: Run) -> str:
-    return JOB_PREFIX + re.sub(r"[^A-Za-z0-9.]+", "", f"{duo}_L{run.lr_large:g}S{run.lr_small:g}b{run.beta:g}s{run.seed}")
+def job_name(duo: str, run: Run, tta: str = "tent") -> str:
+    """Tent's names are unchanged; another method's cells get `_<method>` (the same cell of two methods are two jobs)."""
+    return JOB_PREFIX + re.sub(r"[^A-Za-z0-9.]+", "", f"{duo}_L{run.lr_large:g}S{run.lr_small:g}b{run.beta:g}s{run.seed}" + ("" if tta == "tent" else f"_{tta}"))
 
 
-def sbatch_argv(duo: str, run: Run, common: Sequence[str], time_limit: str) -> list[str]:
+def sbatch_argv(duo: str, run: Run, common: Sequence[str], time_limit: str, tta: str = "tent") -> list[str]:
     """One job per cell (a GPU job): `common` are the flags that make the worker's context the driver's (--bn, --proxy, --b_t, ...)."""
-    return ["sbatch", "-t", time_limit, "-J", job_name(duo, run), f"--exclude={EXCLUDE}", "slurm/job.sh", SCRIPT, "--duo", duo, *common, "--run", run.arg]
+    return ["sbatch", "-t", time_limit, "-J", job_name(duo, run, tta), f"--exclude={EXCLUDE}", "slurm/job.sh", SCRIPT, "--duo", duo, *common,
+            *([] if tta == "tent" else ["--tta", tta]), "--run", run.arg]
 
 
 def queued_jobs() -> dict[str, list[str]]:
@@ -309,17 +311,17 @@ def queued_jobs() -> dict[str, list[str]]:
     return q()
 
 
-def submit(duo: str, runs: Sequence[Run], common: Sequence[str], time_limit: str, *, go: bool, cwd: Path | None = None) -> list[str]:
+def submit(duo: str, runs: Sequence[Run], common: Sequence[str], time_limit: str, *, go: bool, cwd: Path | None = None, tta: str = "tent") -> list[str]:
     """Print the sbatch command of every run; with `go`, submit those not already queued (by name). Returns the job names that are now in the queue."""
     queued = queued_jobs() if go else {}
     names = []
     for run in runs:
-        name = job_name(duo, run)
+        name = job_name(duo, run, tta)
         if name in queued:
             print(f"queued   {name}")
             names.append(name)
             continue
-        argv = sbatch_argv(duo, run, common, time_limit)
+        argv = sbatch_argv(duo, run, common, time_limit, tta)
         print(("SUBMIT  " if go else "to run  ") + " ".join(argv))
         if go:
             r = subprocess.run(argv, capture_output=True, text=True, cwd=cwd)
@@ -453,6 +455,9 @@ if __name__ == "__main__":
     assert pl.final[1] in (2.0, 4.0) and {k[1] for k, _ in have} >= {2.0}, (pl.final, pl.notes)
     pl, have = drive(make_surface(9.0, lambda b: (0, 0)))
     assert pl.final[1] == 4.0 and any("plateau" in n for n in pl.notes) and {k[1] for k, _ in have} == set(BETAS) | {2.0, 4.0}, (pl.final, pl.notes)
+    # (3b) a one-value grid is a fixed beta (02f --betas 0.25): never extended above it
+    pl, have = drive(make_surface(9.0, lambda b: (0, 0)), betas=[0.25])            # the surface rewards sharper gates, the grid is one value
+    assert pl.final[1] == 0.25 and {k[1] for k, _ in have} == {0.25}, (pl.final, pl.notes)
     # (4) the gate does not help: beta 0 wins, reported and not extended
     pl, have = drive(make_surface(0.0, lambda b: (0, 0)))
     assert pl.final == ((0, 0), 0.0) and any("does not help" in n for n in pl.notes) and {k[1] for k, _ in have} == set(BETAS), pl.notes
@@ -502,5 +507,8 @@ if __name__ == "__main__":
     argv = sbatch_argv("vitb16_rn50v1", r, ["--bn"], "01:00:00")
     assert argv[:2] == ["sbatch", "-t"] and argv[-2:] == ["--run", r.arg] and "--bn" in argv and argv[argv.index("-J") + 1] == job_name("vitb16_rn50v1", r)
     assert submit("vitb16_rn50v1", [r], ["--bn"], "01:00:00", go=False) == []
+    assert job_name("d", r, "eta_native") == job_name("d", r) + "etanative"
+    a2 = sbatch_argv("d", r, ["--bn"], "01:00:00", "eta_native")
+    assert a2[a2.index("--tta") + 1] == "eta_native" and a2[-2:] == ["--run", r.arg] and "--tta" not in sbatch_argv("d", r, ["--bn"], "01:00:00")
     assert chain(Path("/nonexistent"), "vitb16_rn50v1", [job_name("vitb16_rn50v1", r)], ["--duo", "vitb16_rn50v1"], go=False) is True
     print("joint_gate_tuning self-test passed")

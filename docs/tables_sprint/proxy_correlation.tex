@@ -1,0 +1,40 @@
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{4pt}
+\caption{How well each label-free proxy tracks accuracy, on the held-out continual streams of Independent DD (both members adapt with Tent; held-out shifts only). Healthy: both members at stable learning rates; collapsing: at rates high enough that both collapse. Spearman correlation over the proxy batches (256 images) of one stream, averaged over the streams (2 healthy and 4 collapsing streams per duo). Gap: the gate's input, $s_L - s_S$, against $\mathrm{acc}_L - \mathrm{acc}_S$; $L$ / $S$: each member's score against its own accuracy. Last column: streams in which the nuclear norm's gap correlation is at least the proxy's. Every proxy is oriented so that higher means more reliable. Best of each column in bold.}
+\label{tab:proxy_correlation}
+\begin{tabular}{l rrr rrr r}
+\toprule
+ & \multicolumn{3}{c}{Healthy} & \multicolumn{3}{c}{Collapsing} & nnn $\geq$ \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Proxy & Gap & $L$ & $S$ & Gap & $L$ & $S$ & (streams) \\
+\midrule
+\multicolumn{8}{l}{\textit{ViT-B/16 + ResNet-50} \quad ($L$ = ViT-B/16, $S$ = ResNet-50)} \\
+\textbf{Nuclear norm} (ours) & \textbf{\phantom{-}0.67} & \phantom{-}0.90 & \phantom{-}0.94 & \textbf{\phantom{-}0.97} & \textbf{\phantom{-}0.82} & \textbf{\phantom{-}0.95} & -- \\
+Mutual information & \phantom{-}0.64 & \phantom{-}0.84 & \phantom{-}0.91 & \phantom{-}0.96 & \phantom{-}0.80 & \phantom{-}0.93 & 6/6 \\
+Dispersity & \phantom{-}0.24 & \phantom{-}0.84 & \phantom{-}0.86 & \phantom{-}0.95 & \phantom{-}0.81 & \phantom{-}0.84 & 6/6 \\
+Marginal entropy & $-$0.27 & $-$0.70 & $-$0.92 & \phantom{-}0.89 & \phantom{-}0.72 & \phantom{-}0.71 & 6/6 \\
+ASR concentration & $-$0.44 & \phantom{-}0.86 & \phantom{-}0.20 & \phantom{-}0.69 & \phantom{-}0.80 & \phantom{-}0.83 & 6/6 \\
+AC-MC & \phantom{-}0.61 & \phantom{-}0.89 & \phantom{-}0.94 & $-$0.68 & $-$0.68 & $-$0.52 & 6/6 \\
+Neg. entropy & \phantom{-}0.63 & \phantom{-}0.83 & \phantom{-}0.92 & $-$0.72 & $-$0.70 & $-$0.52 & 6/6 \\
+ATC (max-conf.) & \phantom{-}0.55 & \phantom{-}0.90 & \phantom{-}0.94 & $-$0.52 & $-$0.68 & $-$0.50 & 6/6 \\
+ATC (neg. entropy) & \phantom{-}0.53 & \phantom{-}0.88 & \phantom{-}0.94 & $-$0.34 & $-$0.67 & $-$0.49 & 6/6 \\
+Energy & $-$0.06 & \phantom{-}0.60 & \phantom{-}0.88 & $-$0.18 & $-$0.74 & $-$0.55 & 6/6 \\
+Duo agreement & \phantom{-}0.64 & \textbf{\phantom{-}0.91} & \textbf{\phantom{-}0.97} & $-$0.49 & $-$0.14 & \phantom{-}0.36 & 6/6 \\
+\midrule
+\multicolumn{8}{l}{\textit{ViT-B/16 + ConvNeXt-T} \quad ($L$ = ViT-B/16, $S$ = ConvNeXt-T)} \\
+\textbf{Nuclear norm} (ours) & \phantom{-}0.83 & \textbf{\phantom{-}0.90} & \textbf{\phantom{-}0.96} & \textbf{\phantom{-}0.94} & \textbf{\phantom{-}0.92} & \textbf{\phantom{-}0.82} & -- \\
+Mutual information & \phantom{-}0.85 & \phantom{-}0.84 & \phantom{-}0.94 & \textbf{\phantom{-}0.94} & \phantom{-}0.87 & \phantom{-}0.81 & 1/6 \\
+Dispersity & \textbf{\phantom{-}0.86} & \phantom{-}0.84 & \phantom{-}0.94 & \phantom{-}0.93 & \phantom{-}0.85 & \phantom{-}0.81 & 2/6 \\
+Marginal entropy & \phantom{-}0.51 & $-$0.70 & $-$0.04 & \phantom{-}0.71 & \phantom{-}0.20 & \phantom{-}0.57 & 6/6 \\
+ASR concentration & \phantom{-}0.75 & \phantom{-}0.86 & \phantom{-}0.80 & \phantom{-}0.88 & \phantom{-}0.88 & \phantom{-}0.78 & 6/6 \\
+AC-MC & \phantom{-}0.73 & \phantom{-}0.89 & \textbf{\phantom{-}0.96} & $-$0.45 & $-$0.07 & $-$0.32 & 6/6 \\
+Neg. entropy & \phantom{-}0.68 & \phantom{-}0.83 & \phantom{-}0.94 & $-$0.45 & $-$0.11 & $-$0.33 & 6/6 \\
+ATC (max-conf.) & \phantom{-}0.75 & \textbf{\phantom{-}0.90} & \textbf{\phantom{-}0.96} & $-$0.42 & $-$0.06 & $-$0.38 & 6/6 \\
+ATC (neg. entropy) & \phantom{-}0.55 & \phantom{-}0.88 & \phantom{-}0.95 & $-$0.39 & $-$0.08 & $-$0.38 & 6/6 \\
+Energy & \phantom{-}0.12 & \phantom{-}0.60 & \phantom{-}0.84 & $-$0.26 & $-$0.26 & $-$0.35 & 6/6 \\
+Duo agreement & \phantom{-}0.81 & \textbf{\phantom{-}0.90} & \textbf{\phantom{-}0.96} & \phantom{-}0.20 & \phantom{-}0.01 & \phantom{-}0.51 & 6/6 \\
+\bottomrule
+\end{tabular}
+\end{table}

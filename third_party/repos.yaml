@@ -107,3 +107,14 @@ repos:
       objective. Pinned 2026-10-18 for the Dynamic Duos comparison (Phase 3, Stage D); it is a duo
       method with its own run, not a cached base algorithm.
     used_by: [src/tta/methods/coca.py]
+
+  ASR:
+    url: https://github.com/YonseiML/asr
+    commit: 295718ecf5400d80b3c96b1f1e0cefbee324bcde
+    license: none stated in the repo
+    purpose: >
+      Official ASR (Lim et al., "When and Where to Reset Matters for Long-Term Test-Time
+      Adaptation", ICLR 2026), built on test-time-adaptation. Standalone baseline (DD sprint,
+      Nov 2026): ASR on ETA (cfgs/cin_c/eta: ResNet-50, SGD 2.5e-4, BS 64, 50k per corruption,
+      10 orders) with its published ASR.M0/P0/A0/R0/R1 defaults (conf.py).
+    used_by: []

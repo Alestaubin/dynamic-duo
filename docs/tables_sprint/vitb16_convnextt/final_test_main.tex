@@ -1,0 +1,22 @@
+\begin{table}[t]
+  \centering\small
+  \begin{tabular}{@{}lccccc@{}}
+    \toprule
+    Method & Vanilla DD & Fixed-TS duo & ViT-B/16 & ConvNeXt-T & Resets/1,000 \\
+    \midrule
+    Frozen (no adaptation) & 41.0 & -- & 40.4 & 29.8 & -- \\
+    Reset at every shift (episodic) & 45.8 & 43.2 & 43.8 & 26.6 & -- \\
+    \midrule
+    No reset, accuracy-tuned rates & 46.1$\pm$0.1 & 35.4$\pm$1.9 & 45.7$\pm$0.3 & 4.5$\pm$1.1 & 0.0 / 0.0 \\
+    \midrule
+    Every 500 steps & 45.7$\pm$0.3 & 43.2$\pm$0.4 & 43.8$\pm$0.2 & 25.3$\pm$0.5 & 7.9 / 7.9 \\
+    Every 1,000 steps & 46.1$\pm$0.6 & 43.9$\pm$0.7 & 44.7$\pm$0.5 & 24.6$\pm$0.9 & 3.8 / 3.8 \\
+    \midrule
+    Own fast/slow, per-member settings & 51.4$\pm$0.5 & 50.3$\pm$0.4 & 50.0$\pm$0.5 & 29.1$\pm$0.2 & 2.6 / 12.4 \\
+    \midrule
+    Random resets, matched to Own fast/slow, per-member settings & 45.2$\pm$1.2 & 42.9$\pm$1.4 & 43.9$\pm$1.2 & 23.8$\pm$0.4 & 2.6 / 12.4 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Final test: accuracy (\%, mean over the 15 corruptions) on the ImageNet-C test stream, every configuration as tuned on the held-out stream, the gate at $\beta=0.25$. Mean$\pm$SE over 5 orderings of the corruptions (standard order and CoTTA's random orders); resets per 1,000 proxy batches for ViT-B/16 / ConvNeXt-T. Frozen and the episodic reset are order-independent (scripts/03b rows). Produced by \rl{scripts/42\_final\_test.py}.}
+  \label{tab:final_test}
+\end{table}

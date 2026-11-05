@@ -47,15 +47,17 @@ SIDES = ("large", "small")
 
 def run_experiment(ctx: Context, *, lrs: tuple[float, float], watch: Sequence[str], after: int, seed: int, order: int | None, images: int,
                    proxy: str, beta: float, b_t: int, T_l: float, T_s: float, momentum: float = 0.9, tta: str = "tent",
-                   stream: str = "test", rounds: int = 4, rotation: int = 0, stop_mode: str = "any", joint: bool = False) -> tuple[dict, dict, list[RC.Part], dict]:
+                   stream: str = "test", rounds: int = 4, rotation: int = 0, stop_mode: str = "any", joint: bool = False,
+                   gate: PureProxyGate | None = None, frozen: bool = True) -> tuple[dict, dict | None, list[RC.Part], dict]:
     """The adaptive run at (lr_large, lr_small), stopped `after` images after any member of `watch` is dead (never, if `watch` is empty),
     then the frozen run over the same images. `stream`: "test" (the 15 corruptions once, `order`) or "heldout" (the tuning stream of
     continual_tuning.tuning_parts: the 4 held-out shifts x `rounds`, the stream the rates were chosen on). Returns (adaptive result, frozen
     result, the visits made, meta); results as `run_until`. `rotation`: the held-out stream starts with that shift of the list. `stop_mode`: "any"
     stops after the first member of `watch` has died, "all" after every one of them has. `joint`: the joint signal (both members on the gated duo's entropy,
-    the gate inside the loss) instead of Vanilla DD."""
+    the gate inside the loss) instead of Vanilla DD. `gate`: use this gate (it must be built with `proxy`, `beta`, `b_t`, `T_l`, `T_s`; e.g. a
+    src/reset/proxy_study.PanelGate that also logs other proxies) instead of a fresh PureProxyGate. `frozen` False: skip the frozen run (None is returned)."""
     rctx = with_optim(ctx, large=sgd_optim(lrs[0], momentum), small=sgd_optim(lrs[1], momentum))
-    gate = PureProxyGate(proxy, beta=beta, b_t=b_t, T_l=T_l, T_s=T_s, num_classes=1000)
+    gate = gate if gate is not None else PureProxyGate(proxy, beta=beta, b_t=b_t, T_l=T_l, T_s=T_s, num_classes=1000)
     runner, inside = RC.make_runner(rctx, RC.RUNS["joint_dd" if joint else "indep"], gate, tta)
     if stream == "test":
         parts = RC.stream_parts(rctx, rounds=1, seed=seed, order=order, stream="test")
@@ -65,10 +67,13 @@ def run_experiment(ctx: Context, *, lrs: tuple[float, float], watch: Sequence[st
         raise ValueError(f"stream must be 'test' or 'heldout', got {stream!r}")
     common = dict(images=images, batch_size=rctx.batch_size, workers=rctx.g.workers, T_l=T_l, T_s=T_s)
     res = CT.run_until(runner, parts, gate=gate, inside=inside, stop=CT.DeadStop(tuple(watch), stop_mode, after) if watch else None, **common)
-    print(f"adaptive run: {res['seen']} images, {'ran to the end' if res['stopped'] is None else res['stopped']}; frozen run over the same images")
-    frozen_runner, _ = RC.make_runner(ctx, RC.RUNS["frozen"], None, tta)
-    frozen = CT.run_until(frozen_runner, parts, max_images=res["seen"], **common)
-    if frozen["part_n"] != res["part_n"]:
+    print(f"adaptive run: {res['seen']} images, {'ran to the end' if res['stopped'] is None else res['stopped']}" + ("; frozen run over the same images" if frozen else ""))
+    if frozen:
+        frozen_runner, _ = RC.make_runner(ctx, RC.RUNS["frozen"], None, tta)
+        frozen = CT.run_until(frozen_runner, parts, max_images=res["seen"], **common)
+    else:
+        frozen = None
+    if frozen is not None and frozen["part_n"] != res["part_n"]:
         raise RuntimeError(f"the frozen run saw other visits than the adaptive one: {frozen['part_n']} against {res['part_n']}")
     meta = {"duo": ctx.duo["NAME"], "tta": tta, "bn": ctx.bn, "seed": seed, "stream": stream, "rounds": rounds if stream == "heldout" else 1, "rotation": rotation if stream == "heldout" else None, "stop_mode": stop_mode, "order": order, "images": images, "lrs": list(lrs),
             "momentum": momentum, "proxy": proxy, "beta": beta, "b_t": b_t, "T_l": T_l, "T_s": T_s, "batch_size": rctx.batch_size,
