@@ -2,39 +2,61 @@
 \centering
 \small
 \setlength{\tabcolsep}{4pt}
-\caption{How well each label-free proxy tracks accuracy, on the held-out continual streams of Independent DD (both members adapt with Tent; held-out shifts only). Healthy: both members at stable learning rates; collapsing: at rates high enough that both collapse. Spearman correlation over the proxy batches (256 images) of one stream, averaged over the streams (2 healthy and 4 collapsing streams per duo). Gap: the gate's input, $s_L - s_S$, against $\mathrm{acc}_L - \mathrm{acc}_S$; $L$ / $S$: each member's score against its own accuracy. Last column: streams in which the nuclear norm's gap correlation is at least the proxy's. Every proxy is oriented so that higher means more reliable. Best of each column in bold.}
+\caption{How well each label-free proxy tracks accuracy, on the held-out continual streams of Independent DD (both members adapt with Tent; held-out shifts only). Healthy: both members at stable learning rates; collapsing: at rates high enough that both collapse. Spearman correlation over the proxy batches (256 images) of one stream, averaged over the streams (4 healthy and 4 collapsing streams per duo). Gap: the gate's input, $s_L - s_S$, against $\mathrm{acc}_L - \mathrm{acc}_S$; $L$ / $S$: each member's score against its own accuracy. Last column: streams in which the nuclear norm's gap correlation is at least the proxy's. Type, after Deng et al.: C confidence, D dispersity, C+D both, A agreement. Every proxy is oriented so that higher means more reliable (AvgEnergy is negated). Best of each column in bold.}
 \label{tab:proxy_correlation}
-\begin{tabular}{l rrr rrr r}
+\begin{tabular}{ll rrr rrr r}
 \toprule
- & \multicolumn{3}{c}{Healthy} & \multicolumn{3}{c}{Collapsing} & nnn $\geq$ \\
-\cmidrule(lr){2-4} \cmidrule(lr){5-7}
-Proxy & Gap & $L$ & $S$ & Gap & $L$ & $S$ & (streams) \\
+ & & \multicolumn{3}{c}{Healthy} & \multicolumn{3}{c}{Collapsing} & NN $\geq$ \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-8}
+Proxy & Type & Gap & $L$ & $S$ & Gap & $L$ & $S$ & (streams) \\
 \midrule
-\multicolumn{8}{l}{\textit{ViT-B/16 + ResNet-50} \quad ($L$ = ViT-B/16, $S$ = ResNet-50)} \\
-\textbf{Nuclear norm} (ours) & \textbf{\phantom{-}0.67} & \phantom{-}0.90 & \phantom{-}0.94 & \textbf{\phantom{-}0.97} & \textbf{\phantom{-}0.82} & \textbf{\phantom{-}0.95} & -- \\
-Mutual information & \phantom{-}0.64 & \phantom{-}0.84 & \phantom{-}0.91 & \phantom{-}0.96 & \phantom{-}0.80 & \phantom{-}0.93 & 6/6 \\
-Dispersity & \phantom{-}0.24 & \phantom{-}0.84 & \phantom{-}0.86 & \phantom{-}0.95 & \phantom{-}0.81 & \phantom{-}0.84 & 6/6 \\
-Marginal entropy & $-$0.27 & $-$0.70 & $-$0.92 & \phantom{-}0.89 & \phantom{-}0.72 & \phantom{-}0.71 & 6/6 \\
-ASR concentration & $-$0.44 & \phantom{-}0.86 & \phantom{-}0.20 & \phantom{-}0.69 & \phantom{-}0.80 & \phantom{-}0.83 & 6/6 \\
-AC-MC & \phantom{-}0.61 & \phantom{-}0.89 & \phantom{-}0.94 & $-$0.68 & $-$0.68 & $-$0.52 & 6/6 \\
-Neg. entropy & \phantom{-}0.63 & \phantom{-}0.83 & \phantom{-}0.92 & $-$0.72 & $-$0.70 & $-$0.52 & 6/6 \\
-ATC (max-conf.) & \phantom{-}0.55 & \phantom{-}0.90 & \phantom{-}0.94 & $-$0.52 & $-$0.68 & $-$0.50 & 6/6 \\
-ATC (neg. entropy) & \phantom{-}0.53 & \phantom{-}0.88 & \phantom{-}0.94 & $-$0.34 & $-$0.67 & $-$0.49 & 6/6 \\
-Energy & $-$0.06 & \phantom{-}0.60 & \phantom{-}0.88 & $-$0.18 & $-$0.74 & $-$0.55 & 6/6 \\
-Duo agreement & \phantom{-}0.64 & \textbf{\phantom{-}0.91} & \textbf{\phantom{-}0.97} & $-$0.49 & $-$0.14 & \phantom{-}0.36 & 6/6 \\
+\multicolumn{9}{l}{\textit{ViT-B/16 + ResNet-50} \quad ($L$ = ViT-B/16, $S$ = ResNet-50)} \\
+ConfScore & C & \phantom{-}0.62 & \phantom{-}0.89 & \phantom{-}0.94 & $-$0.68 & $-$0.68 & $-$0.52 & 8/8 \\
+Entropy & C & \phantom{-}0.64 & \phantom{-}0.83 & \phantom{-}0.92 & $-$0.72 & $-$0.70 & $-$0.52 & 8/8 \\
+ATC & C & \phantom{-}0.55 & \phantom{-}0.90 & \phantom{-}0.94 & $-$0.52 & $-$0.68 & $-$0.50 & 8/8 \\
+ATC (neg. entropy) & C & \phantom{-}0.53 & \phantom{-}0.87 & \phantom{-}0.94 & $-$0.34 & $-$0.67 & $-$0.49 & 8/8 \\
+AvgEnergy & C & \phantom{-}0.57 & \phantom{-}0.59 & \phantom{-}0.87 & $-$0.25 & $-$0.74 & $-$0.55 & 8/8 \\
+\cmidrule(l){1-9}
+ClassEntropy & D & $-$0.28 & $-$0.68 & $-$0.92 & \phantom{-}0.89 & \phantom{-}0.72 & \phantom{-}0.71 & 8/8 \\
+Soft rank & D & \phantom{-}0.24 & \phantom{-}0.84 & \phantom{-}0.86 & \phantom{-}0.95 & \phantom{-}0.81 & \phantom{-}0.84 & 8/8 \\
+ASR concentration & D & $-$0.45 & \phantom{-}0.85 & \phantom{-}0.20 & \phantom{-}0.69 & \phantom{-}0.80 & \phantom{-}0.83 & 8/8 \\
+\cmidrule(l){1-9}
+\textbf{NuclearNorm} (ours) & C+D & \textbf{\phantom{-}0.67} & \phantom{-}0.90 & \phantom{-}0.94 & \textbf{\phantom{-}0.97} & \textbf{\phantom{-}0.82} & \textbf{\phantom{-}0.95} & -- \\
+IM & C+D & \phantom{-}0.65 & \phantom{-}0.84 & \phantom{-}0.92 & \phantom{-}0.96 & \phantom{-}0.80 & \phantom{-}0.93 & 8/8 \\
+\cmidrule(l){1-9}
+Duo agreement & A & \phantom{-}0.64 & \textbf{\phantom{-}0.91} & \textbf{\phantom{-}0.97} & $-$0.49 & $-$0.14 & \phantom{-}0.36 & 8/8 \\
 \midrule
-\multicolumn{8}{l}{\textit{ViT-B/16 + ConvNeXt-T} \quad ($L$ = ViT-B/16, $S$ = ConvNeXt-T)} \\
-\textbf{Nuclear norm} (ours) & \phantom{-}0.83 & \textbf{\phantom{-}0.90} & \textbf{\phantom{-}0.96} & \textbf{\phantom{-}0.94} & \textbf{\phantom{-}0.92} & \textbf{\phantom{-}0.82} & -- \\
-Mutual information & \phantom{-}0.85 & \phantom{-}0.84 & \phantom{-}0.94 & \textbf{\phantom{-}0.94} & \phantom{-}0.87 & \phantom{-}0.81 & 1/6 \\
-Dispersity & \textbf{\phantom{-}0.86} & \phantom{-}0.84 & \phantom{-}0.94 & \phantom{-}0.93 & \phantom{-}0.85 & \phantom{-}0.81 & 2/6 \\
-Marginal entropy & \phantom{-}0.51 & $-$0.70 & $-$0.04 & \phantom{-}0.71 & \phantom{-}0.20 & \phantom{-}0.57 & 6/6 \\
-ASR concentration & \phantom{-}0.75 & \phantom{-}0.86 & \phantom{-}0.80 & \phantom{-}0.88 & \phantom{-}0.88 & \phantom{-}0.78 & 6/6 \\
-AC-MC & \phantom{-}0.73 & \phantom{-}0.89 & \textbf{\phantom{-}0.96} & $-$0.45 & $-$0.07 & $-$0.32 & 6/6 \\
-Neg. entropy & \phantom{-}0.68 & \phantom{-}0.83 & \phantom{-}0.94 & $-$0.45 & $-$0.11 & $-$0.33 & 6/6 \\
-ATC (max-conf.) & \phantom{-}0.75 & \textbf{\phantom{-}0.90} & \textbf{\phantom{-}0.96} & $-$0.42 & $-$0.06 & $-$0.38 & 6/6 \\
-ATC (neg. entropy) & \phantom{-}0.55 & \phantom{-}0.88 & \phantom{-}0.95 & $-$0.39 & $-$0.08 & $-$0.38 & 6/6 \\
-Energy & \phantom{-}0.12 & \phantom{-}0.60 & \phantom{-}0.84 & $-$0.26 & $-$0.26 & $-$0.35 & 6/6 \\
-Duo agreement & \phantom{-}0.81 & \textbf{\phantom{-}0.90} & \textbf{\phantom{-}0.96} & \phantom{-}0.20 & \phantom{-}0.01 & \phantom{-}0.51 & 6/6 \\
+\multicolumn{9}{l}{\textit{ViT-B/16 + ConvNeXt-T} \quad ($L$ = ViT-B/16, $S$ = ConvNeXt-T)} \\
+ConfScore & C & \phantom{-}0.63 & \phantom{-}0.88 & \phantom{-}0.84 & $-$0.45 & $-$0.07 & $-$0.32 & 8/8 \\
+Entropy & C & \phantom{-}0.59 & \phantom{-}0.82 & \phantom{-}0.82 & $-$0.45 & $-$0.11 & $-$0.33 & 8/8 \\
+ATC & C & \phantom{-}0.64 & \textbf{\phantom{-}0.90} & \phantom{-}0.84 & $-$0.42 & $-$0.06 & $-$0.38 & 8/8 \\
+ATC (neg. entropy) & C & \phantom{-}0.47 & \phantom{-}0.87 & \phantom{-}0.83 & $-$0.39 & $-$0.08 & $-$0.38 & 8/8 \\
+AvgEnergy & C & \phantom{-}0.23 & \phantom{-}0.58 & \phantom{-}0.72 & $-$0.50 & $-$0.26 & $-$0.35 & 8/8 \\
+\cmidrule(l){1-9}
+ClassEntropy & D & \phantom{-}0.54 & $-$0.68 & \phantom{-}0.07 & \phantom{-}0.71 & \phantom{-}0.20 & \phantom{-}0.57 & 8/8 \\
+Soft rank & D & \textbf{\phantom{-}0.87} & \phantom{-}0.83 & \phantom{-}0.95 & \phantom{-}0.93 & \phantom{-}0.85 & \phantom{-}0.81 & 2/8 \\
+ASR concentration & D & \phantom{-}0.76 & \phantom{-}0.85 & \phantom{-}0.82 & \phantom{-}0.88 & \phantom{-}0.88 & \phantom{-}0.78 & 8/8 \\
+\cmidrule(l){1-9}
+\textbf{NuclearNorm} (ours) & C+D & \phantom{-}0.85 & \phantom{-}0.89 & \textbf{\phantom{-}0.96} & \textbf{\phantom{-}0.94} & \textbf{\phantom{-}0.92} & \textbf{\phantom{-}0.82} & -- \\
+IM & C+D & \phantom{-}0.86 & \phantom{-}0.84 & \phantom{-}0.94 & \textbf{\phantom{-}0.94} & \phantom{-}0.87 & \phantom{-}0.81 & 1/8 \\
+\cmidrule(l){1-9}
+Duo agreement & A & \phantom{-}0.82 & \phantom{-}0.88 & \textbf{\phantom{-}0.96} & \phantom{-}0.20 & \phantom{-}0.01 & \phantom{-}0.51 & 8/8 \\
+\midrule
+\multicolumn{9}{l}{\textit{ConvNeXt-B + DeiT-S} \quad ($L$ = ConvNeXt-B, $S$ = DeiT-S)} \\
+ConfScore & C & \phantom{-}0.74 & \phantom{-}0.93 & \phantom{-}0.76 & $-$0.06 & $-$0.11 & \phantom{-}0.15 & 8/8 \\
+Entropy & C & \phantom{-}0.68 & \phantom{-}0.89 & \phantom{-}0.67 & \phantom{-}0.01 & $-$0.13 & \phantom{-}0.06 & 8/8 \\
+ATC & C & \phantom{-}0.73 & \textbf{\phantom{-}0.95} & \phantom{-}0.74 & $-$0.02 & $-$0.15 & \phantom{-}0.12 & 8/8 \\
+ATC (neg. entropy) & C & \phantom{-}0.73 & \phantom{-}0.90 & \phantom{-}0.64 & \phantom{-}0.01 & $-$0.17 & \phantom{-}0.01 & 8/8 \\
+AvgEnergy & C & $-$0.36 & \phantom{-}0.69 & \phantom{-}0.38 & $-$0.23 & $-$0.25 & $-$0.17 & 8/8 \\
+\cmidrule(l){1-9}
+ClassEntropy & D & \phantom{-}0.55 & $-$0.25 & $-$0.58 & \phantom{-}0.57 & \phantom{-}0.39 & \phantom{-}0.04 & 8/8 \\
+Soft rank & D & \phantom{-}0.72 & \phantom{-}0.93 & \phantom{-}0.71 & \phantom{-}0.83 & \textbf{\phantom{-}0.82} & \phantom{-}0.76 & 7/8 \\
+ASR concentration & D & \phantom{-}0.72 & \phantom{-}0.91 & \phantom{-}0.83 & \phantom{-}0.65 & \phantom{-}0.79 & \textbf{\phantom{-}0.86} & 8/8 \\
+\cmidrule(l){1-9}
+\textbf{NuclearNorm} (ours) & C+D & \textbf{\phantom{-}0.78} & \phantom{-}0.93 & \phantom{-}0.77 & \textbf{\phantom{-}0.87} & \phantom{-}0.80 & \phantom{-}0.81 & -- \\
+IM & C+D & \phantom{-}0.75 & \phantom{-}0.89 & \phantom{-}0.68 & \phantom{-}0.85 & \phantom{-}0.79 & \phantom{-}0.72 & 8/8 \\
+\cmidrule(l){1-9}
+Duo agreement & A & \phantom{-}0.72 & \phantom{-}0.93 & \textbf{\phantom{-}0.89} & \phantom{-}0.49 & \phantom{-}0.30 & \phantom{-}0.23 & 8/8 \\
 \bottomrule
 \end{tabular}
 \end{table}

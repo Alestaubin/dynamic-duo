@@ -291,7 +291,7 @@ def confirm_table(store: Store, runs: Sequence[Run], seeds: Sequence[int]) -> st
 # ------------------------------------------------------------------------------------------------------------ submission
 
 JOB_PREFIX, CHAIN_PREFIX = "jg_", "jg_next_"
-EXCLUDE = "kn117,kn101,kn104,kn029,kn001,kn159"                                # nodes with an uncorrectable GPU ECC error (plan.md)
+EXCLUDE = "kn117,kn101,kn104,kn029,kn001,kn159,kn006"                               # nodes with an uncorrectable GPU ECC error (plan.md)
 SCRIPT = "scripts/02f_tune_joint_gate.py"
 
 
@@ -350,7 +350,7 @@ def chain(folder: Path, duo: str, names: Sequence[str], driver_args: Sequence[st
     if not ids:
         print("  CHAIN NOT SUBMITTED: none of the wave's jobs is in the queue to wait for")
         return False
-    argv = ["sbatch", "-t", "00:30:00", "-J", name, f"--dependency=afterok:{':'.join(ids)}", "--kill-on-invalid-dep=yes", "slurm/job_cpu.sh", SCRIPT, *driver_args]
+    argv = ["sbatch", "-t", "00:30:00", "-J", name, f"--dependency=afterok:{':'.join(ids)}", "--kill-on-invalid-dep=yes", f"--exclude={EXCLUDE}", "slurm/job_cpu.sh", SCRIPT, *driver_args]
     print(("SUBMIT  " if go else "to run  ") + " ".join(argv))
     if not go:
         return True

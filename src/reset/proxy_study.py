@@ -23,7 +23,7 @@ with its accuracy minus the frozen member's (the degradation the labels are buil
 first 16 batches of each degraded stretch minus its mean over the 32 batches before it, in units of that pre-onset window's std (negative =
 falls at collapse, what a drop detector needs).
 
-The panel (and what is left out): nnn; the confidence proxies msp (AC-MC), neg_entropy (Tent's own objective) and the source-thresholded
+The panel (and what is left out): nnn; the confidence proxies msp (ConfScore, a.k.a. AC-MC), neg_entropy (Tent's own objective) and the source-thresholded
 atc (ATC, max-confidence score) / atc_negent (ATC, negative-entropy score); energy; the diversity proxies dispersity (nnn's diversity part
 alone), asr_concentration (ASR's prediction concentration: entropy of the softmax of the batch-mean logits) and marginal_entropy (entropy of
 the batch-mean probabilities); mutual_info (diversity minus mean entropy, the other confidence + diversity proxy); agree_duo (agreement with
@@ -45,9 +45,16 @@ from src.reset import screening as SC
 from src.reset.controller import MEMBERS, RuleSpec
 
 PANEL = ("nnn", "msp", "neg_entropy", "atc", "atc_negent", "energy", "dispersity", "asr_concentration", "marginal_entropy", "mutual_info", "agree_duo")
-LABELS = {"nnn": "Nuclear norm (ours)", "msp": "AC-MC", "neg_entropy": "Neg. entropy", "atc": "ATC (max-conf.)", "atc_negent": "ATC (neg. entropy)",
-          "energy": "Energy", "dispersity": "Dispersity", "asr_concentration": "ASR concentration", "marginal_entropy": "Marginal entropy",
-          "mutual_info": "Mutual information", "agree_duo": "Duo agreement"}
+# Names follow Deng et al., "Confidence and Dispersity as Signals" (arXiv 2510.02956) where the metric is theirs (ConfScore, Entropy,
+# ATC, AvgEnergy, ClassEntropy, IM, NuclearNorm); `dispersity` here is NOT their "Dispersity" (their Eq. 8 is ClassEntropy = our
+# marginal_entropy): it is ||P||_* / ||P||_F rescaled, a soft rank, so it is labelled that way.
+LABELS = {"nnn": "NuclearNorm (ours)", "msp": "ConfScore", "neg_entropy": "Entropy", "atc": "ATC", "atc_negent": "ATC (neg. entropy)",
+          "energy": "Energy (standardized)", "avg_energy": "AvgEnergy", "dispersity": "Soft rank", "asr_concentration": "ASR concentration",
+          "marginal_entropy": "ClassEntropy", "mutual_info": "IM", "agree_duo": "Duo agreement"}
+# Deng et al.'s taxonomy (their Table I) + ours for what they do not have.
+FAMILY = {"msp": "C", "neg_entropy": "C", "atc": "C", "atc_negent": "C", "energy": "C", "avg_energy": "C",
+          "marginal_entropy": "D", "dispersity": "D", "asr_concentration": "D", "nnn": "C+D", "mutual_info": "C+D", "agree_duo": "A"}
+DERIVED = ("avg_energy",)           # computed at load time from the stored panel (no GPU run): avg_energy from energy + source statistics
 SEEDS = (0,)                        # the seeds of the calibration streams re-run (the tuning had 0 and 1 for S)
 HEALTHY_ROTATIONS = (0, 1, 2, 3)    # healthy streams: every rotation (the tuning ran 0 and 2; 1 and 3 added for the correlation study)
 RESPONSE = (32, 16)                 # collapse response: batches before the onset, batches after it
@@ -228,6 +235,10 @@ class PanelStream:
         f = np.load(frz, allow_pickle=False)
         n = len(records)
         panel = {p: np.array([r["panel"][p] for r in records], dtype=float) for p in records[0]["panel"]}
+        src = Path(run).parent / "source_stats.json"
+        if "energy" in panel and src.is_file():                # Deng et al.'s AvgEnergy (negated), recovered exactly from the stored energy score
+            st = json.loads(src.read_text())
+            panel["avg_energy"] = np.array([[pure.avg_energy_from_energy(float(r), st[m]) for r, m in zip(row, MEMBERS)] for row in panel["energy"]])
         return cls(name or Path(run).stem, panel, {m: SC.per_batch(d[k], b_t, n) for m, k in zip(MEMBERS, ("large", "small"))},
                    {m: SC.per_batch(f[k], b_t, n) for m, k in zip(MEMBERS, ("large", "small"))},
                    np.array([[r["r_l"], r["r_s"]] for r in records], dtype=float))
@@ -338,7 +349,7 @@ def summary_table(res: dict, budget: float = 1.0) -> list[dict]:
         best = next(r for r in at if r.get("best"))
         plus = next(r for r in at if r["orientation"] == "+")
         tr = [t for t in res["track"] if t["proxy"] == p]
-        rows.append({"proxy": p, "label": LABELS.get(p, p), "family": pure.PROXIES[p].family, "orientation": best["orientation"],
+        rows.append({"proxy": p, "label": LABELS.get(p, p), "family": pure.PROXIES[p].family if p in pure.PROXIES else FAMILY.get(p, ""), "orientation": best["orientation"],
                      "delay": best["delay"], "delay_detected": best["delay_detected"], "miss_rate": best["miss_rate"], "fa": best["fa"],
                      "delay_large": best.get("delay_large", float("nan")), "delay_small": best.get("delay_small", float("nan")),
                      "delay_plus": plus["delay"], "miss_plus": plus["miss_rate"],
@@ -375,7 +386,10 @@ def latex_table(tables: dict[str, list[dict]], budget: float, b_t: int, member_n
 # ------------------------------------------------------------------------------------------------------------------ correlation with accuracy
 
 # Row order of the correlation table: ours, the other diversity proxies, the confidence proxies, agreement.
-ORDER = ("nnn", "mutual_info", "dispersity", "marginal_entropy", "asr_concentration", "msp", "neg_entropy", "atc", "atc_negent", "energy", "agree_duo")
+ORDER = ("msp", "neg_entropy", "atc", "atc_negent", "avg_energy",            # confidence (Deng et al.'s order: confidence, dispersity, both)
+         "marginal_entropy", "dispersity", "asr_concentration",               # dispersity
+         "nnn", "mutual_info",                                                # confidence + dispersity
+         "agree_duo")
 REGIMES = (("H", "Healthy"), ("S", "Collapsing"))
 
 
@@ -430,20 +444,24 @@ def correlation_latex(tables: dict[str, list[dict]], member_names: dict[str, tup
              r"Spearman correlation over the proxy batches (" + str(b_t) + r" images) of one stream, averaged over the streams ("
              + n_txt + r" streams per duo). Gap: the gate's input, $s_L - s_S$, against $\mathrm{acc}_L - \mathrm{acc}_S$; "
              r"$L$ / $S$: each member's score against its own accuracy. Last column: streams in which the nuclear norm's gap correlation is at least "
-             r"the proxy's. Every proxy is oriented so that higher means more reliable. Best of each column in bold.}",
-             r"\label{tab:proxy_correlation}", r"\begin{tabular}{l rrr rrr r}", r"\toprule",
-             r" & \multicolumn{3}{c}{Healthy} & \multicolumn{3}{c}{Collapsing} & nnn $\geq$ \\",
-             r"\cmidrule(lr){2-4} \cmidrule(lr){5-7}",
-             r"Proxy & Gap & $L$ & $S$ & Gap & $L$ & $S$ & (streams) \\", r"\midrule"]
+             r"the proxy's. Type, after Deng et al.: C confidence, D dispersity, C+D both, A agreement. Every proxy is oriented so that higher means more "
+             r"reliable (AvgEnergy is negated). Best of each column in bold.}",
+             r"\label{tab:proxy_correlation}", r"\begin{tabular}{ll rrr rrr r}", r"\toprule",
+             r" & & \multicolumn{3}{c}{Healthy} & \multicolumn{3}{c}{Collapsing} & NN $\geq$ \\",
+             r"\cmidrule(lr){3-5} \cmidrule(lr){6-8}",
+             r"Proxy & Type & Gap & $L$ & $S$ & Gap & $L$ & $S$ & (streams) \\", r"\midrule"]
     for k, (duo, rows) in enumerate(tables.items()):
         if k:
             lines.append(r"\midrule")
         nm = member_names.get(duo, (duo,))
-        lines.append(r"\multicolumn{8}{l}{\textit{" + " + ".join(nm) + r"} \quad ($L$ = " + nm[0] + (f", $S$ = {nm[1]}" if len(nm) > 1 else "") + r")} \\")
+        lines.append(r"\multicolumn{9}{l}{\textit{" + " + ".join(nm) + r"} \quad ($L$ = " + nm[0] + (f", $S$ = {nm[1]}" if len(nm) > 1 else "") + r")} \\")
         best = {c: max((round(r[c], 2) for r in rows if r[c] == r[c]), default=float("nan")) for c in cols}      # ties at the shown precision: all bold
-        for r in rows:
+        for k2, r in enumerate(rows):
+            if k2 and FAMILY.get(r["proxy"]) != FAMILY.get(rows[k2 - 1]["proxy"]):
+                lines.append(r"\cmidrule(l){1-9}")
             name = r["label"].replace("(ours)", "").strip()
             name = rf"\textbf{{{name}}} (ours)" if r["proxy"] == "nnn" else name
+            name += " & " + FAMILY.get(r["proxy"], "")
             cells = [rf"\textbf{{{f(r[c])}}}" if r[c] == r[c] and round(r[c], 2) == best[c] else f(r[c]) for c in cols]
             n = r["H_n"] + r["S_n"]
             ahead = "--" if r["proxy"] == "nnn" else f"{r['H_ahead'] + r['S_ahead']}/{n}"
@@ -575,7 +593,7 @@ if __name__ == "__main__":
     assert spearman(np.arange(10.0), np.arange(10.0) ** 3) == 1.0 and abs(spearman(np.arange(10.0), -np.arange(10.0)) + 1) < 1e-12
     assert spearman(np.array([1.0, 1.0, 2.0, 3.0]), np.array([1.0, 1.0, 2.0, 3.0])) > 0.999
     tex = latex_table({"duo": summary_table(res)}, 1.0, 256, {"duo": ("A", "B")})
-    assert r"\textbf{Nuclear norm}" in tex
+    assert r"\textbf{NuclearNorm}" in tex
     assert tex.count(r"\\") >= 4 and "tab:proxy_study" in tex
     with tempfile.TemporaryDirectory() as tmp:
         p = plot_traces(streams[0], Path(tmp) / "t.png", ("A", "B"), 256, proxies=("nnn", "msp", "noise"))
@@ -587,6 +605,6 @@ if __name__ == "__main__":
     assert cor["msp"]["S_ahead"] == 3 and cor["nnn"]["S_gap"] > cor["msp"]["S_gap"]
     assert regime(PanelStream("H__heldout__rot1__L1e-05", {}, {}, {}, None)) == "H" and regime(streams[0]) == "S"
     ctex = correlation_latex({"duo": list(cor.values())}, {"duo": ("A", "B")})
-    assert "tab:proxy_correlation" in ctex and "1 healthy and 3 collapsing" in ctex and r"\textbf{Nuclear norm} (ours)" in ctex
+    assert "tab:proxy_correlation" in ctex and "1 healthy and 3 collapsing" in ctex and r"\textbf{NuclearNorm} (ours)" in ctex
     del pure.PROXIES["noise"]
     print("proxy_study self-test passed")

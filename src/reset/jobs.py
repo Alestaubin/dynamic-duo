@@ -37,7 +37,7 @@ SCRIPT = "scripts/tune_reset.py"
 TIME = {"temperatures": "01:00:00", "continual": "01:35:00", "calibration": "02:15:00", "live": "01:50:00"}
 CHAIN_PREFIX = "rt_next_"                                # the name of the job that calls the driver again after a wave
 CHAIN_TIME = "02:00:00"                                  # it may run CPU stages inline (the screens: about a minute each)
-EXCLUDE = "kn117,kn101,kn104,kn029,kn001,kn159"                                # nodes with an uncorrectable GPU ECC error (plan.md, rules for every chat)
+EXCLUDE = "kn117,kn101,kn104,kn029,kn001,kn159,kn006"                               # nodes with an uncorrectable GPU ECC error (plan.md, rules for every chat)
 KINDS = tuple(TIME)
 
 
@@ -185,7 +185,7 @@ def chain(paths: Paths, jobs: Sequence[Job], driver_args: Sequence[str], *, go: 
     if not ids:
         print("  CHAIN NOT SUBMITTED: none of the wave's jobs is in the queue to wait for")
         return False
-    argv = ["sbatch", "-t", CHAIN_TIME, "-J", name, f"--dependency=afterok:{':'.join(ids)}", "--kill-on-invalid-dep=yes", "slurm/job_cpu.sh", SCRIPT, *driver_args]
+    argv = ["sbatch", "-t", CHAIN_TIME, "-J", name, f"--dependency=afterok:{':'.join(ids)}", "--kill-on-invalid-dep=yes", f"--exclude={EXCLUDE}", "slurm/job_cpu.sh", SCRIPT, *driver_args]
     print(("SUBMIT  " if go else "to run  ") + " ".join(argv))
     if not go:
         return True

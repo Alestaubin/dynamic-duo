@@ -19,6 +19,7 @@ logits-only function cannot take. `LEGACY_KINDS` maps the kind names older confi
 | msp                | mean max p                                                                               | no  |
 | neg_entropy        | 1 - mean H(p) / log K                                                                    | no  |
 | energy             | sigmoid of the z-score of mean logsumexp(z) against the source's per-sample mean and sd  | yes |
+| (avg_energy)       | mean logsumexp(z) = -AvgEnergy of Deng et al. 2025 (T = 1); unbounded, not in PROXIES     | no  |
 | atc, atc_negent    | share of samples whose max p (or -H(p)) reaches the threshold t fitted on the source so  | yes |
 |                    | that the share equals the source accuracy (Garg et al., ICLR 2022)                       |     |
 | doc                | clip(acc_src - (msp_src - mean max p), 0, 1) (Guillory et al., ICCV 2021)                | yes |
@@ -192,6 +193,25 @@ def energy(z, T=None, source_stats=None) -> float:
     zz = z.detach().float()
     e = float(torch.logsumexp(zz / T if T else zz, dim=1).mean())
     return _unit(1.0 / (1.0 + math.exp(-max(-60.0, min(60.0, (e - st["energy_mu"]) / st["energy_sd"])))))
+
+
+@torch.no_grad()
+def avg_energy(z, T=None, source_stats=None) -> float:
+    """Deng et al.'s AvgEnergy (arXiv 2510.02956, Eq. 5) NEGATED so that higher = more reliable: mean_i T logsumexp(z_i / T), T = 1 by default.
+    UNBOUNDED, so deliberately NOT in `PROXIES` (the gate's logit link and dd_eval need [0, 1]); report-only. `energy` above is this score
+    standardized against the source statistics and squashed: energy = sigmoid((avg_energy - energy_mu) / energy_sd), so one is recovered from the
+    other exactly (`avg_energy_from_energy`)."""
+    zz = z.detach().float()
+    t = T or 1.0
+    return float(t * torch.logsumexp(zz / t, dim=1).mean())
+
+
+def avg_energy_from_energy(r: float, source_stats: dict) -> float:
+    """Invert `energy`: the batch's avg_energy from its stored energy score and the member's source statistics (exact while 0 < r < 1)."""
+    st = _need(source_stats, "energy_mu", "energy_sd", who="avg_energy_from_energy")
+    if not 0.0 < r < 1.0:
+        raise ValueError(f"energy score {r} is saturated: avg_energy cannot be recovered")
+    return st["energy_mu"] + st["energy_sd"] * math.log(r / (1.0 - r))
 
 
 @torch.no_grad()
@@ -369,5 +389,10 @@ if __name__ == "__main__":
         raise AssertionError("an unknown proxy must raise")
     except ValueError:
         pass
+    # 8. avg_energy (Deng et al.'s AvgEnergy, negated): energy is its standardized sigmoid, and the inverse recovers it
+    for zb in (moderate, diverse * 0.5 + 5.0, z_src[:256]):
+        a = avg_energy(zb)
+        assert abs(avg_energy_from_energy(energy(zb, source_stats=stats), stats) - a) < 1e-3 * max(1.0, abs(a)), (a,)
+    assert abs(avg_energy(uniform) - math.log(K)) < 1e-5 and "avg_energy" not in PROXIES
     assert len(PROXIES) == 14 and [n for n, d in PROXIES.items() if d.stateful] == ["energy", "atc", "atc_negent", "doc"]
     print("proxies (pure) self-test passed")
